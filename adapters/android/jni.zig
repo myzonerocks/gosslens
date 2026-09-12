@@ -1221,6 +1221,15 @@ export fn Java_com_gosslens_Gosslens_nativePerceptionSnapshot(env: *JniEnv, cls:
     return @intCast(@min(written, @as(usize, std.math.maxInt(i32))));
 }
 
+export fn Java_com_gosslens_Gosslens_nativePerceptionJson(env: *JniEnv, cls: jobject, session: i64, select: i32, out_buffer: jobject, capacity: i32) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return -1;
+    var written: usize = 0;
+    const status = abi.goss_session_perception_json(sessionFromHandle(session), @bitCast(select), out_bytes, @intCast(@max(capacity, 0)), &written);
+    if (status != .ok and status != .again) return -1;
+    return @intCast(@min(written, @as(usize, std.math.maxInt(i32))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeMediaCapabilities(env: *JniEnv, cls: jobject, engine: i64, out_buffer: jobject) i32 {
     _ = cls;
     const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);

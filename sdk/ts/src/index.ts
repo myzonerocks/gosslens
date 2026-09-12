@@ -3078,6 +3078,27 @@ export class GossSession {
     }
   }
 
+  /// The same record as compact JSON, for a gateway that speaks it.
+  perceptionJson(select = 0xfff): string | null {
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    try {
+      this.mod.ccall("goss_session_perception_json", "number", ["number", "number", "number", "number", "number"], [this.handle, select, 0, 0, lenPtr]);
+      const needed = this.mod.HEAPU32[lenPtr >> 2];
+      if (needed === 0) return null;
+      const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [needed]) as number;
+      try {
+        const status = this.mod.ccall("goss_session_perception_json", "number", ["number", "number", "number", "number", "number"], [this.handle, select, ptr, needed, lenPtr]);
+        if (status !== GOSS_OK) return null;
+        const written = this.mod.HEAPU32[lenPtr >> 2];
+        return new TextDecoder().decode(this.mod.HEAPU8.slice(ptr, ptr + written));
+      } finally {
+        this.mod.ccall("goss_free", null, ["number", "number"], [ptr, needed]);
+      }
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    }
+  }
+
   /// A break the page saw and the engine cannot: the camera track ended, the
   /// tab was hidden. Declared so the gap it leaves is the break rather than
   /// drift counted against the engine.

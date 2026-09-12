@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 127u
+#define GOSS_ABI_MINOR 128u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -1120,6 +1120,12 @@ goss_status goss_engine_media_capabilities(goss_engine *engine, goss_media_capab
  * not know rather than failing. GOSS_AGAIN with out_len set to the size needed
  * when the buffer is short, so a caller sizes once rather than guessing. */
 goss_status goss_session_perception_snapshot(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len);
+
+/* Any thread. The same record as compact JSON, for the agent gateways that speak
+ * it. Projected from the binary form rather than written a second time from the
+ * session, so the two cannot drift. A section this build cannot name is reported
+ * with its tag and byte length rather than dropped. */
+goss_status goss_session_perception_json(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len);
 
 /* Graph thread. Multi-source composition (Duet, Stitch, live grids). Register a
  * named RGBA source with define_source, feed it with submit_source_frame_rgba_copy,

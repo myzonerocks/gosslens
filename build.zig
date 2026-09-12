@@ -2284,7 +2284,7 @@ fn perceptionModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const key = b.fmt("goss-perception-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
     if (b.modules.get(key)) |existing| return existing;
     return b.addModule(key, .{
-        .root_source_file = b.path("core/perception/snapshot.zig"),
+        .root_source_file = b.path("core/perception/perception.zig"),
         .target = target,
         .optimize = optimize,
     });

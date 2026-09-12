@@ -385,6 +385,20 @@ public final class GossSession: @unchecked Sendable {
         return Array(probe[0..<written])
     }
 
+    /// The same record as compact JSON, for a gateway that speaks it.
+    public func perceptionJson(select: UInt32 = 0xFFF) throws -> String {
+        var needed = 0
+        let first = goss_session_perception_json(handle, select, nil, 0, &needed)
+        if first != GOSS_OK && first != GOSS_AGAIN { try checked(first) }
+        guard needed > 0 else { return "" }
+        var buffer = [UInt8](repeating: 0, count: needed)
+        var written = 0
+        try buffer.withUnsafeMutableBufferPointer { p in
+            try checked(goss_session_perception_json(handle, select, p.baseAddress, p.count, &written))
+        }
+        return String(decoding: buffer[0..<written], as: UTF8.self)
+    }
+
     // MARK: - Beauty
 
     public func enableBeauty(resourceDir: String) throws {

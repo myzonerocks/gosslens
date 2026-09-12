@@ -24,7 +24,9 @@ const gif = @import("gif");
 const jpeg = @import("jpeg");
 const color = @import("color");
 pub const media = @import("media");
-const perception = @import("perception");
+const perception_mod = @import("perception");
+const perception = perception_mod.snapshot;
+const perception_json = perception_mod.json;
 const media_recording = @import("media_recording");
 const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
@@ -294,6 +296,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_clip_step(goss_session *session, uint32_t clip, int32_t frames)",
     "goss_status goss_engine_media_capabilities(goss_engine *engine, goss_media_capabilities *out_caps)",
     "goss_status goss_session_perception_snapshot(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_perception_json(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len)",
     "goss_status goss_session_beautify_frame(goss_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out)",
     "goss_status goss_session_activate_lens(goss_session *session, const uint8_t *manifest_json, size_t manifest_len)",
     "goss_status goss_session_activate_lens_from_directory(goss_session *session, const uint8_t *bundle_path, size_t bundle_path_len)",
@@ -1279,6 +1282,9 @@ pub const Session = struct {
     /// cannot tell them apart and a clip can drive a session with no camera at
     /// all, which is what "video" in the North Star meant and did not do.
     clips: std.ArrayListUnmanaged(?Clip) = .empty,
+    /// The binary record the json projection reads, grown once and reused so a
+    /// poll every frame allocates nothing after the first.
+    perception_scratch: []u8 = &.{},
     script_inited: bool = false,
     /// Script handlers that threw, counted so a faulting script is visible.
     script_faults: u32 = 0,
@@ -5278,6 +5284,7 @@ pub fn destroySession(session: *Session) void {
         if (slot.*) |*c_| c_.deinit(session.engine.gpa);
     }
     session.clips.deinit(session.engine.gpa);
+    if (session.perception_scratch.len != 0) session.engine.gpa.free(session.perception_scratch);
     destroySounds(session);
     destroyShaderPrograms(session);
     session.shader_programs.deinit(session.engine.gpa);
@@ -8353,6 +8360,35 @@ pub export fn goss_session_perception_snapshot(session: ?*Session, select: u32, 
     const total = w.finish() catch {
         len_out.* = w.needed;
         return .again;
+    };
+    len_out.* = total;
+    return .ok;
+}
+
+/// The same record as JSON, for the agent gateways that speak it. Projected from
+/// the binary form rather than written a second time from the session: one
+/// producer of the facts and one projection of it, so the two cannot drift.
+pub export fn goss_session_perception_json(session: ?*Session, select: u32, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const len_out = out_len orelse return .invalid_argument;
+
+    // The binary record first, into the session's own scratch, grown once and
+    // reused so a poll every frame allocates nothing after the first.
+    var needed: usize = 0;
+    const probe = goss_session_perception_snapshot(session, select, null, 0, &needed);
+    if (probe != .ok and probe != .again) return probe;
+    const scratch = growScratch(s.engine.gpa, &s.perception_scratch, needed) orelse return .out_of_memory;
+    var written: usize = 0;
+    const built = goss_session_perception_snapshot(session, select, scratch.ptr, scratch.len, &written);
+    if (built != .ok) return built;
+
+    const buffer: []u8 = if (out) |p| p[0..capacity] else &.{};
+    const total = perception_json.write(scratch[0..written], buffer) catch |err| switch (err) {
+        error.Truncated => {
+            len_out.* = perception_json.size(scratch[0..written]) catch return .invalid_argument;
+            return .again;
+        },
+        error.Malformed => return .invalid_argument,
     };
     len_out.* = total;
     return .ok;
