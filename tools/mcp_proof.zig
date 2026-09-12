@@ -38,7 +38,7 @@ const requests = [_][]const u8{
 
 var failures: usize = 0;
 
-fn check(ok: bool, comptime what: []const u8) void {
+fn check(ok: bool, what: []const u8) void {
     if (ok) {
         std.debug.print("mcp-proof: PROOF {s}\n", .{what});
         return;
@@ -110,7 +110,11 @@ pub fn main(init: std.process.Init) !u8 {
     // not: it said the same thing whether the host had no screen, the session no
     // frame, or the path no file.
     check(std.mem.indexOf(u8, text, "no engine session is attached") == null, "no tool answers the one blanket refusal any more");
-    check(std.mem.indexOf(u8, text, "submit a frame first") != null, "read_perception says the session has seen nothing, not nothing at all");
+    // A session with no frame answers the record anyway, saying it has submitted
+    // none. That is the honest answer: a reader learns the state rather than
+    // getting an error it cannot act on.
+    check(std.mem.indexOf(u8, text, "frames_submitted\\\":0") != null, "read_perception answers the record, saying it has seen no frame yet");
+    check(std.mem.indexOf(u8, text, "\\\"schema\\\":1") != null, "the record a model reads carries the schema it was written against");
     check(std.mem.indexOf(u8, text, "cannot read third_party/models/does-not-exist.onnx") != null, "model_support names the file it could not read");
     check(std.mem.indexOf(u8, text, "that clip would not open") != null, "open_clip refuses a path that is not a clip, and says which way");
     check(std.mem.indexOf(u8, text, "is declared and not wired") == null, "no declared tool is left unwired");

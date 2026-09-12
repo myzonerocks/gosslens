@@ -58,6 +58,11 @@ A release moves that section under its tag with the date, and the release notes 
 - `goss_perception_select_all` answers which snapshot sections this build writes. Every SDK had been
   defaulting to a mask typed by hand, which excluded the embedding section from the day it landed.
 
+- Two devices in one room agree on where a point is by exchanging landmarks and never
+  a pose, and the transform between their origins is the full rigid one: the rotation
+  comes from the cross-covariance of the matched sets, so devices facing different ways
+  agree and a pose arrives turned as well as moved, with the fit it achieved attached.
+
 - Spatial queries answer in metres with their uncertainty attached, plane semantics are named
   channels rather than an opaque number, and anchors survive a session with their purpose and
   label but not with a confidence nothing has re-earned.

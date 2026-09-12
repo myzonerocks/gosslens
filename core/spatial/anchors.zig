@@ -359,22 +359,40 @@ pub const shared = struct {
             their_centre[i] /= n;
         }
 
-        // Translation alone, with the rotation left identity: a full singular value
-        // decomposition is the complete answer and two devices in one room are
-        // almost always within a few degrees, so this reports the fit it actually
-        // achieved rather than claiming a rotation it did not solve.
-        var transform = identity;
-        transform[12] = their_centre[0] - my_centre[0];
-        transform[13] = their_centre[1] - my_centre[1];
-        transform[14] = their_centre[2] - my_centre[2];
+        // The cross-covariance of the two centred sets. Its largest eigenvector,
+        // read as a quaternion, is the rotation that best takes one onto the
+        // other: closed form, no iteration over the points themselves.
+        var cov: [9]f32 = @splat(0);
+        for (mine) |a| {
+            for (theirs) |b| {
+                if (a.id != b.id) continue;
+                const p: [3]f32 = .{ a.x - my_centre[0], a.y - my_centre[1], a.z - my_centre[2] };
+                const q: [3]f32 = .{ b.x - their_centre[0], b.y - their_centre[1], b.z - their_centre[2] };
+                for (0..3) |r| {
+                    for (0..3) |c| cov[r * 3 + c] += p[r] * q[c];
+                }
+                break;
+            }
+        }
+        const rotation = rotationFrom(cov);
+
+        // Rotate about the sender's centroid, then carry that centroid onto the
+        // receiver's: a rotation applied about the origin would swing the whole
+        // set away by the distance between the two origins.
+        var transform = rotation;
+        const turned = rotate(rotation, my_centre);
+        transform[12] = their_centre[0] - turned[0];
+        transform[13] = their_centre[1] - turned[1];
+        transform[14] = their_centre[2] - turned[2];
 
         var squared: f32 = 0;
         for (mine) |a| {
             for (theirs) |b| {
                 if (a.id != b.id) continue;
-                const dx = (a.x + transform[12]) - b.x;
-                const dy = (a.y + transform[13]) - b.y;
-                const dz = (a.z + transform[14]) - b.z;
+                const moved = rotate(transform, .{ a.x, a.y, a.z });
+                const dx = moved[0] + transform[12] - b.x;
+                const dy = moved[1] + transform[13] - b.y;
+                const dz = moved[2] + transform[14] - b.z;
                 squared += dx * dx + dy * dy + dz * dz;
                 break;
             }
@@ -387,13 +405,118 @@ pub const shared = struct {
     }
 
     /// Moves a pose from the sender's origin into the receiver's, which is the
-    /// only thing an alignment is for.
+    /// only thing an alignment is for. The whole transform, so a pose arrives
+    /// turned as well as moved.
     pub fn apply(a: Alignment, pose: [16]f32) [16]f32 {
-        var out = pose;
-        out[12] += a.transform[12];
-        out[13] += a.transform[13];
-        out[14] += a.transform[14];
+        var out: [16]f32 = @splat(0);
+        for (0..4) |c| {
+            for (0..4) |r| {
+                var sum: f32 = 0;
+                for (0..4) |k| sum += a.transform[k * 4 + r] * pose[c * 4 + k];
+                out[c * 4 + r] = sum;
+            }
+        }
         return out;
+    }
+
+    /// A direction through a column-major transform, translation excluded: the
+    /// rotation alone, which is what a centroid and a residual both need.
+    fn rotate(m: [16]f32, v: [3]f32) [3]f32 {
+        return .{
+            m[0] * v[0] + m[4] * v[1] + m[8] * v[2],
+            m[1] * v[0] + m[5] * v[1] + m[9] * v[2],
+            m[2] * v[0] + m[6] * v[1] + m[10] * v[2],
+        };
+    }
+
+    /// The rotation best taking one centred set onto the other, from their
+    /// cross-covariance. The quaternion is the largest eigenvector of the
+    /// symmetric matrix the covariance builds, found by Jacobi rotations: a
+    /// bounded sweep over a four by four, so the cost is a constant.
+    fn rotationFrom(cov: [9]f32) [16]f32 {
+        const xx = cov[0];
+        const xy = cov[1];
+        const xz = cov[2];
+        const yx = cov[3];
+        const yy = cov[4];
+        const yz = cov[5];
+        const zx = cov[6];
+        const zy = cov[7];
+        const zz = cov[8];
+        var n: [16]f32 = .{
+            xx + yy + zz, yz - zy,       zx - xz,        xy - yx,
+            yz - zy,      xx - yy - zz,  xy + yx,        zx + xz,
+            zx - xz,      xy + yx,       -xx + yy - zz,  yz + zy,
+            xy - yx,      zx + xz,       yz + zy,        -xx - yy + zz,
+        };
+
+        var v: [16]f32 = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+        var sweep: usize = 0;
+        while (sweep < 32) : (sweep += 1) {
+            var p: usize = 0;
+            var q: usize = 1;
+            var largest: f32 = 0;
+            for (0..4) |i| {
+                for (i + 1..4) |j| {
+                    const a = @abs(n[i * 4 + j]);
+                    if (a > largest) {
+                        largest = a;
+                        p = i;
+                        q = j;
+                    }
+                }
+            }
+            if (largest < 1e-9) break;
+            const npq = n[p * 4 + q];
+            const theta = (n[q * 4 + q] - n[p * 4 + p]) / (2 * npq);
+            // The pair the rotation zeroes is written directly and the rest of
+            // each row and column follows. Updating rows and columns in two
+            // passes instead reads entries the first pass already moved.
+            const t = if (theta == 0) @as(f32, 1) else std.math.sign(theta) / (@abs(theta) + @sqrt(theta * theta + 1));
+            const c = 1 / @sqrt(t * t + 1);
+            const sn = t * c;
+            n[p * 4 + p] -= t * npq;
+            n[q * 4 + q] += t * npq;
+            n[p * 4 + q] = 0;
+            n[q * 4 + p] = 0;
+            for (0..4) |k| {
+                if (k == p or k == q) continue;
+                const akp = n[k * 4 + p];
+                const akq = n[k * 4 + q];
+                n[k * 4 + p] = c * akp - sn * akq;
+                n[p * 4 + k] = n[k * 4 + p];
+                n[k * 4 + q] = sn * akp + c * akq;
+                n[q * 4 + k] = n[k * 4 + q];
+            }
+            for (0..4) |k| {
+                const vkp = v[k * 4 + p];
+                const vkq = v[k * 4 + q];
+                v[k * 4 + p] = c * vkp - sn * vkq;
+                v[k * 4 + q] = sn * vkp + c * vkq;
+            }
+        }
+
+        var best: usize = 0;
+        for (1..4) |i| {
+            if (n[i * 4 + i] > n[best * 4 + best]) best = i;
+        }
+        var w = v[0 * 4 + best];
+        var x = v[1 * 4 + best];
+        var y = v[2 * 4 + best];
+        var z = v[3 * 4 + best];
+        const length = @sqrt(w * w + x * x + y * y + z * z);
+        if (length < 1e-12) return identity;
+        w /= length;
+        x /= length;
+        y /= length;
+        z /= length;
+
+        return .{
+            1 - 2 * (y * y + z * z), 2 * (x * y + w * z),     2 * (x * z - w * y),     0,
+            2 * (x * y - w * z),     1 - 2 * (x * x + z * z), 2 * (y * z + w * x),     0,
+            2 * (x * z + w * y),     2 * (y * z - w * x),     1 - 2 * (x * x + y * y), 0,
+            0,                       0,                       0,                       1,
+        };
     }
 };
 
@@ -422,6 +545,42 @@ test "two devices with a shared room agree on where a point is" {
     const moved = shared.apply(alignment, pose);
     try shared_testing.expectApproxEqAbs(@as(f32, 2.5), moved[12], 1e-5);
     pose[12] = 0;
+}
+
+test "two devices facing different ways agree, and a pose arrives turned" {
+    // Four landmarks in a room, and a second device whose origin is turned a
+    // quarter turn about y and stands two metres along x. A translation-only
+    // answer cannot fit this at all, which is what it used to report.
+    const mine = [_]shared.Landmark{
+        .{ .id = 1, .x = 0, .y = 0, .z = 0, .confidence = 1 },
+        .{ .id = 2, .x = 1, .y = 0, .z = 0, .confidence = 1 },
+        .{ .id = 3, .x = 0, .y = 1, .z = 0, .confidence = 1 },
+        .{ .id = 4, .x = 0, .y = 0, .z = 1, .confidence = 1 },
+    };
+    // A quarter turn about y takes (x, y, z) to (z, y, -x), then two along x.
+    var theirs: [4]shared.Landmark = undefined;
+    for (mine, 0..) |m, i| {
+        theirs[i] = .{ .id = m.id, .x = m.z + 2, .y = m.y, .z = -m.x, .confidence = 1 };
+    }
+
+    const alignment = shared.align_(&mine, &theirs);
+    try shared_testing.expectEqual(@as(usize, 4), alignment.matched);
+    try shared_testing.expectApproxEqAbs(@as(f32, 0), alignment.rms_error, 1e-4);
+    try shared_testing.expect(alignment.usable(0.01));
+
+    // The rotation itself, column-major: x goes to -z and z goes to x.
+    try shared_testing.expectApproxEqAbs(@as(f32, 0), alignment.transform[0], 1e-4);
+    try shared_testing.expectApproxEqAbs(@as(f32, -1), alignment.transform[2], 1e-4);
+    try shared_testing.expectApproxEqAbs(@as(f32, 1), alignment.transform[8], 1e-4);
+    try shared_testing.expectApproxEqAbs(@as(f32, 2), alignment.transform[12], 1e-4);
+
+    // A pose arrives turned as well as moved: a thing facing along my x faces
+    // along their negative z.
+    const pose: [16]f32 = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1 };
+    const moved = shared.apply(alignment, pose);
+    try shared_testing.expectApproxEqAbs(@as(f32, 2), moved[12], 1e-4);
+    try shared_testing.expectApproxEqAbs(@as(f32, -1), moved[14], 1e-4);
+    try shared_testing.expectApproxEqAbs(@as(f32, -1), moved[2], 1e-4);
 }
 
 test "too few landmarks is no alignment, and a bad fit is a disagreement" {

@@ -10,6 +10,7 @@ const abi = @import("abi");
 /// needs one. A client that only lists tools pays for no renderer, and a host
 /// with no renderer still gets the tools that do not need one.
 const Live = struct {
+    io: std.Io,
     engine: ?*abi.Engine = null,
     session: ?*abi.Session = null,
 
@@ -38,7 +39,7 @@ pub fn main(init: std.process.Init) !u8 {
     var stdout_buffer: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &stdout_buffer);
 
-    var live: Live = .{};
+    var live: Live = .{ .io = init.io };
     defer {
         if (live.session) |s| abi.goss_session_destroy(s);
         if (live.engine) |e| abi.goss_engine_destroy(e);
@@ -121,7 +122,7 @@ const Request = struct {
 /// Runs one tool, and answers whether it failed. What it writes is what a model
 /// reads either way: a missing precondition is an answer, an empty result is not.
 fn runTool(live: *Live, arena: std.mem.Allocator, name: []const u8, arguments: ?std.json.Value, w: *std.Io.Writer) !bool {
-    if (std.mem.eql(u8, name, "model_support")) return modelSupport(arena, arguments, w);
+    if (std.mem.eql(u8, name, "model_support")) return modelSupport(live, arena, arguments, w);
     if (std.mem.eql(u8, name, "engine_report")) return engineReport(live, w);
     if (std.mem.eql(u8, name, "remember")) return remember(arena, live, arguments, w);
     if (std.mem.eql(u8, name, "search_memory")) return searchMemory(arena, live, arguments, w);
@@ -135,12 +136,12 @@ fn runTool(live: *Live, arena: std.mem.Allocator, name: []const u8, arguments: ?
     return true;
 }
 
-fn modelSupport(arena: std.mem.Allocator, arguments: ?std.json.Value, w: *std.Io.Writer) !bool {
+fn modelSupport(live: *Live, arena: std.mem.Allocator, arguments: ?std.json.Value, w: *std.Io.Writer) !bool {
     const path = stringArg(arguments, "path") orelse {
         try w.writeAll("model_support needs a path");
         return true;
     };
-    const bytes = std.fs.cwd().readFileAlloc(arena, path, 512 << 20) catch {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(live.io, path, arena, .limited(512 << 20)) catch {
         try w.print("cannot read {s}", .{path});
         return true;
     };
@@ -257,7 +258,7 @@ fn readPerception(arena: std.mem.Allocator, live: *Live, w: *std.Io.Writer) !boo
     var needed: usize = 0;
     _ = abi.goss_session_perception_json(s, select, null, 0, &needed);
     if (needed == 0) {
-        try w.writeAll("the engine has seen nothing yet; submit a frame first");
+        try w.writeAll("the record is empty, which means the session's scope allows no section");
         return true;
     }
     const buffer = try arena.alloc(u8, needed);

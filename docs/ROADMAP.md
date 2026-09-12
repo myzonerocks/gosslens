@@ -120,9 +120,12 @@ Two devices agree on a point by exchanging landmark ids and positions in each
 sender's own frame, never a pose: a pose is meaningless in another origin. The
 alignment reports the fit it achieved and refuses fewer than three matches.
 
+The solve is the full rigid transform: the rotation is the largest eigenvector of
+the matrix the cross-covariance builds, so two devices facing different ways agree
+and a pose arrives turned as well as moved.
+
 Still open: a screen capture proven on physical Android hardware rather than on a
-host, and a rotation in the shared-anchor solve, which reports translation only
-rather than claiming a rotation it did not compute.
+host.
 
 ## Always on
 
