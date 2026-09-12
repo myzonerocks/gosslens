@@ -51,7 +51,9 @@ const fingerprint = @import("fingerprint");
 const comp = @import("layout");
 const geo = @import("geo");
 const world_mesh = @import("world_mesh");
-const font = @import("font");
+/// The built-in font, re-exported so a proof draws a scene with the engine's own
+/// glyphs rather than a second module over the same file.
+pub const font = @import("font");
 const stroke = @import("stroke");
 const wboard = @import("world_board");
 const physics = @import("physics");

@@ -483,16 +483,13 @@ fn where(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tensor {
     if (rank > 8) return error.TensorShapeMismatch;
     var shape_buf: [8]i64 = undefined;
     for (0..rank) |i| {
-        const cd = dimFromRight(c.dims, i);
-        const ad = dimFromRight(a.dims, i);
-        const bd = dimFromRight(b.dims, i);
-        const m = @max(cd, @max(ad, bd));
-        if ((cd != m and cd != 1) or (ad != m and ad != 1) or (bd != m and bd != 1)) return error.TensorShapeMismatch;
+        const m = try onnx.broadcastExtent(dimFromRight(c.dims, i), try onnx.broadcastExtent(dimFromRight(a.dims, i), dimFromRight(b.dims, i)));
         shape_buf[rank - 1 - i] = m;
     }
     const shape = ra.dupe(i64, shape_buf[0..rank]) catch return error.OutOfMemory;
     var out = try newTensor(ra, shape);
     out.dtype = if (a.dtype == b.dtype) a.dtype else .f32;
+    if (out.data.len == 0) return out;
 
     const sc = ra.alloc(usize, rank) catch return error.OutOfMemory;
     const sa = ra.alloc(usize, rank) catch return error.OutOfMemory;
@@ -525,14 +522,13 @@ fn expand(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tensor 
     if (rank > 8) return error.TensorShapeMismatch;
     var shape_buf: [8]i64 = undefined;
     for (0..rank) |i| {
-        const xd = dimFromRight(x.dims, i);
-        const wd: i64 = if (i < want_rank) @max(intAt(shape_t, want_rank - 1 - i), 1) else 1;
-        if (xd != wd and xd != 1 and wd != 1) return error.TensorShapeMismatch;
-        shape_buf[rank - 1 - i] = @max(xd, wd);
+        const wd: i64 = if (i < want_rank) @max(intAt(shape_t, want_rank - 1 - i), 0) else 1;
+        shape_buf[rank - 1 - i] = try onnx.broadcastExtent(dimFromRight(x.dims, i), wd);
     }
     const shape = ra.dupe(i64, shape_buf[0..rank]) catch return error.OutOfMemory;
     var out = try newTensor(ra, shape);
     out.dtype = x.dtype;
+    if (out.data.len == 0) return out;
     const sx = ra.alloc(usize, rank) catch return error.OutOfMemory;
     fillBroadcastStrides(x.dims, rank, shape, sx);
     var idx: [8]usize = @splat(0);

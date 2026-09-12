@@ -466,6 +466,8 @@ pub fn build(b: *std.Build) void {
 
     const media_core_tests = b.addTest(.{ .root_module = mediaCoreModule(b, target, optimize, math_module) });
     const text_core_tests = b.addTest(.{ .root_module = textModule(b, target, optimize) });
+    const screen_core_tests = b.addTest(.{ .root_module = screenModule(b, target, optimize) });
+    const memory_core_tests = b.addTest(.{ .root_module = memoryModule(b, target, optimize) });
 
     // The media harness: the checks that belong to the contracts rather than to a
     // rendered frame, so they need no window and no gpu. What needs a real
@@ -550,6 +552,8 @@ pub fn build(b: *std.Build) void {
     ci_step.dependOn(test_step);
     test_step.dependOn(&b.addRunArtifact(media_core_tests).step);
     test_step.dependOn(&b.addRunArtifact(text_core_tests).step);
+    test_step.dependOn(&b.addRunArtifact(screen_core_tests).step);
+    test_step.dependOn(&b.addRunArtifact(memory_core_tests).step);
     test_step.dependOn(&b.addRunArtifact(quiet_tests).step);
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
     test_step.dependOn(&b.addRunArtifact(bundle_tests).step);
@@ -2324,6 +2328,30 @@ fn buildQuickjsLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
 /// target and an adapter implements it rather than defining it.
 /// The perception record's format: versioned, self-describing, and pure, so a
 /// consumer can be written against it without a renderer.
+/// The memory plane: the navigable graph over the embeddings and the exact
+/// search it is measured against.
+fn memoryModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-memory-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{
+        .root_source_file = b.path("core/memory/memory.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+/// Screens as a source: the surface geometry, the coordinate mapping that puts
+/// an agent's point on a real pixel, and the structured layer the platform knows.
+fn screenModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-screen-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{
+        .root_source_file = b.path("core/screen/screen.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
 /// The text rail: region geometry, detector post-processing, rectification and
 /// recognition. Memoized like the other core modules, because two modules over
 /// one file collide the moment a compile pulls in both.

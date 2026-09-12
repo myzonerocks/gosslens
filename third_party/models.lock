@@ -139,5 +139,23 @@
             .sha256 = "fcf51f1b230362b28690bb9d1809bf0431f29cad20534e3f589bd7285547f20d",
             .license = "Apache-2.0",
         },
+        .{
+            .name = "text_det.onnx",
+            .url = "https://huggingface.co/webnn/PP-OCRv4-ONNX/resolve/main/ch_PP-OCRv4_det.onnx",
+            .sha256 = "30a86f5731181461d08021402766601e4302a9b9b9666be8aff402696339cdff",
+            .license = "Apache-2.0",
+        },
+        .{
+            .name = "text_rec.onnx",
+            .url = "https://huggingface.co/webnn/PP-OCRv4-ONNX/resolve/main/ch_PP-OCRv4_rec.onnx",
+            .sha256 = "06b3e6af6c59a1ba5d53790ed8c2e4b2de389870b6cf5a97f349f3412cb269c0",
+            .license = "Apache-2.0",
+        },
+        .{
+            .name = "text_keys.txt",
+            .url = "https://huggingface.co/webnn/PP-OCRv4-ONNX/resolve/main/ch_PP-OCR_keys_v1.txt",
+            .sha256 = "28b2362ad4ab2dc38769aa72feb535e3a9ddb3fd2a7585a05920e6393b1dc7f7",
+            .license = "Apache-2.0",
+        },
     },
 }

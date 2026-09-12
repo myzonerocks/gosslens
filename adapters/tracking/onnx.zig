@@ -970,6 +970,11 @@ fn runNodeAt(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMap
     if (try control.dispatchMulti(ra, node, table, depth)) return;
     const out = try dispatch(ra, node, table);
     if (node.outputs.len == 0) return error.InvokeFailed;
+    // A tensor's dims and its data must agree. Every crash this engine has had
+    // on a real model was one kernel trusting the dims and walking past the
+    // data, so the invariant is checked once here rather than in each kernel,
+    // and a violation is a refusal instead of a read off the end.
+    if (out.elemCount() != out.data.len) return error.TensorShapeMismatch;
     table.put(ra, node.outputs[0], out) catch return error.OutOfMemory;
 }
 
@@ -1174,12 +1179,10 @@ pub fn binary(ra: std.mem.Allocator, a: Tensor, b: Tensor, comptime f: fn (f32, 
     var shape = ra.alloc(i64, rank) catch return error.OutOfMemory;
     var i: usize = 0;
     while (i < rank) : (i += 1) {
-        const ad = dimFromRight(a.dims, i);
-        const bd = dimFromRight(b.dims, i);
-        if (ad != bd and ad != 1 and bd != 1) return error.TensorShapeMismatch;
-        shape[rank - 1 - i] = @max(ad, bd);
+        shape[rank - 1 - i] = try broadcastExtent(dimFromRight(a.dims, i), dimFromRight(b.dims, i));
     }
     const out = try newTensor(ra, shape);
+    if (out.data.len == 0) return out;
 
     const strides_a = ra.alloc(usize, rank) catch return error.OutOfMemory;
     const strides_b = ra.alloc(usize, rank) catch return error.OutOfMemory;
@@ -1201,9 +1204,26 @@ pub fn binary(ra: std.mem.Allocator, a: Tensor, b: Tensor, comptime f: fn (f32, 
     return out;
 }
 
+/// The extent two operands agree on for one axis. A zero extent against a one
+/// or another zero is zero, the way numpy and ONNX both have it; against
+/// anything else it is a mismatch rather than a shape that claims elements
+/// neither operand holds.
+pub fn broadcastExtent(ad: i64, bd: i64) Error!i64 {
+    if (ad == 0 or bd == 0) {
+        if ((ad != 0 and ad != 1) or (bd != 0 and bd != 1)) return error.TensorShapeMismatch;
+        return 0;
+    }
+    if (ad != bd and ad != 1 and bd != 1) return error.TensorShapeMismatch;
+    return @max(ad, bd);
+}
+
+/// The extent of one axis counted from the right, or one for an axis the
+/// operand does not have, which is what broadcasting means. A real zero is
+/// returned as zero: calling it one claims elements the tensor does not hold,
+/// and a graph that produces a zero-sized tensor is legal ONNX.
 pub fn dimFromRight(dims: []const i64, from_right: usize) i64 {
     if (from_right >= dims.len) return 1;
-    return @max(dims[dims.len - 1 - from_right], 1);
+    return @max(dims[dims.len - 1 - from_right], 0);
 }
 
 pub fn fillBroadcastStrides(dims: []const i64, rank: usize, shape: []const i64, out: []usize) void {
@@ -1307,6 +1327,11 @@ pub fn matmul(ra: std.mem.Allocator, a: Tensor, b: Tensor) Error!Tensor {
     }
     const out_shape = ra.dupe(i64, out_shape_buf[0..out_rank]) catch return error.OutOfMemory;
     const out = try newTensor(ra, out_shape);
+    if (out.data.len == 0) return out;
+    // The dims are what the graph says; the data is what the tensor holds. A
+    // walk that trusts the first without checking the second reads off the end
+    // of an operand whose own shape carried a zero.
+    if (a.data.len < m * k or b.data.len < k * n) return error.TensorShapeMismatch;
 
     // Strides over the batch axes alone, zeroed where an operand broadcasts, so
     // a weight shared across every head is read in place rather than copied.
@@ -1430,6 +1455,7 @@ pub fn conv(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMapU
     if (bias) |bt| if (bt.data.len < m) return error.TensorShapeMismatch;
 
     const out = try newTensor(ra, &.{ @intCast(n), @intCast(m), @intCast(oh), @intCast(ow) });
+    if (out.data.len == 0) return out;
     const mpg = m / group; // output channels per group
 
     // One weight at a time across a whole output row. With unit stride and
@@ -1546,6 +1572,7 @@ fn globalAvgPool(ra: std.mem.Allocator, x: Tensor) Error!Tensor {
     const h: usize = @intCast(x.dims[2]);
     const wd: usize = @intCast(x.dims[3]);
     const out = try newTensor(ra, &.{ @intCast(n), @intCast(c), 1, 1 });
+    if (out.data.len == 0) return out;
     const plane = h * wd;
     for (0..n) |ni| {
         for (0..c) |ci| {
@@ -1566,12 +1593,18 @@ fn batchNorm(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMap
     const varr = try in(table, node, 4);
     if (x.dims.len < 2) return error.TensorShapeMismatch;
     const eps = node.attrFloat("epsilon", 1e-5);
-    const channels: usize = @intCast(x.dims[1]);
+    const channels: usize = @intCast(@max(x.dims[1], 0));
+    // The extents are the real ones. Treating a zero dim as one here counted
+    // elements the allocation below does not hold, and a graph that produces a
+    // zero-sized tensor is legal ONNX, not a malformed model.
     var plane: usize = 1;
-    for (x.dims[2..]) |d| plane *= @intCast(@max(d, 1));
-    const batch: usize = @intCast(x.dims[0]);
+    for (x.dims[2..]) |d| plane *= @intCast(@max(d, 0));
+    const batch: usize = @intCast(@max(x.dims[0], 0));
 
     const out = try newTensor(ra, x.dims);
+    if (out.data.len == 0) return out;
+    if (scale.data.len < channels or bias.data.len < channels or
+        mean.data.len < channels or varr.data.len < channels) return error.TensorShapeMismatch;
     for (0..batch) |b| {
         for (0..channels) |ch| {
             const inv = 1.0 / @sqrt(varr.data[ch] + eps);
@@ -1954,6 +1987,7 @@ fn instanceNorm(ra: std.mem.Allocator, node: *const Node, table: *std.StringHash
     for (x.dims[2..]) |d| plane *= @intCast(@max(d, 1));
 
     const out = try newTensor(ra, x.dims);
+    if (out.data.len == 0) return out;
     for (0..batch) |b| {
         for (0..channels) |ch| {
             const base = (b * channels + ch) * plane;
@@ -3453,4 +3487,34 @@ test "onnx survives a mutated protobuf without crashing or leaking" {
         engine.writeInput(0, std.mem.sliceAsBytes(&x)) catch continue;
         engine.invoke() catch continue;
     }
+}
+
+test "a zero-sized tensor flows through the graph instead of overrunning it" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Slicing a row to nothing is legal ONNX and a real detector head does it.
+    // Every kernel downstream must answer the empty tensor rather than walk the
+    // extents it would have had: three of them walked, and crashed.
+    const spec: GraphSpec = .{
+        .nodes = &.{
+            nodeProto(a, .{ .op = "Slice", .inputs = &.{ "x", "starts", "ends" }, .outputs = &.{"empty"} }),
+            nodeProto(a, .{ .op = "Mul", .inputs = &.{ "empty", "two" }, .outputs = &.{"scaled"} }),
+            nodeProto(a, .{ .op = "BatchNormalization", .inputs = &.{ "scaled", "s", "b", "m", "v" }, .outputs = &.{"y"} }),
+        },
+        .inits = &.{
+            typedTensorProto(a, "starts", &.{1}, &.{2}, 7),
+            typedTensorProto(a, "ends", &.{1}, &.{2}, 7),
+            tensorProto(a, "two", &.{1}, &.{2}),
+            tensorProto(a, "s", &.{1}, &.{1}),
+            tensorProto(a, "b", &.{1}, &.{0}),
+            tensorProto(a, "m", &.{1}, &.{0}),
+            tensorProto(a, "v", &.{1}, &.{1}),
+        },
+        .inputs = &.{valueInfo(a, "x", &.{ 1, 1, 4 })},
+        .outputs = &.{valueInfo(a, "y", &.{ 1, 1, 0 })},
+    };
+    const out = try runOnce(a, spec, &.{ 1, 2, 3, 4 });
+    try testing.expectEqual(@as(usize, 0), out.len);
 }

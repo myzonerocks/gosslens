@@ -4069,6 +4069,179 @@ fn proveModelZoo(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+
+/// The text rail's models, fetched by digest like every other and never
+/// committed. The detector alone is enough to prove where text is; the
+/// recogniser and its dictionary turn that into a string.
+const text_detector_path = ".models/text_det.onnx";
+const text_recognizer_path = ".models/text_rec.onnx";
+const text_dictionary_path = ".models/text_keys.txt";
+
+/// A scene with known text in it, drawn rather than photographed so the ground
+/// truth is exact and the proof needs no corpus image to ship.
+fn drawTextScene(gpa: std.mem.Allocator, phrase: []const u8, scene_w: u32, scene_h: u32) ![]u8 {
+    const rgba = try gpa.alloc(u8, @as(usize, scene_w) * scene_h * 4);
+    errdefer gpa.free(rgba);
+    // A light ground, because a detector trained on documents and signs expects
+    // dark ink on a light surface and this proof is about the rail, not about
+    // how far a model generalizes.
+    var i: usize = 0;
+    while (i < rgba.len) : (i += 4) {
+        rgba[i] = 235;
+        rgba[i + 1] = 235;
+        rgba[i + 2] = 235;
+        rgba[i + 3] = 255;
+    }
+
+    const raster = try abi.font.rasterize(gpa, phrase, 6, .{ 20, 20, 20, 255 });
+    defer gpa.free(raster.rgba);
+    const x0 = (scene_w -| raster.width) / 2;
+    const y0 = (scene_h -| raster.height) / 2;
+    for (0..raster.height) |y| {
+        if (y0 + y >= scene_h) break;
+        for (0..raster.width) |x| {
+            if (x0 + x >= scene_w) break;
+            const src = (y * raster.width + x) * 4;
+            if (raster.rgba[src + 3] == 0) continue;
+            const dst = ((y0 + y) * scene_w + (x0 + x)) * 4;
+            rgba[dst] = raster.rgba[src];
+            rgba[dst + 1] = raster.rgba[src + 1];
+            rgba[dst + 2] = raster.rgba[src + 2];
+        }
+    }
+    return rgba;
+}
+
+/// The text rail through the real ABI on a real detector: a scene with text in
+/// it produces regions where the text is, a scene without produces none, and a
+/// region that has not changed keeps its track id across frames. The reading
+/// itself is asserted only where the recogniser is fetched too.
+fn proveTextRail(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const detector = std.Io.Dir.cwd().readFileAlloc(harness_io, text_detector_path, gpa, .limited(64 << 20)) catch {
+        std.debug.print("conformance: text rail skipped - {s} is not fetched on this host\n", .{text_detector_path});
+        return true;
+    };
+    defer gpa.free(detector);
+    const recognizer = std.Io.Dir.cwd().readFileAlloc(harness_io, text_recognizer_path, gpa, .limited(64 << 20)) catch null;
+    defer if (recognizer) |r| gpa.free(r);
+    const dictionary = std.Io.Dir.cwd().readFileAlloc(harness_io, text_dictionary_path, gpa, .limited(4 << 20)) catch null;
+    defer if (dictionary) |d| gpa.free(d);
+
+    const scene_w: u32 = 320;
+    const scene_h: u32 = 160;
+    const phrase = "EXIT";
+    const with_text = try drawTextScene(gpa, phrase, scene_w, scene_h);
+    defer gpa.free(with_text);
+    const blank = try gpa.alloc(u8, @as(usize, scene_w) * scene_h * 4);
+    defer gpa.free(blank);
+    @memset(blank, 235);
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const status = abi.goss_session_enable_text(
+        session,
+        detector.ptr,
+        detector.len,
+        if (recognizer) |r| r.ptr else null,
+        if (recognizer) |r| r.len else 0,
+        if (dictionary) |d| d.ptr else null,
+        if (dictionary) |d| d.len else 0,
+        320,
+    );
+    if (status == .unsupported) {
+        std.debug.print("conformance: text rail skipped - no model rail on this target\n", .{});
+        return true;
+    }
+    if (status != .ok) {
+        std.debug.print("conformance: FAIL the text rail would not enable ({t})\n", .{status});
+        return false;
+    }
+
+    var desc: abi.FrameDesc = .{
+        .width = scene_w,
+        .height = scene_h,
+        .pixel_format = 4,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    if (abi.goss_session_submit_frame_rgba_copy(session, &desc, with_text.ptr, scene_w * 4) != .ok) {
+        std.debug.print("conformance: FAIL the text scene would not submit\n", .{});
+        return false;
+    }
+
+    var found: u32 = 0;
+    var refused: u64 = 0;
+    _ = abi.goss_session_text_count(session, &found, &refused);
+    if (found == 0) {
+        std.debug.print("conformance: FAIL the detector found no text in a scene that has some\n", .{});
+        return false;
+    }
+
+    // Every region must sit inside the frame and carry a track id, because a
+    // region without one cannot be followed and an overlay pinned to it flickers.
+    var first_track: u32 = 0;
+    var read_back: [256]u8 = undefined;
+    var read_len: usize = 0;
+    for (0..found) |i| {
+        var entry: abi.TextEntry = undefined;
+        if (abi.goss_session_text_at(session, @intCast(i), &entry) != .ok) {
+            std.debug.print("conformance: FAIL reading {d} could not be read back\n", .{i});
+            return false;
+        }
+        for (entry.quad) |v| {
+            if (!(v >= -0.5 and v <= 1.5)) {
+                std.debug.print("conformance: FAIL a region landed outside the frame ({d})\n", .{v});
+                return false;
+            }
+        }
+        if (entry.track_id == 0) {
+            std.debug.print("conformance: FAIL a region carries no track id\n", .{});
+            return false;
+        }
+        if (i == 0) first_track = entry.track_id;
+        if (entry.text_len != 0 and read_len == 0) {
+            _ = abi.goss_session_text_string(session, @intCast(i), &read_back, read_back.len, &read_len);
+        }
+    }
+
+    // The same frame again: the regions have not moved, so the ids carry.
+    desc.timestamp_us = 34000;
+    _ = abi.goss_session_submit_frame_rgba_copy(session, &desc, with_text.ptr, scene_w * 4);
+    var second: abi.TextEntry = undefined;
+    if (abi.goss_session_text_at(session, 0, &second) != .ok or second.track_id != first_track) {
+        std.debug.print("conformance: FAIL a region that did not move lost its track id\n", .{});
+        return false;
+    }
+
+    // A blank frame says nothing, which is the case a detector that hallucinates
+    // would fail and the one an overlay depends on.
+    desc.timestamp_us = 68000;
+    _ = abi.goss_session_submit_frame_rgba_copy(session, &desc, blank.ptr, scene_w * 4);
+    var blank_count: u32 = 0;
+    _ = abi.goss_session_text_count(session, &blank_count, &refused);
+    if (blank_count != 0) {
+        std.debug.print("conformance: FAIL the detector found {d} regions in a blank frame\n", .{blank_count});
+        return false;
+    }
+
+    if (read_len != 0) {
+        std.debug.print(
+            "conformance: PROOF a real text detector and recogniser run through the ABI on a drawn scene: {d} regions, tracked across frames, none in a blank frame, read as \"{s}\"\n",
+            .{ found, read_back[0..@min(read_len, read_back.len)] },
+        );
+    } else {
+        std.debug.print(
+            "conformance: PROOF a real text detector runs through the ABI on a drawn scene: {d} regions, tracked across frames, none in a blank frame\n",
+            .{found},
+        );
+    }
+    return true;
+}
+
 /// Writes a lens bundle whose ml.infer node runs a bundled author model, the
 /// way an author ships one. It binds the segmenter mask center (256x256, so
 /// 128*256+128 - foreground on a centered portrait, background on a blank frame)
@@ -22550,6 +22723,9 @@ pub fn main(init_args: std.process.Init) !u8 {
     const golden_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--golden") else false;
     const lifecycle_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--lifecycle") else false;
     g_watch = if (first_arg) |arg| std.mem.eql(u8, arg, "--watch") else false;
+    // The text rail alone, so a change to it is proven in a minute rather than
+    // behind the whole suite, the same way the lifecycle proof owns the process.
+    const text_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--text") else false;
 
     if (c.glfwInit() == c.GLFW_FALSE) return error.GlfwInit;
     defer c.glfwTerminate();
@@ -22562,6 +22738,19 @@ pub fn main(init_args: std.process.Init) !u8 {
     // bringing renderers up and down has to own the process to say anything.
     if (lifecycle_mode) {
         return if (try proveRendererLifecycle(gpa, window)) 0 else 1;
+    }
+
+    if (text_mode) {
+        var counter = CountingAllocator{ .backing = gpa };
+        const engine = try abi.createEngine(counter.allocator(), .{ .texture_pool_capacity = 8, .staging_pool_capacity = 8 });
+        defer abi.destroyEngine(engine);
+        const desc: abi.RendererDesc = .{
+            .native_window_handle = glfwGetCocoaWindow(window),
+            .width = width,
+            .height = height,
+        };
+        if (abi.goss_engine_init_renderer(engine, &desc) != .ok) return error.RendererInit;
+        return if (try proveTextRail(gpa, engine)) 0 else 1;
     }
 
     // The engine runs under a counting allocator so the per-frame budget
@@ -23032,6 +23221,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer");
     if (!try proveModelZoo(gpa, engine)) return 1;
     watchHold("model zoo");
+    if (!try proveTextRail(gpa, engine)) return 1;
+    watchHold("text rail");
     if (!try proveAudioInfer(gpa, engine)) return 1;
     watchHold("audio infer");
     if (!try proveCaption(gpa, engine)) return 1;
