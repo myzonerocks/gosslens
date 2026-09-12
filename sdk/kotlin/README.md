@@ -520,6 +520,16 @@ GossScreenCapture.grant(widthPx, heightPx, density, "Phone display")
 val screen = session.openScreen(surfaceId)
 session.stepScreen(screen)
 
+// The room it is in: the floor, where a cup goes, a distance with its doubt, and
+// what another device's origin is in this one.
+val floor = session.floorPlaneId()
+session.placeOn(width = 0.1f, depth = 0.1f, height = 0.12f).forEach {
+    println("${it.planeId} ${it.position.toList()} ${it.freeFraction}")
+}
+val span = session.measureBetween(a, b, fromAccuracyM = 0.01f, toAccuracyM = 0.01f)
+val alignment = session.alignShared(theirLandmarks)
+val route = session.pathAcrossWorld(here, there)
+
 // And what this session will answer at all.
 session.setScope(-1, 0)
 ```

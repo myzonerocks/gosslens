@@ -457,7 +457,7 @@ and `clearLayout` tear the composition back down.
 ## The agent rail
 
 One versioned record of everything the engine sees, what the frame says, what it
-remembers, and the screen it is looking at.
+remembers, the screen it is looking at, and the room it is in.
 
 ```swift
 // What the engine sees, as one record and as JSON.
@@ -485,6 +485,17 @@ let surfaces = try engine.screens()
 let screen = try session.openScreen(surfaceId: surfaces[0].id)
 _ = session.stepScreen(screen)
 let landing = try session.screenPoint(screen, x: 0.5, y: 0.5)
+
+// The room it is in: which surface is the floor, where a cup goes, how far apart
+// two points are with the doubt that comes with them, and what another device's
+// origin is in this one.
+let floor = session.floorPlaneID()
+for spot in session.placeOn(width: 0.1, depth: 0.1, height: 0.12) {
+    print(spot.planeID, spot.position, spot.freeFraction)
+}
+let span = session.measure(from: a, fromAccuracyM: 0.01, to: b, toAccuracyM: 0.01)
+let alignment = session.alignShared(theirLandmarks)
+let route = session.pathAcrossWorld(start: here, goal: there)
 
 // And what this session will answer at all.
 try session.setScope(sections: 0xFFFF_FFFF, verbs: 0)

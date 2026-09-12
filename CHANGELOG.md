@@ -66,9 +66,15 @@ A release moves that section under its tag with the date, and the release notes 
   comes from the cross-covariance of the matched sets, so devices facing different ways
   agree and a pose arrives turned as well as moved, with the fit it achieved attached.
 
-- Spatial queries answer in metres with their uncertainty attached, plane semantics are named
-  channels rather than an opaque number, and anchors survive a session with their purpose and
-  label but not with a confidence nothing has re-earned.
+- A walkable route across the submitted world mesh, so an agent walks content over real
+  scanned ground rather than through it. Refused when no mesh is submitted or no route exists,
+  because a caller can act on "not here" and cannot act on an empty list.
+
+- Spatial state is reachable: six ops answer over the planes and anchors a host already submits,
+  so an agent asks which surface is the floor, where a footprint fits and how much of that surface
+  it leaves, what a distance is with the uncertainty its inputs carried, and what the transform
+  between two devices' origins is. Anchors survive a session with their purpose and label, and
+  never with a confidence nothing has re-earned.
 
 - Scope: a host narrows what a session answers with two words, the sections a caller may read and
   the verbs it may act with. A read out of scope is dropped from the record; a verb out of scope is

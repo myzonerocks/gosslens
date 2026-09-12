@@ -233,6 +233,13 @@ the capability is present on all three platforms; only the mechanism differs.
 | `goss_session_hit_test` | `hitTest(session, screenX, screenY)` raycasts a normalized screen point onto the tracked ground plane, returning the world hit position or null until tracking is live and the ray meets the plane | Swift `Session.hitTest`, Kotlin `hitTest`, TS `hitTest` |
 | `goss_session_submit_world_mesh` | `submitWorldMesh(vertices, indices)` submits the device's pre-scanned world mesh (scene reconstruction, a VPS scan) in world space as xyz triples and per-triangle indices; empty clears it | all SDKs |
 | `goss_session_raycast_world_mesh` | `raycastWorldMesh(origin, direction) -> (point, distance)?` casts a world-space ray against the submitted mesh, returning the nearest surface hit or null when no mesh is submitted or the ray misses, so a tap-to-place lens anchors content on scanned geometry | all SDKs |
+| `goss_session_path_across_world` | `pathAcrossWorld(start, goal) -> [point]?` a walkable route over the submitted world mesh, null when no mesh is submitted or no route exists, so an agent walks content across real scanned ground | all SDKs |
+| `goss_session_plane_kind` | `planeKind(planeId) -> (kind, bearing)?` a submitted plane as a named kind rather than the platform's own number, and whether a thing can rest on it | all SDKs |
+| `goss_session_floor_plane` | `floorPlaneId() -> id?` the lowest bearing surface the session has been shown, null when it has been shown none | all SDKs |
+| `goss_session_place_on` | `placeOn(width, depth, height, occupants) -> [placement]` where a footprint fits, best surface first: the bearing plane with the most room left afterwards, each answer carrying the fraction of that surface still free | all SDKs |
+| `goss_session_measure_between` | `measureBetween(from, to, fromAccuracy, toAccuracy) -> (metres, sigma, known)?` point to point with the uncertainty that follows from each end's accuracy; `known` is false when either end vouched for none | all SDKs |
+| `goss_session_shared_landmarks` | `sharedLandmarks() -> [landmark]` what this device can offer another: one landmark per world anchor it holds, in its own frame, never a pose | all SDKs |
+| `goss_session_align_shared` | `alignShared(theirs) -> (transform, rmsError, matched)?` the transform from the sender's origin into this one, solved over the landmarks both recognise, null under three matches | all SDKs |
 
 ### GossSession lifecycle
 

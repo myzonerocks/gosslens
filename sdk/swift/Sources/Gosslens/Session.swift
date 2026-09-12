@@ -256,6 +256,139 @@ public final class GossSession: @unchecked Sendable {
         return ok ? (point, distance) : nil
     }
 
+    /// A walkable route over the submitted world mesh, so an agent walks content
+    /// across real scanned ground. Nil when no mesh is submitted or no route exists.
+    public func pathAcrossWorld(start: SIMD3<Float>, goal: SIMD3<Float>) -> [SIMD3<Float>]? {
+        var a = start
+        var b = goal
+        var found = 0
+        var points = [Float](repeating: 0, count: 3 * 256)
+        let status = withUnsafePointer(to: &a) { ap in ap.withMemoryRebound(to: Float.self, capacity: 3) { afp in
+            withUnsafePointer(to: &b) { bp in bp.withMemoryRebound(to: Float.self, capacity: 3) { bfp in
+                goss_session_path_across_world(handle, afp, bfp, &points, 256, &found)
+            } }
+        } }
+        guard status == GOSS_OK else { return nil }
+        return (0..<min(found, 256)).map { SIMD3(points[$0 * 3], points[$0 * 3 + 1], points[$0 * 3 + 2]) }
+    }
+
+    /// What a submitted plane is, as a named kind rather than the platform's own
+    /// number, and whether a thing can rest on it.
+    public enum PlaneKind: UInt32 {
+        case unknown = 0, floor = 1, wall = 2, ceiling = 3, table = 4, seat = 5, door = 6, window = 7, screen = 8
+    }
+
+    public func planeKind(planeID: UInt64) -> (kind: PlaneKind, bearing: Bool)? {
+        var kind: UInt32 = 0
+        var bearing: UInt32 = 0
+        guard goss_session_plane_kind(handle, planeID, &kind, &bearing) == GOSS_OK else { return nil }
+        return (PlaneKind(rawValue: kind) ?? .unknown, bearing == 1)
+    }
+
+    /// The plane this session would call the floor: the lowest bearing surface it
+    /// has been shown, or nil when it has been shown none.
+    public func floorPlaneID() -> UInt64? {
+        var id: UInt64 = 0
+        guard goss_session_floor_plane(handle, &id) == GOSS_OK else { return nil }
+        return id
+    }
+
+    /// Something already on a plane, so a placement answers about the surface as
+    /// it is now rather than as it was detected.
+    public struct Occupant {
+        public let planeID: UInt64
+        public let x: Float
+        public let z: Float
+        public let width: Float
+        public let depth: Float
+
+        public init(planeID: UInt64, x: Float, z: Float, width: Float, depth: Float) {
+            self.planeID = planeID
+            self.x = x
+            self.z = z
+            self.width = width
+            self.depth = depth
+        }
+    }
+
+    public struct Placement {
+        public let planeID: UInt64
+        public let position: SIMD3<Float>
+        /// How much of the plane is still free afterwards, as a fraction.
+        public let freeFraction: Float
+    }
+
+    /// Where this footprint fits, best surface first: the bearing plane with the
+    /// most room left afterwards. An empty array is an answer.
+    public func placeOn(width: Float, depth: Float, height: Float = 0, occupants: [Occupant] = []) -> [Placement] {
+        var item = goss_footprint(width: width, depth: depth, height: height)
+        var taken = occupants.map {
+            goss_occupant(plane_id: $0.planeID, x: $0.x, z: $0.z, width: $0.width, depth: $0.depth)
+        }
+        var found = 0
+        var out = [goss_placement](repeating: goss_placement(), count: 32)
+        let status = goss_session_place_on(handle, &item, taken.isEmpty ? nil : &taken, taken.count, &out, out.count, &found)
+        guard status == GOSS_OK || status == GOSS_AGAIN else { return [] }
+        return out.prefix(min(found, out.count)).map {
+            Placement(planeID: $0.plane_id, position: SIMD3($0.position.0, $0.position.1, $0.position.2), freeFraction: $0.free_fraction)
+        }
+    }
+
+    /// Point to point in metres with its uncertainty. `known` is false when either
+    /// end vouched for no accuracy, so a sigma of zero is never read as certainty.
+    public func measure(from: SIMD3<Float>, fromAccuracyM: Float = 0, to: SIMD3<Float>, toAccuracyM: Float = 0) -> (metres: Float, sigma: Float, known: Bool)? {
+        var a = from
+        var b = to
+        var metres: Float = 0
+        var sigma: Float = 0
+        var known: UInt32 = 0
+        let ok = withUnsafePointer(to: &a) { ap in ap.withMemoryRebound(to: Float.self, capacity: 3) { afp in
+            withUnsafePointer(to: &b) { bp in bp.withMemoryRebound(to: Float.self, capacity: 3) { bfp in
+                goss_session_measure_between(handle, afp, fromAccuracyM, bfp, toAccuracyM, &metres, &sigma, &known) == GOSS_OK
+            } }
+        } }
+        return ok ? (metres, sigma, known == 1) : nil
+    }
+
+    /// One landmark as it crosses to another device. No pose: a pose means nothing
+    /// in another origin.
+    public struct SharedLandmark {
+        public let id: UInt64
+        public let position: SIMD3<Float>
+        public let confidence: Float
+
+        public init(id: UInt64, position: SIMD3<Float>, confidence: Float = 1) {
+            self.id = id
+            self.position = position
+            self.confidence = confidence
+        }
+    }
+
+    /// What this device can offer another: one landmark per world anchor it holds.
+    public func sharedLandmarks() -> [SharedLandmark] {
+        var found = 0
+        var out = [goss_shared_landmark](repeating: goss_shared_landmark(), count: 32)
+        let status = goss_session_shared_landmarks(handle, &out, out.count, &found)
+        guard status == GOSS_OK || status == GOSS_AGAIN else { return [] }
+        return out.prefix(min(found, out.count)).map {
+            SharedLandmark(id: $0.id, position: SIMD3($0.x, $0.y, $0.z), confidence: $0.confidence)
+        }
+    }
+
+    /// The transform from the sender's origin into this one, column-major, with the
+    /// fit it achieved. Nil when fewer than three landmarks matched, which cannot
+    /// fix a rigid transform.
+    public func alignShared(_ theirs: [SharedLandmark]) -> (transform: [Float], rmsError: Float, matched: UInt32)? {
+        var list = theirs.map {
+            goss_shared_landmark(id: $0.id, x: $0.position.x, y: $0.position.y, z: $0.position.z, confidence: $0.confidence)
+        }
+        var transform = [Float](repeating: 0, count: 16)
+        var rms: Float = 0
+        var matched: UInt32 = 0
+        let ok = goss_session_align_shared(handle, list.isEmpty ? nil : &list, list.count, &transform, &rms, &matched) == GOSS_OK
+        return ok ? (transform, rms, matched) : nil
+    }
+
     /// The stable track id of the index-th face, an integer that stays with the
     /// same person across frames as the submission order shuffles, or nil once
     /// index reaches the face count.

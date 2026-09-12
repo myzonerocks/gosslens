@@ -154,24 +154,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const particles_module = b.createModule(.{
-        .root_source_file = b.path("core/particles/particles.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const navmesh_module = b.createModule(.{
-        .root_source_file = b.path("core/nav/navmesh.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const sph_module = b.createModule(.{
-        .root_source_file = b.path("core/particles/sph.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
     // The host export layer carries the render stub: unit tests cannot
     // exercise Metal, and the harness plus device demos are the executable
     // truth for the real backend. Platform libraries built by the ios step
@@ -315,11 +297,6 @@ pub fn build(b: *std.Build) void {
         ci_step.dependOn(&models_check.step);
     }
 
-    const blob_module = b.createModule(.{
-        .root_source_file = b.path("adapters/bgfx/blob.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
     const tracking_cores = trackingCoreModules(b, target, optimize, math_module);
     const bundle_module = tracking_cores.bundle;
     const detector_module = tracking_cores.detector;
@@ -352,6 +329,8 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("media_recording", recordingModule(b, target, optimize, math_module));
     abi_module.addImport("media", mediaCoreModule(b, target, optimize, math_module));
     abi_module.addImport("perception", perceptionModule(b, target, optimize));
+    abi_module.addImport("spatial", spatialModule(b, target, optimize, math_module));
+    abi_module.addImport("navmesh", navmeshModule(b, target, optimize));
     abi_module.addImport("text", textModule(b, target, optimize));
     abi_module.addImport("memory", memoryModule(b, target, optimize));
     abi_module.addImport("screen", screenModule(b, target, optimize));
@@ -497,7 +476,7 @@ pub fn build(b: *std.Build) void {
     const screen_core_tests = b.addTest(.{ .root_module = screenModule(b, target, optimize) });
     const screen_capture_tests = b.addTest(.{ .root_module = screenCaptureModule(b, target, optimize) });
     const memory_core_tests = b.addTest(.{ .root_module = memoryModule(b, target, optimize) });
-    const spatial_core_tests = b.addTest(.{ .root_module = spatialModule(b, target, optimize) });
+    const spatial_core_tests = b.addTest(.{ .root_module = spatialModule(b, target, optimize, math_module) });
     // The determinism gate: the same input stream must produce the same records.
     const determinism_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("harness/determinism.zig"),
@@ -542,11 +521,10 @@ pub fn build(b: *std.Build) void {
     const tracker_tests = b.addTest(.{ .root_module = tracker_module });
     const face106_tests = b.addTest(.{ .root_module = face106_module });
     const segment_tests = b.addTest(.{ .root_module = segment_module });
-    const blob_tests = b.addTest(.{ .root_module = blob_module });
+    const blob_tests = b.addTest(.{ .root_module = blobModule(b, target, optimize) });
     const math_tests = b.addTest(.{ .root_module = math_module });
     const material_tests = b.addTest(.{ .root_module = material_module });
-    const fit_module = b.createModule(.{ .root_source_file = b.path("core/math/fit.zig"), .target = target, .optimize = optimize });
-    const fit_tests = b.addTest(.{ .root_module = fit_module });
+    const fit_tests = b.addTest(.{ .root_module = fitModule(b, target, optimize) });
     const png_tests = b.addTest(.{ .root_module = pngModule(b, target, optimize) });
     const gif_tests = b.addTest(.{ .root_module = gifModule(b, target, optimize) });
     const jpeg_tests = b.addTest(.{ .root_module = jpegModule(b, target, optimize) });
@@ -658,9 +636,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(blob_tests).step);
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
     test_step.dependOn(&b.addRunArtifact(material_tests).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = particles_module })).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = navmesh_module })).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sph_module })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = particlesModule(b, target, optimize) })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = navmeshModule(b, target, optimize) })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sphModule(b, target, optimize) })).step);
     test_step.dependOn(&b.addRunArtifact(fit_tests).step);
     test_step.dependOn(&b.addRunArtifact(png_tests).step);
     test_step.dependOn(&b.addRunArtifact(gif_tests).step);
@@ -1054,6 +1032,8 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("media_recording", recordingModule(b, target, optimize, math_module));
         abi_tracking_module.addImport("media", mediaCoreModule(b, target, optimize, math_module));
         abi_tracking_module.addImport("perception", perceptionModule(b, target, optimize));
+        abi_tracking_module.addImport("spatial", spatialModule(b, target, optimize, math_module));
+        abi_tracking_module.addImport("navmesh", navmeshModule(b, target, optimize));
         abi_tracking_module.addImport("text", textModule(b, target, optimize));
         abi_tracking_module.addImport("memory", memoryModule(b, target, optimize));
         abi_tracking_module.addImport("screen", screenModule(b, target, optimize));
@@ -1336,6 +1316,8 @@ pub fn build(b: *std.Build) void {
         abi_wasm.addImport("media_recording", recordingModule(b, wasm_target, opt_small, math_wasm));
         abi_wasm.addImport("media", mediaCoreModule(b, wasm_target, opt_small, math_wasm));
         abi_wasm.addImport("perception", perceptionModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("spatial", spatialModule(b, wasm_target, opt_small, math_wasm));
+        abi_wasm.addImport("navmesh", navmeshModule(b, wasm_target, opt_small));
         abi_wasm.addImport("text", textModule(b, wasm_target, opt_small));
         abi_wasm.addImport("memory", memoryModule(b, wasm_target, opt_small));
         abi_wasm.addImport("screen", screenModule(b, wasm_target, opt_small));
@@ -1569,6 +1551,8 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("media_recording", recordingModule(b, target, optimize, math_module));
         abi_conformance_module.addImport("media", mediaCoreModule(b, target, optimize, math_module));
         abi_conformance_module.addImport("perception", perceptionModule(b, target, optimize));
+        abi_conformance_module.addImport("spatial", spatialModule(b, target, optimize, math_module));
+        abi_conformance_module.addImport("navmesh", navmeshModule(b, target, optimize));
         abi_conformance_module.addImport("text", textModule(b, target, optimize));
         abi_conformance_module.addImport("memory", memoryModule(b, target, optimize));
         abi_conformance_module.addImport("screen", screenModule(b, target, optimize));
@@ -2012,6 +1996,8 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     abi_android.addImport("media_recording", recordingModule(b, android_target, optimize, math_android));
     abi_android.addImport("media", mediaCoreModule(b, android_target, optimize, math_android));
     abi_android.addImport("perception", perceptionModule(b, android_target, optimize));
+    abi_android.addImport("spatial", spatialModule(b, android_target, optimize, math_android));
+    abi_android.addImport("navmesh", navmeshModule(b, android_target, optimize));
     abi_android.addImport("audio_analysis", audioAnalysisModule(b, android_target, optimize));
     abi_android.addImport("audio_mix", audioMixModule(b, android_target, optimize));
     abi_android.addImport("sfx", sfxModule(b, android_target, optimize));
@@ -2417,14 +2403,51 @@ fn buildQuickjsLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     return b.addLibrary(.{ .name = "quickjs", .linkage = .static, .root_module = module });
 }
 
+/// The blob the renderer reads a packed asset out of. Memoized so one compile
+/// never pulls in two modules over the same file.
+fn blobModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-blob-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{
+        .root_source_file = b.path("adapters/bgfx/blob.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+/// Weighted similarity fitting, which the shared-anchor solve reads through the
+/// math module and its own tests read directly.
+fn fitModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-fit-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{
+        .root_source_file = b.path("core/math/fit.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+/// Navigation over the submitted world mesh: the walkable triangles, their
+/// adjacency, and the search that routes between two points on them.
+fn navmeshModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-navmesh-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{
+        .root_source_file = b.path("core/nav/navmesh.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
 /// Spatial semantics: what a plane is, and the placement questions asked of it.
-fn spatialModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+fn spatialModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math: *std.Build.Module) *std.Build.Module {
     const key = b.fmt("goss-spatial-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
     if (b.modules.get(key)) |existing| return existing;
     return b.addModule(key, .{
         .root_source_file = b.path("core/spatial/spatial.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{.{ .name = "math", .module = math }},
     });
 }
 
@@ -4779,6 +4802,8 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("media_recording", recordingModule(b, ios_target, optimize, math_ios));
     abi_ios.addImport("media", mediaCoreModule(b, ios_target, optimize, math_ios));
     abi_ios.addImport("perception", perceptionModule(b, ios_target, optimize));
+    abi_ios.addImport("spatial", spatialModule(b, ios_target, optimize, math_ios));
+    abi_ios.addImport("navmesh", navmeshModule(b, ios_target, optimize));
     abi_ios.addImport("media_video", mediaVideoModule(b, ios_target, optimize, null));
     abi_ios.addImport("photo", photoModule(b, ios_target, optimize, null));
     abi_ios.addImport("audio_analysis", audioAnalysisModule(b, ios_target, optimize));
@@ -5440,6 +5465,8 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("media_recording", recordingModule(b, em_target, opt_small, math_em));
     abi_em.addImport("media", mediaCoreModule(b, em_target, opt_small, math_em));
     abi_em.addImport("perception", perceptionModule(b, em_target, opt_small));
+    abi_em.addImport("spatial", spatialModule(b, em_target, opt_small, math_em));
+    abi_em.addImport("navmesh", navmeshModule(b, em_target, opt_small));
     abi_em.addImport("media_video", mediaVideoModule(b, em_target, opt_small, null));
     abi_em.addImport("photo", photoModule(b, em_target, opt_small, null));
     abi_em.addImport("audio_analysis", audioAnalysisModule(b, em_target, opt_small));

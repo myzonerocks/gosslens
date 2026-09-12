@@ -3,6 +3,7 @@
 //! carries a purpose and a label in a versioned file.
 
 const std = @import("std");
+const math = @import("math");
 
 pub const Error = error{ OutOfMemory, Corrupt, Full, NotFound };
 
@@ -331,6 +332,10 @@ pub const shared = struct {
 
     const identity: [16]f32 = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 
+    /// The most landmarks one alignment reads. They arrive from another device, so
+    /// the count is bounded here rather than trusted.
+    const max_shared_landmarks = 64;
+
     /// Solves for the rigid transform taking the sender's landmarks onto the
     /// receiver's, over the ids both sides recognise. Translation from the
     /// centroids and rotation from the cross-covariance, which is the closed-form
@@ -359,31 +364,53 @@ pub const shared = struct {
             their_centre[i] /= n;
         }
 
-        // The cross-covariance of the two centred sets. Its largest eigenvector,
-        // read as a quaternion, is the rotation that best takes one onto the
-        // other: closed form, no iteration over the points themselves.
-        var cov: [9]f32 = @splat(0);
+        // The shared fit: Horn's method over the weighted clouds, which the engine
+        // already had. Confidence is the weight, so a landmark one side was sure of
+        // pulls harder than a guess.
+        var pairs: [max_shared_landmarks]math.fit.WeightedPoint = undefined;
+        var pair_count: usize = 0;
         for (mine) |a| {
             for (theirs) |b| {
                 if (a.id != b.id) continue;
-                const p: [3]f32 = .{ a.x - my_centre[0], a.y - my_centre[1], a.z - my_centre[2] };
-                const q: [3]f32 = .{ b.x - their_centre[0], b.y - their_centre[1], b.z - their_centre[2] };
-                for (0..3) |r| {
-                    for (0..3) |c| cov[r * 3 + c] += p[r] * q[c];
-                }
+                if (pair_count >= pairs.len) break;
+                pairs[pair_count] = .{
+                    .source = .{ a.x, a.y, a.z },
+                    .target = .{ b.x, b.y, b.z },
+                    .weight = @max(0, @min(a.confidence, b.confidence)),
+                };
+                pair_count += 1;
                 break;
             }
         }
-        const rotation = rotationFrom(cov);
+        const fitted = math.fit.fitSimilarity(pairs[0..pair_count]) orelse return .none;
 
-        // Rotate about the sender's centroid, then carry that centroid onto the
-        // receiver's: a rotation applied about the origin would swing the whole
-        // set away by the distance between the two origins.
-        var transform = rotation;
-        const turned = rotate(rotation, my_centre);
-        transform[12] = their_centre[0] - turned[0];
-        transform[13] = their_centre[1] - turned[1];
-        transform[14] = their_centre[2] - turned[2];
+        // Two devices measuring the same room in metres agree on scale, so the fit's
+        // scale is divided out rather than carried: a rigid transform is the physical
+        // answer, and a scale fitted from noise would stretch the other origin.
+        var transform: [16]f32 = undefined;
+        for (0..4) |c| {
+            // Copied to an array first: a vector cannot be indexed by a value the
+            // compiler does not know.
+            const column: [4]f32 = fitted.cols[c];
+            for (0..4) |r| transform[c * 4 + r] = column[r];
+        }
+        var scale: f32 = 0;
+        for (0..3) |c| {
+            const col = [3]f32{ transform[c * 4], transform[c * 4 + 1], transform[c * 4 + 2] };
+            scale += @sqrt(col[0] * col[0] + col[1] * col[1] + col[2] * col[2]);
+        }
+        scale /= 3;
+        if (scale > 1e-6) {
+            for (0..3) |c| {
+                for (0..3) |r| transform[c * 4 + r] /= scale;
+            }
+            // The translation follows the unscaled rotation, so it is rebuilt rather
+            // than divided: dividing it would move the origin by the scale error.
+            const turned = rotate(transform, my_centre);
+            transform[12] = their_centre[0] - turned[0];
+            transform[13] = their_centre[1] - turned[1];
+            transform[14] = their_centre[2] - turned[2];
+        }
 
         var squared: f32 = 0;
         for (mine) |a| {
@@ -429,95 +456,6 @@ pub const shared = struct {
         };
     }
 
-    /// The rotation best taking one centred set onto the other, from their
-    /// cross-covariance. The quaternion is the largest eigenvector of the
-    /// symmetric matrix the covariance builds, found by Jacobi rotations: a
-    /// bounded sweep over a four by four, so the cost is a constant.
-    fn rotationFrom(cov: [9]f32) [16]f32 {
-        const xx = cov[0];
-        const xy = cov[1];
-        const xz = cov[2];
-        const yx = cov[3];
-        const yy = cov[4];
-        const yz = cov[5];
-        const zx = cov[6];
-        const zy = cov[7];
-        const zz = cov[8];
-        var n: [16]f32 = .{
-            xx + yy + zz, yz - zy,       zx - xz,        xy - yx,
-            yz - zy,      xx - yy - zz,  xy + yx,        zx + xz,
-            zx - xz,      xy + yx,       -xx + yy - zz,  yz + zy,
-            xy - yx,      zx + xz,       yz + zy,        -xx - yy + zz,
-        };
-
-        var v: [16]f32 = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
-        var sweep: usize = 0;
-        while (sweep < 32) : (sweep += 1) {
-            var p: usize = 0;
-            var q: usize = 1;
-            var largest: f32 = 0;
-            for (0..4) |i| {
-                for (i + 1..4) |j| {
-                    const a = @abs(n[i * 4 + j]);
-                    if (a > largest) {
-                        largest = a;
-                        p = i;
-                        q = j;
-                    }
-                }
-            }
-            if (largest < 1e-9) break;
-            const npq = n[p * 4 + q];
-            const theta = (n[q * 4 + q] - n[p * 4 + p]) / (2 * npq);
-            // The pair the rotation zeroes is written directly and the rest of
-            // each row and column follows. Updating rows and columns in two
-            // passes instead reads entries the first pass already moved.
-            const t = if (theta == 0) @as(f32, 1) else std.math.sign(theta) / (@abs(theta) + @sqrt(theta * theta + 1));
-            const c = 1 / @sqrt(t * t + 1);
-            const sn = t * c;
-            n[p * 4 + p] -= t * npq;
-            n[q * 4 + q] += t * npq;
-            n[p * 4 + q] = 0;
-            n[q * 4 + p] = 0;
-            for (0..4) |k| {
-                if (k == p or k == q) continue;
-                const akp = n[k * 4 + p];
-                const akq = n[k * 4 + q];
-                n[k * 4 + p] = c * akp - sn * akq;
-                n[p * 4 + k] = n[k * 4 + p];
-                n[k * 4 + q] = sn * akp + c * akq;
-                n[q * 4 + k] = n[k * 4 + q];
-            }
-            for (0..4) |k| {
-                const vkp = v[k * 4 + p];
-                const vkq = v[k * 4 + q];
-                v[k * 4 + p] = c * vkp - sn * vkq;
-                v[k * 4 + q] = sn * vkp + c * vkq;
-            }
-        }
-
-        var best: usize = 0;
-        for (1..4) |i| {
-            if (n[i * 4 + i] > n[best * 4 + best]) best = i;
-        }
-        var w = v[0 * 4 + best];
-        var x = v[1 * 4 + best];
-        var y = v[2 * 4 + best];
-        var z = v[3 * 4 + best];
-        const length = @sqrt(w * w + x * x + y * y + z * z);
-        if (length < 1e-12) return identity;
-        w /= length;
-        x /= length;
-        y /= length;
-        z /= length;
-
-        return .{
-            1 - 2 * (y * y + z * z), 2 * (x * y + w * z),     2 * (x * z - w * y),     0,
-            2 * (x * y - w * z),     1 - 2 * (x * x + z * z), 2 * (y * z + w * x),     0,
-            2 * (x * z + w * y),     2 * (y * z - w * x),     1 - 2 * (x * x + y * y), 0,
-            0,                       0,                       0,                       1,
-        };
-    }
 };
 
 const shared_testing = std.testing;

@@ -15,9 +15,9 @@ and act back into the frame.**
 
 </div>
 
-Retouching and makeup, face, hand and body tracking, background removal, AR
-effects, and capture, on iOS, Android and the web. It hands you each frame and
-composites what you draw back, ships compiled, and makes no network calls.
+A camera, a clip or a screen in, one versioned record of what is in it out, and
+whatever you draw composited back, on iOS, Android and the web. Tracking,
+segmentation, retouching and capture ride the same core, compiled, offline.
 
 ## Install
 
@@ -65,6 +65,7 @@ or the [C SDK](sdk/c/README.md) for any other language with a C FFI.
 - **For agents** - one versioned record of everything the engine sees, an event stream, budgeted frame egress, and annotations an agent draws back into the frame. An [MCP server](docs/MCP.md) makes all of it tools a model can call.
 - **What the frame says** - text detection and recognition on the engine's own ONNX rail: oriented regions, reading order, and a track id that survives a frame.
 - **Screens** - a display or a window is a source like any other, with the scale factor and desktop origin that put a coordinate back on a real pixel: ScreenCaptureKit, MediaProjection, or getDisplayMedia.
+- **Spatial state** - which surface is the floor, where a thing fits and how much of that surface it leaves, a distance with the uncertainty its inputs carried, and the transform between two devices' origins.
 - **Memory** - an on-device index over embeddings with the keyframe selection that decides what was worth remembering, and the search that finds it again.
 - **Beauty and makeup** - smooth, whiten, reshape, lipstick, and blush, each a live 0-to-1 control.
 - **Tracking** - multi-face, hands with gestures, and full-body pose, plus selfie segmentation for virtual backgrounds.

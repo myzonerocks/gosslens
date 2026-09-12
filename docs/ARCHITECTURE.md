@@ -227,6 +227,11 @@ What an agent needs sits on the same seams, not beside them.
   behind one seam (`adapters/screen/`): ScreenCaptureKit on Apple, MediaProjection
   on Android whose consent dialog only an Activity can show, and getDisplayMedia
   in the web SDK where the browser owns the picker.
+- **Spatial state** (`core/spatial/`) answers the questions an agent asks of a
+  room it did not measure: a plane as a named kind rather than a platform number,
+  where a footprint fits ordered by the room each surface keeps, a distance with
+  the uncertainty its inputs carried, and the transform between two devices'
+  origins solved from landmarks rather than a pose neither could read.
 - **Scope** (`core/perception/scope.zig`) is two words: the sections a caller may
   read and the verbs it may act with. A read out of scope is dropped from the
   record; a verb out of scope is refused.

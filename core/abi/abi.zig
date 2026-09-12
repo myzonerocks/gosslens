@@ -54,6 +54,8 @@ const fingerprint = @import("fingerprint");
 const comp = @import("layout");
 const geo = @import("geo");
 const world_mesh = @import("world_mesh");
+const navmesh = @import("navmesh");
+const spatial = @import("spatial");
 /// The built-in font, re-exported so a proof draws a scene with the engine's own
 /// glyphs rather than a second module over the same file.
 pub const font = @import("font");
@@ -178,7 +180,14 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_submit_audio(goss_session *session, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t timestamp_us)",
     "goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light)",
     "goss_status goss_session_submit_world_mesh(goss_session *session, const float *vertices, size_t vertex_count, const uint32_t *indices, size_t index_count)",
+    "goss_status goss_session_plane_kind(goss_session *session, uint64_t plane_id, uint32_t *out_kind, uint32_t *out_bearing)",
+    "goss_status goss_session_floor_plane(goss_session *session, uint64_t *out_plane_id)",
+    "goss_status goss_session_place_on(goss_session *session, const goss_footprint *item, const goss_occupant *occupants, size_t occupant_count, goss_placement *out, size_t capacity, size_t *out_count)",
+    "goss_status goss_session_measure_between(goss_session *session, const float *from, float from_accuracy_m, const float *to, float to_accuracy_m, float *out_metres, float *out_sigma, uint32_t *out_known)",
+    "goss_status goss_session_shared_landmarks(goss_session *session, goss_shared_landmark *out, size_t capacity, size_t *out_count)",
+    "goss_status goss_session_align_shared(goss_session *session, const goss_shared_landmark *theirs, size_t count, float *out_transform, float *out_rms_error, uint32_t *out_matched)",
     "goss_status goss_session_raycast_world_mesh(goss_session *session, const float *origin, const float *direction, float *out_point, float *out_distance)",
+    "goss_status goss_session_path_across_world(goss_session *session, const float *start, const float *goal, float *out_points, size_t capacity, size_t *out_count)",
     "goss_status goss_session_hit_test(goss_session *session, float screen_x, float screen_y, float *out_position)",
     "goss_status goss_engine_capture_still(goss_engine *engine, goss_session *session, const goss_capture_config *config, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height)",
     "goss_status goss_engine_capture_live_frame(goss_engine *engine, goss_session *session, uint32_t format, uint8_t *out_data, size_t out_capacity, uint32_t *out_width, uint32_t *out_height)",
@@ -764,6 +773,12 @@ const WorldStore = struct {
     // owned by the session allocator, for raycast anchoring onto scanned surfaces.
     mesh_vertices: []const [3]f32 = &.{},
     mesh_indices: []const u32 = &.{},
+    // The navigation mesh over that mesh, built on the first route asked for and
+    // kept until the mesh is replaced: building it is linear in the triangles, and
+    // a lens asking once a frame should not pay that again for ground that has not
+    // moved. The triangles are held because the nav mesh borrows them.
+    nav: ?navmesh.NavMesh = null,
+    nav_triangles: []const [3]u32 = &.{},
 };
 
 const identity16 = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
@@ -5577,6 +5592,7 @@ pub fn destroySession(session: *Session) void {
     session.model_body_anchors.deinit(session.engine.gpa);
     session.model_skeleton_anchors.deinit(session.engine.gpa);
     session.model_world_anchors.deinit(session.engine.gpa);
+    clearNav(session);
     if (session.world.mesh_vertices.len > 0) session.engine.gpa.free(session.world.mesh_vertices);
     if (session.world.mesh_indices.len > 0) session.engine.gpa.free(session.world.mesh_indices);
     if (session.physics_world) |world| world.destroy();
@@ -6506,6 +6522,277 @@ pub const max_world_anchors = 32;
 /// the world.tracking_state signal and world-anchored lens content.
 /// Planes and anchors beyond the fixed capacity are dropped oldest
 /// last (the platform lists closest-first), counted, never silent.
+/// A footprint an agent wants to put somewhere, in metres. Height is asked for
+/// even on a flat surface, because it is what decides whether a thing fits under
+/// a shelf.
+pub const Footprint = extern struct {
+    width: f32,
+    depth: f32,
+    height: f32,
+};
+
+/// Where a footprint can go: which plane, where on it in world space, and how
+/// much of that surface stays free, so a caller can prefer the answer that keeps
+/// the room usable.
+pub const Placement = extern struct {
+    plane_id: u64,
+    position: [3]f32,
+    free_fraction: f32,
+};
+
+/// Something already on a plane, on that plane's own axes in metres from its
+/// centre, so a placement answers about the surface as it is now.
+pub const Occupant = extern struct {
+    plane_id: u64,
+    x: f32,
+    z: f32,
+    width: f32,
+    depth: f32,
+};
+
+/// One landmark as it crosses between two devices. No pose: a pose means nothing
+/// in another origin. The id is what both sides recognise and the position is in
+/// the sender's own frame, read only for the distances between landmarks.
+pub const SharedLandmark = extern struct {
+    id: u64,
+    x: f32,
+    y: f32,
+    z: f32,
+    confidence: f32,
+};
+
+/// What a plane is, as a named kind rather than the platform's own number: the
+/// platforms agree on more than their enums suggest, and a caller wanting a
+/// surface it can put something on should ask that.
+pub export fn goss_session_plane_kind(session: ?*Session, plane_id: u64, out_kind: ?*u32, out_bearing: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allows(.world)) return .unsupported;
+    const kind_out = out_kind orelse return .invalid_argument;
+    for (s.world.planes[0..s.world.plane_count]) |plane| {
+        if (plane.id != plane_id) continue;
+        const kind = spatialKind(plane.classification);
+        kind_out.* = @intFromEnum(kind);
+        if (out_bearing) |b| b.* = if (kind.bearing()) 1 else 0;
+        return .ok;
+    }
+    // An id this session was never shown is the caller's mistake, not a state to
+    // wait on: nothing later makes a plane it never submitted appear.
+    return .invalid_argument;
+}
+
+/// The plane this session would call the floor, which is the lowest bearing
+/// surface it has been shown. Not found rather than a guess when it has none.
+pub export fn goss_session_floor_plane(session: ?*Session, out_plane_id: ?*u64) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allows(.world)) return .unsupported;
+    const out = out_plane_id orelse return .invalid_argument;
+    var buffer: [max_world_planes]spatial.Plane = undefined;
+    const planes = spatialPlanes(s, &buffer);
+    // Nothing yet rather than a refusal: a host that has shown no bearing plane
+    // may show one on the next frame.
+    const floor = spatial.floorOf(planes) orelse return .again;
+    out.* = floor.id;
+    return .ok;
+}
+
+/// Where this footprint fits, best surface first: the bearing plane with the most
+/// room left afterwards. Zero placements is an answer, and the caller's own
+/// occupants are taken into account.
+pub export fn goss_session_place_on(
+    session: ?*Session,
+    item: ?*const Footprint,
+    occupants: ?[*]const Occupant,
+    occupant_count: usize,
+    out: ?[*]Placement,
+    capacity: usize,
+    out_count: ?*usize,
+) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allows(.world)) return .unsupported;
+    const f = item orelse return .invalid_argument;
+    const count_out = out_count orelse return .invalid_argument;
+    if (occupant_count > 0 and occupants == null) return .invalid_argument;
+    if (capacity > 0 and out == null) return .invalid_argument;
+
+    var plane_buffer: [max_world_planes]spatial.Plane = undefined;
+    const planes = spatialPlanes(s, &plane_buffer);
+
+    var occupant_buffer: [max_spatial_occupants]spatial.Occupant = undefined;
+    const taken = @min(occupant_count, occupant_buffer.len);
+    if (occupants) |list| {
+        for (0..taken) |i| {
+            occupant_buffer[i] = .{
+                .plane_id = list[i].plane_id,
+                .x = list[i].x,
+                .z = list[i].z,
+                .width = list[i].width,
+                .depth = list[i].depth,
+            };
+        }
+    }
+
+    var answers: [max_world_planes]spatial.Placement = undefined;
+    const found = spatial.placeOn(planes, occupant_buffer[0..taken], .{
+        .width = f.width,
+        .depth = f.depth,
+        .height = f.height,
+    }, &answers);
+    count_out.* = found;
+    const written = @min(found, capacity);
+    if (out) |dst| {
+        for (0..written) |i| {
+            dst[i] = .{
+                .plane_id = answers[i].plane_id,
+                .position = answers[i].position,
+                .free_fraction = answers[i].free_fraction,
+            };
+        }
+    }
+    if (found > capacity) return .again;
+    return .ok;
+}
+
+/// Point to point in metres, with the uncertainty that follows from the accuracy
+/// each end carried. `out_known` is zero when either end vouched for nothing, so
+/// a caller never reads a sigma of zero as certainty.
+pub export fn goss_session_measure_between(
+    session: ?*Session,
+    from: ?[*]const f32,
+    from_accuracy_m: f32,
+    to: ?[*]const f32,
+    to_accuracy_m: f32,
+    out_metres: ?*f32,
+    out_sigma: ?*f32,
+    out_known: ?*u32,
+) Status {
+    // Nothing of the session is read: the two points are the caller's own, so a
+    // narrowed scope has nothing to withhold here.
+    _ = session;
+    const a = from orelse return .invalid_argument;
+    const b = to orelse return .invalid_argument;
+    const value_out = out_metres orelse return .invalid_argument;
+    const measured = spatial.measure.distance(
+        .{ .x = a[0], .y = a[1], .z = a[2], .accuracy = accuracyOf(from_accuracy_m) },
+        .{ .x = b[0], .y = b[1], .z = b[2], .accuracy = accuracyOf(to_accuracy_m) },
+    );
+    value_out.* = measured.value;
+    if (out_sigma) |sigma| sigma.* = measured.sigma;
+    if (out_known) |known| known.* = if (measured.known) 1 else 0;
+    return .ok;
+}
+
+/// What this device can offer another: one landmark per world anchor it holds, in
+/// its own frame. A pose never crosses, because a pose in another origin is
+/// meaningless.
+pub export fn goss_session_shared_landmarks(session: ?*Session, out: ?[*]SharedLandmark, capacity: usize, out_count: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allows(.world)) return .unsupported;
+    const count_out = out_count orelse return .invalid_argument;
+    count_out.* = s.world.anchor_count;
+    const written = @min(s.world.anchor_count, capacity);
+    if (out) |dst| {
+        for (0..written) |i| {
+            const a = s.world.anchors[i];
+            dst[i] = .{
+                .id = a.id,
+                .x = a.pose[12],
+                .y = a.pose[13],
+                .z = a.pose[14],
+                .confidence = 1,
+            };
+        }
+    }
+    if (s.world.anchor_count > capacity) return .again;
+    return .ok;
+}
+
+/// The transform from the sender's origin into this one, solved over the
+/// landmarks both sides recognise, with the fit it achieved attached. Fewer than
+/// three matches is no alignment rather than the identity.
+pub export fn goss_session_align_shared(
+    session: ?*Session,
+    theirs: ?[*]const SharedLandmark,
+    count: usize,
+    out_transform: ?[*]f32,
+    out_rms_error: ?*f32,
+    out_matched: ?*u32,
+) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allows(.world)) return .unsupported;
+    const list = theirs orelse return .invalid_argument;
+    const transform_out = out_transform orelse return .invalid_argument;
+
+    var mine_buffer: [max_world_anchors]spatial.anchors.shared.Landmark = undefined;
+    for (0..s.world.anchor_count) |i| {
+        const a = s.world.anchors[i];
+        mine_buffer[i] = .{ .id = a.id, .x = a.pose[12], .y = a.pose[13], .z = a.pose[14], .confidence = 1 };
+    }
+    var their_buffer: [max_shared_landmarks]spatial.anchors.shared.Landmark = undefined;
+    const taken = @min(count, their_buffer.len);
+    for (0..taken) |i| {
+        their_buffer[i] = .{
+            .id = list[i].id,
+            .x = list[i].x,
+            .y = list[i].y,
+            .z = list[i].z,
+            .confidence = list[i].confidence,
+        };
+    }
+
+    const alignment = spatial.anchors.shared.align_(mine_buffer[0..s.world.anchor_count], their_buffer[0..taken]);
+    @memcpy(transform_out[0..16], &alignment.transform);
+    if (out_rms_error) |rms| rms.* = alignment.rms_error;
+    if (out_matched) |matched| matched.* = @intCast(alignment.matched);
+    if (alignment.matched < 3) return .again;
+    return .ok;
+}
+
+/// The most occupants a placement query reads, and the most landmarks an
+/// alignment takes from the other device. Both are bounded because both arrive
+/// from outside.
+pub const max_spatial_occupants = 64;
+pub const max_shared_landmarks = 64;
+
+/// The platform's own plane number as a named kind. The numbering is the one the
+/// world rail documents, and anything outside it is unknown rather than guessed.
+fn spatialKind(classification: u32) spatial.PlaneKind {
+    return switch (classification) {
+        1 => .floor,
+        2 => .wall,
+        3 => .ceiling,
+        4 => .table,
+        5 => .seat,
+        6 => .door,
+        7 => .window,
+        8 => .screen,
+        else => .unknown,
+    };
+}
+
+/// The session's submitted planes in the spatial rail's own shape, so the queries
+/// read what the host last showed rather than a copy that can go stale.
+fn spatialPlanes(s: *Session, buffer: []spatial.Plane) []const spatial.Plane {
+    const count = @min(s.world.plane_count, buffer.len);
+    for (0..count) |i| {
+        const p = s.world.planes[i];
+        buffer[i] = .{
+            .id = p.id,
+            .pose = p.pose,
+            .extent_x = p.extent_x,
+            .extent_z = p.extent_z,
+            .kind = spatialKind(p.classification),
+        };
+    }
+    return buffer[0..count];
+}
+
+/// An accuracy in metres as the rail's own grade. A non-positive figure is a
+/// caller vouching for nothing, which the measurement then carries.
+fn accuracyOf(metres: f32) spatial.measure.Accuracy {
+    if (!(metres > 0)) return .unknown;
+    return spatial.measure.Accuracy.of(metres);
+}
+
 pub export fn goss_session_submit_world(session: ?*Session, state: ?*const WorldState, planes: ?[*]const WorldPlane, plane_count: usize, anchors: ?[*]const WorldAnchor, anchor_count: usize, light: ?*const WorldLight) Status {
     const s = session orelse return .invalid_argument;
     const st = state orelse return .invalid_argument;
@@ -6529,9 +6816,18 @@ pub export fn goss_session_submit_world(session: ?*Session, state: ?*const World
 /// VPS scan) in world space: vertex_count xyz triples and index_count indices,
 /// three per triangle. The engine copies it, and a ray meets it through
 /// goss_session_raycast_world_mesh. An empty submission clears the stored mesh.
+/// Drops the navigation mesh, which is only ever a cache over the submitted one.
+fn clearNav(s: *Session) void {
+    if (s.world.nav) |*mesh| mesh.deinit();
+    s.world.nav = null;
+    if (s.world.nav_triangles.len > 0) s.engine.gpa.free(s.world.nav_triangles);
+    s.world.nav_triangles = &.{};
+}
+
 pub export fn goss_session_submit_world_mesh(session: ?*Session, vertices: ?[*]const f32, vertex_count: usize, indices: ?[*]const u32, index_count: usize) Status {
     const s = session orelse return .invalid_argument;
     if (index_count % 3 != 0) return .invalid_argument;
+    clearNav(s);
     if (s.world.mesh_vertices.len > 0) s.engine.gpa.free(s.world.mesh_vertices);
     if (s.world.mesh_indices.len > 0) s.engine.gpa.free(s.world.mesh_indices);
     s.world.mesh_vertices = &.{};
@@ -6548,6 +6844,62 @@ pub export fn goss_session_submit_world_mesh(session: ?*Session, vertices: ?[*]c
     @memcpy(inds, idx[0..index_count]);
     s.world.mesh_vertices = verts;
     s.world.mesh_indices = inds;
+    return .ok;
+}
+
+/// A walkable path across the submitted world mesh, from start to goal, as a list
+/// of points. `.again` when no mesh is submitted or no route exists, because a
+/// caller can act on "not here" and cannot act on an empty list it mistook for
+/// a straight line.
+pub export fn goss_session_path_across_world(
+    session: ?*Session,
+    start: ?*const [3]f32,
+    goal: ?*const [3]f32,
+    out_points: ?[*]f32,
+    capacity: usize,
+    out_count: ?*usize,
+) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allows(.world)) return .unsupported;
+    const from = start orelse return .invalid_argument;
+    const to = goal orelse return .invalid_argument;
+    const count_out = out_count orelse return .invalid_argument;
+    if (s.world.mesh_vertices.len == 0 or s.world.mesh_indices.len < 3) return .again;
+
+    if (s.world.nav == null) {
+        // The triangles the nav mesh walks are the submitted indices read as
+        // triples. They are kept because the nav mesh borrows them rather than
+        // copying, and both go when the mesh is replaced.
+        const triangle_count = s.world.mesh_indices.len / 3;
+        const triangles = s.engine.gpa.alloc([3]u32, triangle_count) catch return .out_of_memory;
+        for (0..triangle_count) |i| {
+            triangles[i] = .{
+                s.world.mesh_indices[i * 3],
+                s.world.mesh_indices[i * 3 + 1],
+                s.world.mesh_indices[i * 3 + 2],
+            };
+        }
+        s.world.nav = navmesh.NavMesh.build(s.engine.gpa, s.world.mesh_vertices, triangles) catch {
+            s.engine.gpa.free(triangles);
+            return .out_of_memory;
+        };
+        s.world.nav_triangles = triangles;
+    }
+
+    const path = s.world.nav.?.findPath(s.engine.gpa, from.*, to.*) catch return .out_of_memory;
+    const points = path orelse return .again;
+    defer s.engine.gpa.free(points);
+
+    count_out.* = points.len;
+    if (out_points) |dst| {
+        const written = @min(points.len, capacity);
+        for (0..written) |i| {
+            dst[i * 3] = points[i][0];
+            dst[i * 3 + 1] = points[i][1];
+            dst[i * 3 + 2] = points[i][2];
+        }
+    }
+    if (points.len > capacity) return .again;
     return .ok;
 }
 

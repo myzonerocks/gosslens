@@ -143,6 +143,11 @@ baseline, the SDKs, and a proof, or it is unfinished.
 6. Update [docs/PARITY.md](docs/PARITY.md) and run `zig build ci` green before
    push.
 
+Two of those steps are now gated rather than remembered. A module under `core/`
+that nothing imports is refused, however well its own tests pass: that is step 2
+skipped. And a module the build swaps per target must answer every name the tree
+asks of the real one, so a target nobody compiled locally does not break later.
+
 ## Git
 
 Work on a feature branch cut from current `main`. Keep one coherent feature

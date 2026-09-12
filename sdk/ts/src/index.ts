@@ -1684,6 +1684,200 @@ export class GossSession {
   /// Casts a world-space ray against the submitted world mesh, returning the
   /// nearest surface hit `{ point, distance }`, or null when no mesh is
   /// submitted or the ray misses. A tap-to-place lens anchors content there.
+  /// A walkable route over the submitted world mesh, so an agent walks content
+  /// across real scanned ground. Null when no mesh is submitted or no route exists.
+  pathAcrossWorld(start: [number, number, number], goal: [number, number, number]): [number, number, number][] | null {
+    const capacity = 256;
+    const aPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const bPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const outBytes = capacity * 12;
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [outBytes]) as number;
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      this.mod.HEAPF32.set(start, aPtr / 4);
+      this.mod.HEAPF32.set(goal, bPtr / 4);
+      const args = ["number", "number", "number", "number", "number", "number"];
+      if (this.mod.ccall("goss_session_path_across_world", "number", args, [this.handle, aPtr, bPtr, outPtr, capacity, countPtr]) !== GOSS_OK) return null;
+      const found = Math.min(this.mod.HEAPU32[countPtr >> 2]!, capacity);
+      const out: [number, number, number][] = [];
+      for (let i = 0; i < found; i += 1) {
+        const w = (outPtr >> 2) + i * 3;
+        out.push([this.mod.HEAPF32[w]!, this.mod.HEAPF32[w + 1]!, this.mod.HEAPF32[w + 2]!]);
+      }
+      return out;
+    } finally {
+      for (const [ptr, bytes] of [[aPtr, 12], [bPtr, 12], [outPtr, outBytes], [countPtr, 8]] as const) {
+        this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+      }
+    }
+  }
+
+  /// What a submitted plane is, as a named kind rather than the platform's own
+  /// number, and whether a thing can rest on it.
+  planeKind(planeId: number): { kind: number; bearing: boolean } | null {
+    const kindPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const bearingPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    try {
+      const args = ["number", "number", "number", "number"];
+      if (this.mod.ccall("goss_session_plane_kind", "number", args, [this.handle, planeId, kindPtr, bearingPtr]) !== GOSS_OK) return null;
+      return { kind: this.mod.HEAPU32[kindPtr >> 2]!, bearing: this.mod.HEAPU32[bearingPtr >> 2] === 1 };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [kindPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [bearingPtr, 4]);
+    }
+  }
+
+  /// The plane this session would call the floor: the lowest bearing surface it
+  /// has been shown, or null when it has been shown none.
+  floorPlaneId(): number | null {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      if (this.mod.ccall("goss_session_floor_plane", "number", ["number", "number"], [this.handle, ptr]) !== GOSS_OK) return null;
+      return this.mod.HEAPU32[ptr >> 2]!;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 8]);
+    }
+  }
+
+  /// Where a footprint fits, best surface first: the bearing plane with the most
+  /// room left afterwards. An empty array is an answer.
+  placeOn(
+    item: { width: number; depth: number; height?: number },
+    occupants: { planeId: number; x: number; z: number; width: number; depth: number }[] = [],
+  ): { planeId: number; position: [number, number, number]; freeFraction: number }[] {
+    const itemPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const occupantBytes = occupants.length * 24;
+    const occupantPtr = occupants.length === 0 ? 0 : (this.mod.ccall("goss_alloc", "number", ["number"], [occupantBytes]) as number);
+    const capacity = 32;
+    const outBytes = capacity * 24;
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [outBytes]) as number;
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      this.mod.HEAPF32.set([item.width, item.depth, item.height ?? 0], itemPtr / 4);
+      // Each occupant is a u64 id then four floats: the id is written as two words
+      // because the heap view is 32-bit and an id past 2^32 is not a plane id any
+      // platform hands out.
+      occupants.forEach((o, i) => {
+        const base = occupantPtr + i * 24;
+        this.mod.HEAPU32[base >> 2] = o.planeId;
+        this.mod.HEAPU32[(base >> 2) + 1] = 0;
+        this.mod.HEAPF32.set([o.x, o.z, o.width, o.depth], (base + 8) / 4);
+      });
+      const args = ["number", "number", "number", "number", "number", "number", "number"];
+      const status = this.mod.ccall("goss_session_place_on", "number", args, [this.handle, itemPtr, occupantPtr, occupants.length, outPtr, capacity, countPtr]) as number;
+      if (status !== GOSS_OK && status !== GOSS_AGAIN) return [];
+      const found = Math.min(this.mod.HEAPU32[countPtr >> 2]!, capacity);
+      const out: { planeId: number; position: [number, number, number]; freeFraction: number }[] = [];
+      for (let i = 0; i < found; i += 1) {
+        const base = outPtr + i * 24;
+        const floats = (base + 8) / 4;
+        out.push({
+          planeId: this.mod.HEAPU32[base >> 2]!,
+          position: [this.mod.HEAPF32[floats]!, this.mod.HEAPF32[floats + 1]!, this.mod.HEAPF32[floats + 2]!],
+          freeFraction: this.mod.HEAPF32[floats + 3]!,
+        });
+      }
+      return out;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [itemPtr, 12]);
+      if (occupantPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [occupantPtr, occupantBytes]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, outBytes]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 8]);
+    }
+  }
+
+  /// Point to point in metres with its uncertainty. `known` is false when either
+  /// end vouched for no accuracy, so a sigma of zero is never read as certainty.
+  measureBetween(
+    from: [number, number, number],
+    to: [number, number, number],
+    fromAccuracyM = 0,
+    toAccuracyM = 0,
+  ): { metres: number; sigma: number; known: boolean } | null {
+    const aPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const bPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const valuePtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const sigmaPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const knownPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    try {
+      this.mod.HEAPF32.set(from, aPtr / 4);
+      this.mod.HEAPF32.set(to, bPtr / 4);
+      const args = ["number", "number", "number", "number", "number", "number", "number", "number"];
+      const status = this.mod.ccall("goss_session_measure_between", "number", args, [this.handle, aPtr, fromAccuracyM, bPtr, toAccuracyM, valuePtr, sigmaPtr, knownPtr]) as number;
+      if (status !== GOSS_OK) return null;
+      return {
+        metres: this.mod.HEAPF32[valuePtr >> 2]!,
+        sigma: this.mod.HEAPF32[sigmaPtr >> 2]!,
+        known: this.mod.HEAPU32[knownPtr >> 2] === 1,
+      };
+    } finally {
+      for (const [ptr, bytes] of [[aPtr, 12], [bPtr, 12], [valuePtr, 4], [sigmaPtr, 4], [knownPtr, 4]] as const) {
+        this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+      }
+    }
+  }
+
+  /// What this device can offer another: one landmark per world anchor it holds,
+  /// in its own frame. A pose never crosses.
+  sharedLandmarks(): { id: number; position: [number, number, number]; confidence: number }[] {
+    const capacity = 32;
+    const bytes = capacity * 24;
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      const args = ["number", "number", "number", "number"];
+      const status = this.mod.ccall("goss_session_shared_landmarks", "number", args, [this.handle, outPtr, capacity, countPtr]) as number;
+      if (status !== GOSS_OK && status !== GOSS_AGAIN) return [];
+      const found = Math.min(this.mod.HEAPU32[countPtr >> 2]!, capacity);
+      const out: { id: number; position: [number, number, number]; confidence: number }[] = [];
+      for (let i = 0; i < found; i += 1) {
+        const base = outPtr + i * 24;
+        const floats = (base + 8) / 4;
+        out.push({
+          id: this.mod.HEAPU32[base >> 2]!,
+          position: [this.mod.HEAPF32[floats]!, this.mod.HEAPF32[floats + 1]!, this.mod.HEAPF32[floats + 2]!],
+          confidence: this.mod.HEAPF32[floats + 3]!,
+        });
+      }
+      return out;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, bytes]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 8]);
+    }
+  }
+
+  /// The transform from the sender's origin into this one, column-major, with the
+  /// fit it achieved. Null when fewer than three landmarks matched, which cannot
+  /// fix a rigid transform.
+  alignShared(theirs: { id: number; position: [number, number, number]; confidence?: number }[]): { transform: Float32Array; rmsError: number; matched: number } | null {
+    const bytes = Math.max(theirs.length, 1) * 24;
+    const listPtr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    const transformPtr = this.mod.ccall("goss_alloc", "number", ["number"], [64]) as number;
+    const rmsPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const matchedPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    try {
+      theirs.forEach((l, i) => {
+        const base = listPtr + i * 24;
+        this.mod.HEAPU32[base >> 2] = l.id;
+        this.mod.HEAPU32[(base >> 2) + 1] = 0;
+        this.mod.HEAPF32.set([l.position[0], l.position[1], l.position[2], l.confidence ?? 1], (base + 8) / 4);
+      });
+      const args = ["number", "number", "number", "number", "number", "number"];
+      const status = this.mod.ccall("goss_session_align_shared", "number", args, [this.handle, listPtr, theirs.length, transformPtr, rmsPtr, matchedPtr]) as number;
+      if (status !== GOSS_OK) return null;
+      return {
+        transform: this.mod.HEAPF32.slice(transformPtr >> 2, (transformPtr >> 2) + 16),
+        rmsError: this.mod.HEAPF32[rmsPtr >> 2]!,
+        matched: this.mod.HEAPU32[matchedPtr >> 2]!,
+      };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [listPtr, bytes]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [transformPtr, 64]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [rmsPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [matchedPtr, 4]);
+    }
+  }
+
   raycastWorldMesh(origin: [number, number, number], direction: [number, number, number]): { point: [number, number, number]; distance: number } | null {
     const oPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
     this.mod.HEAPF32.set(origin, oPtr / 4);

@@ -4415,6 +4415,219 @@ fn normalizeVector(v: []f32) void {
 /// real; where it is not, zero surfaces is the answer and the proof says so,
 /// because permission is the host's to give. The coordinate arithmetic is
 /// asserted either way: a point in the wrong place is wrong on every host.
+/// The spatial rail through the real ABI: a room submitted as planes answers which
+/// surface is the floor, where a thing fits and how much of that surface it leaves,
+/// what a measurement's uncertainty is, and what two devices agree on.
+fn proveSpatialRail(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    // A floor, a table half a metre above it, and a wall: the room a placement
+    // question is actually asked about.
+    const flat: [16]f32 = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    var floor_pose = flat;
+    var table_pose = flat;
+    table_pose[13] = 0.75;
+    var wall_pose = flat;
+    wall_pose[13] = 1.2;
+    const planes = [_]abi.WorldPlane{
+        .{ .id = 10, .pose = floor_pose, .extent_x = 4, .extent_z = 4, .classification = 1 },
+        .{ .id = 20, .pose = table_pose, .extent_x = 1.2, .extent_z = 0.8, .classification = 4 },
+        .{ .id = 30, .pose = wall_pose, .extent_x = 3, .extent_z = 2.4, .classification = 2 },
+    };
+    const anchors = [_]abi.WorldAnchor{
+        .{ .id = 1, .pose = flat },
+        .{ .id = 2, .pose = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1 } },
+        .{ .id = 3, .pose = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1 } },
+        .{ .id = 4, .pose = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1 } },
+    };
+    const state: abi.WorldState = .{ .tracking_state = 2, .world_from_camera = flat, .projection = flat, .timestamp_us = 1000 };
+    if (abi.goss_session_submit_world(session, &state, &planes, planes.len, &anchors, anchors.len, null) != .ok) {
+        std.debug.print("conformance: FAIL the spatial rail would not take a room\n", .{});
+        return false;
+    }
+
+    // A named kind, not the platform's number, and the bearing answer that decides
+    // whether a thing can rest there.
+    var kind: u32 = 0;
+    var bearing: u32 = 0;
+    if (abi.goss_session_plane_kind(session, 20, &kind, &bearing) != .ok or kind != 4 or bearing != 1) {
+        std.debug.print("conformance: FAIL the table read back as kind {d}, bearing {d}\n", .{ kind, bearing });
+        return false;
+    }
+    if (abi.goss_session_plane_kind(session, 30, &kind, &bearing) != .ok or bearing != 0) {
+        std.debug.print("conformance: FAIL a wall reads as something a thing can rest on\n", .{});
+        return false;
+    }
+    if (abi.goss_session_plane_kind(session, 99, &kind, &bearing) == .ok) {
+        std.debug.print("conformance: FAIL a plane this session never saw answered anyway\n", .{});
+        return false;
+    }
+
+    var floor_id: u64 = 0;
+    if (abi.goss_session_floor_plane(session, &floor_id) != .ok or floor_id != 10) {
+        std.debug.print("conformance: FAIL the floor read back as {d}\n", .{floor_id});
+        return false;
+    }
+
+    // Where a cup goes. The table and the floor both hold it; the answer that
+    // leaves the most of its surface free comes first, and the wall never does.
+    const cup: abi.Footprint = .{ .width = 0.1, .depth = 0.1, .height = 0.12 };
+    var placements: [8]abi.Placement = undefined;
+    var found: usize = 0;
+    if (abi.goss_session_place_on(session, &cup, null, 0, &placements, placements.len, &found) != .ok) {
+        std.debug.print("conformance: FAIL the placement query refused\n", .{});
+        return false;
+    }
+    if (found < 2) {
+        std.debug.print("conformance: FAIL only {d} surfaces hold a cup in a room with a floor and a table\n", .{found});
+        return false;
+    }
+    for (placements[0..found]) |p| {
+        if (p.plane_id == 30) {
+            std.debug.print("conformance: FAIL a cup was placed on a wall\n", .{});
+            return false;
+        }
+        if (p.free_fraction <= 0 or p.free_fraction > 1) {
+            std.debug.print("conformance: FAIL a placement reports {d} of the surface free\n", .{p.free_fraction});
+            return false;
+        }
+    }
+    if (placements[0].free_fraction < placements[found - 1].free_fraction) {
+        std.debug.print("conformance: FAIL the placements are not ordered by the room they leave\n", .{});
+        return false;
+    }
+
+    // An occupant changes the answer: a table with something already on it has
+    // less of itself free than an empty one.
+    const occupant = [_]abi.Occupant{.{ .plane_id = 20, .x = 0, .z = 0, .width = 0.9, .depth = 0.6 }};
+    var crowded: [8]abi.Placement = undefined;
+    var crowded_count: usize = 0;
+    _ = abi.goss_session_place_on(session, &cup, &occupant, occupant.len, &crowded, crowded.len, &crowded_count);
+    var table_free_before: f32 = 0;
+    var table_free_after: f32 = 0;
+    for (placements[0..found]) |p| {
+        if (p.plane_id == 20) table_free_before = p.free_fraction;
+    }
+    for (crowded[0..crowded_count]) |p| {
+        if (p.plane_id == 20) table_free_after = p.free_fraction;
+    }
+    if (!(table_free_after < table_free_before)) {
+        std.debug.print("conformance: FAIL a table with something on it reports {d} free against {d} empty\n", .{ table_free_after, table_free_before });
+        return false;
+    }
+
+    // A measurement carries its doubt, and a caller who vouched for nothing is
+    // told the number is unvouched rather than handed a sigma of zero.
+    const from = [_]f32{ 0, 0, 0 };
+    const to = [_]f32{ 3, 4, 0 };
+    var metres: f32 = 0;
+    var sigma: f32 = 0;
+    var known: u32 = 0;
+    if (abi.goss_session_measure_between(session, &from, 0.01, &to, 0.02, &metres, &sigma, &known) != .ok) {
+        std.debug.print("conformance: FAIL the measurement refused\n", .{});
+        return false;
+    }
+    if (@abs(metres - 5) > 1e-4 or known != 1 or sigma <= 0) {
+        std.debug.print("conformance: FAIL measured {d} metres, sigma {d}, known {d}\n", .{ metres, sigma, known });
+        return false;
+    }
+    _ = abi.goss_session_measure_between(session, &from, 0, &to, 0.02, &metres, &sigma, &known);
+    if (known != 0) {
+        std.debug.print("conformance: FAIL a measurement nobody vouched for reports itself as known\n", .{});
+        return false;
+    }
+
+    // What crosses to the other device, and the transform back. The second device
+    // stands two metres along x and faces a quarter turn away, so a translation
+    // alone could not fit it.
+    var landmarks: [8]abi.SharedLandmark = undefined;
+    var landmark_count: usize = 0;
+    if (abi.goss_session_shared_landmarks(session, &landmarks, landmarks.len, &landmark_count) != .ok or landmark_count != anchors.len) {
+        std.debug.print("conformance: FAIL {d} landmarks crossed for {d} anchors\n", .{ landmark_count, anchors.len });
+        return false;
+    }
+    var theirs: [8]abi.SharedLandmark = undefined;
+    for (0..landmark_count) |i| {
+        const mine = landmarks[i];
+        theirs[i] = .{ .id = mine.id, .x = mine.z + 2, .y = mine.y, .z = -mine.x, .confidence = 1 };
+    }
+    var transform: [16]f32 = undefined;
+    var rms: f32 = 0;
+    var matched: u32 = 0;
+    if (abi.goss_session_align_shared(session, &theirs, landmark_count, &transform, &rms, &matched) != .ok) {
+        std.debug.print("conformance: FAIL the alignment refused a room both devices saw\n", .{});
+        return false;
+    }
+    if (matched != landmark_count or rms > 1e-3) {
+        std.debug.print("conformance: FAIL aligned {d} of {d} landmarks at {d} metres of residual\n", .{ matched, landmark_count, rms });
+        return false;
+    }
+    // The rotation is in there: a translation-only answer leaves these at identity.
+    if (@abs(transform[0]) > 1e-3 or @abs(transform[8] - 1) > 1e-3 or @abs(transform[12] - 2) > 1e-3) {
+        std.debug.print("conformance: FAIL the transform carries no rotation: {d}, {d}, {d}\n", .{ transform[0], transform[8], transform[12] });
+        return false;
+    }
+
+    var few: [2]abi.SharedLandmark = .{ theirs[0], theirs[1] };
+    if (abi.goss_session_align_shared(session, &few, few.len, &transform, &rms, &matched) == .ok) {
+        std.debug.print("conformance: FAIL two landmarks were taken as fixing a rigid transform\n", .{});
+        return false;
+    }
+
+    // A route across scanned ground. Two triangles sharing an edge make a strip an
+    // agent can walk, and a point off the mesh is not on it, which is an answer.
+    const mesh_vertices = [_]f32{
+        0, 0, 0,
+        2, 0, 0,
+        0, 0, 2,
+        2, 0, 2,
+    };
+    const mesh_indices = [_]u32{ 0, 1, 2, 1, 3, 2 };
+    if (abi.goss_session_submit_world_mesh(session, &mesh_vertices, mesh_vertices.len / 3, &mesh_indices, mesh_indices.len) != .ok) {
+        std.debug.print("conformance: FAIL the session would not take a world mesh\n", .{});
+        return false;
+    }
+    var route: [64 * 3]f32 = undefined;
+    var route_points: usize = 0;
+    const from_corner = [_]f32{ 0.2, 0, 0.2 };
+    const to_corner = [_]f32{ 1.8, 0, 1.8 };
+    if (abi.goss_session_path_across_world(session, &from_corner, &to_corner, &route, 64, &route_points) != .ok or route_points == 0) {
+        std.debug.print("conformance: FAIL no route across two triangles that share an edge\n", .{});
+        return false;
+    }
+    // Kept before the next call, which leaves the count alone when it refuses.
+    const routed = route_points;
+    const off_mesh = [_]f32{ 50, 0, 50 };
+    if (abi.goss_session_path_across_world(session, &from_corner, &off_mesh, &route, 64, &route_points) == .ok) {
+        std.debug.print("conformance: FAIL a goal off the mesh was routed to anyway\n", .{});
+        return false;
+    }
+
+    // A session narrowed away from the world answers nothing about it, which is
+    // the same rule the record follows for a section out of scope.
+    if (abi.goss_session_set_scope(session, 0, 0) != .ok) {
+        std.debug.print("conformance: FAIL the session would not narrow its scope\n", .{});
+        return false;
+    }
+    if (abi.goss_session_floor_plane(session, &floor_id) != .unsupported) {
+        std.debug.print("conformance: FAIL a session with no world in scope named the floor anyway\n", .{});
+        return false;
+    }
+    if (abi.goss_session_align_shared(session, &theirs, landmark_count, &transform, &rms, &matched) != .unsupported) {
+        std.debug.print("conformance: FAIL a session with no world in scope aligned anyway\n", .{});
+        return false;
+    }
+
+    std.debug.print(
+        "conformance: PROOF the spatial rail through the real ABI: the floor named, a cup on {d} surfaces ordered by the room each leaves ({d:.3} of the table free, {d:.3} with something on it), 5m measured at {d:.3} sigma and refused as unvouched, two devices a quarter turn apart aligned over {d} landmarks at {d:.5}m, a {d}-point route across scanned ground, and every answer refused once the world left the session's scope\n",
+        .{ found, table_free_before, table_free_after, sigma, matched, rms, routed },
+    );
+    return true;
+}
+
 fn proveScreenSource(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     _ = gpa;
     var count: u32 = 0;
@@ -23505,6 +23718,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer");
     if (!try proveScreenSource(gpa, engine)) return 1;
     watchHold("screen source");
+    if (!try proveSpatialRail(gpa, engine)) return 1;
+    watchHold("spatial rail");
     if (!try proveMemoryPlane(gpa, engine)) return 1;
     watchHold("memory plane");
     if (!try proveModelZoo(gpa, engine)) return 1;

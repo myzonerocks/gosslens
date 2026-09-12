@@ -500,6 +500,16 @@ if (share) {
   share.stop();
 }
 
+// The room it is in: the floor, where a cup goes, a distance with its doubt, and
+// what another device's origin is in this one.
+const floor = session.floorPlaneId();
+for (const spot of session.placeOn({ width: 0.1, depth: 0.1, height: 0.12 })) {
+  console.log(spot.planeId, spot.position, spot.freeFraction);
+}
+const span = session.measureBetween(a, b, 0.01, 0.01);
+const alignment = session.alignShared(theirLandmarks);
+const route = session.pathAcrossWorld(here, there);
+
 // And what this session will answer at all.
 session.setScope(0xffffffff, 0);
 ```

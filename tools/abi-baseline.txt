@@ -1,4 +1,4 @@
-abi 0.162
+abi 0.169
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -163,7 +163,14 @@ fn goss_status goss_engine_recording_read_report(goss_engine *engine, goss_recor
 fn goss_status goss_session_submit_audio(goss_session *session, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t timestamp_us)
 fn goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light)
 fn goss_status goss_session_submit_world_mesh(goss_session *session, const float *vertices, size_t vertex_count, const uint32_t *indices, size_t index_count)
+fn goss_status goss_session_plane_kind(goss_session *session, uint64_t plane_id, uint32_t *out_kind, uint32_t *out_bearing)
+fn goss_status goss_session_floor_plane(goss_session *session, uint64_t *out_plane_id)
+fn goss_status goss_session_place_on(goss_session *session, const goss_footprint *item, const goss_occupant *occupants, size_t occupant_count, goss_placement *out, size_t capacity, size_t *out_count)
+fn goss_status goss_session_measure_between(goss_session *session, const float *from, float from_accuracy_m, const float *to, float to_accuracy_m, float *out_metres, float *out_sigma, uint32_t *out_known)
+fn goss_status goss_session_shared_landmarks(goss_session *session, goss_shared_landmark *out, size_t capacity, size_t *out_count)
+fn goss_status goss_session_align_shared(goss_session *session, const goss_shared_landmark *theirs, size_t count, float *out_transform, float *out_rms_error, uint32_t *out_matched)
 fn goss_status goss_session_raycast_world_mesh(goss_session *session, const float *origin, const float *direction, float *out_point, float *out_distance)
+fn goss_status goss_session_path_across_world(goss_session *session, const float *start, const float *goal, float *out_points, size_t capacity, size_t *out_count)
 fn goss_status goss_session_hit_test(goss_session *session, float screen_x, float screen_y, float *out_position)
 fn goss_status goss_engine_capture_still(goss_engine *engine, goss_session *session, const goss_capture_config *config, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height)
 fn goss_status goss_engine_capture_live_frame(goss_engine *engine, goss_session *session, uint32_t format, uint8_t *out_data, size_t out_capacity, uint32_t *out_width, uint32_t *out_height)

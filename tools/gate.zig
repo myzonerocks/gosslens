@@ -782,6 +782,54 @@ const Gate = struct {
     // what the tree asks of it. The wasm build broke on four names the real
     // adapter exported and its synchronous twin did not, so the asking side is
     // what decides: a name used through the module, absent from a substitute.
+    // A core module nothing imports is a module nobody can use, whatever its tests
+    // say: the spatial rail sat that way with a passing suite of its own. Scoped to
+    // `core/`, because a program root and a seam substitute are both reached by
+    // something other than an import and neither is a mistake.
+    fn checkOrphanModules(g: *Gate) !void {
+        const build_zig = Io.Dir.cwd().readFileAlloc(g.io, "build.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
+
+        var roots: std.ArrayList([]const u8) = .empty;
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, build_zig, at, "b.path(\"")) |found| {
+            at = found + 8;
+            const close = std.mem.indexOfScalarPos(u8, build_zig, at, '"') orelse break;
+            const root = build_zig[at..close];
+            at = close;
+            if (!std.mem.startsWith(u8, root, "core/")) continue;
+            if (!std.mem.endsWith(u8, root, ".zig")) continue;
+            if (!isModuleRoot(build_zig, found)) continue;
+            var already = false;
+            for (roots.items) |have| {
+                if (std.mem.eql(u8, have, root)) already = true;
+            }
+            if (!already) try roots.append(g.arena, root);
+        }
+        if (roots.items.len == 0) return;
+
+        const reached = try g.arena.alloc(bool, roots.items.len);
+        @memset(reached, false);
+
+        // Every tracked file read once, against every root: the other way round is
+        // one read per root per file, which is thousands of reads of the same bytes.
+        const paths = try g.trackedPaths();
+        for (paths) |path| {
+            if (!std.mem.endsWith(u8, path, ".zig")) continue;
+            if (std.mem.startsWith(u8, path, ".vendor/")) continue;
+            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch continue;
+            for (roots.items, 0..) |root, i| {
+                if (reached[i]) continue;
+                if (std.mem.eql(u8, path, root)) continue;
+                if (importsRoot(content, path, root)) reached[i] = true;
+            }
+        }
+
+        for (roots.items, 0..) |root, i| {
+            if (reached[i]) continue;
+            try g.flag("orphan-module: nothing imports '{s}'; a core module only a test can reach is one nobody can use, so import it where it belongs or delete it", .{root});
+        }
+    }
+
     fn checkSeamParity(g: *Gate) !void {
         const paths = try g.trackedPaths();
         for (seam_families) |seam| {
@@ -1164,6 +1212,34 @@ fn declaresPublic(content: []const u8, name: []const u8) bool {
     return false;
 }
 
+/// Whether this file reaches that module root: by module name from anywhere, or by
+/// file name from inside the root's own package, which is how a package root
+/// gathers what it exports. Either way something can call it.
+fn importsRoot(content: []const u8, path: []const u8, root: []const u8) bool {
+    const slash = std.mem.lastIndexOfScalar(u8, root, '/') orelse return true;
+    const dir = root[0..slash];
+    const file = root[slash + 1 ..];
+    const stem = file[0 .. file.len - 4];
+
+    var buf: [512]u8 = undefined;
+    if (std.mem.startsWith(u8, path, dir)) {
+        const by_file = std.fmt.bufPrint(&buf, "@import(\"{s}\")", .{file}) catch return true;
+        if (std.mem.indexOf(u8, content, by_file) != null) return true;
+    }
+    const by_module = std.fmt.bufPrint(&buf, "@import(\"{s}\")", .{stem}) catch return true;
+    return std.mem.indexOf(u8, content, by_module) != null;
+}
+
+/// Whether a `b.path("...")` sits in a module construction rather than in a C
+/// compile or an asset step. The marker is the field it fills.
+fn isModuleRoot(build_zig: []const u8, at: usize) bool {
+    var line_start = at;
+    while (line_start > 0 and build_zig[line_start - 1] != '\n') line_start -= 1;
+    var line_end = at;
+    while (line_end < build_zig.len and build_zig[line_end] != '\n') line_end += 1;
+    return std.mem.indexOf(u8, build_zig[line_start..line_end], "root_source_file") != null;
+}
+
 fn isIdentChar(ch: u8) bool {
     return std.ascii.isAlphanumeric(ch) or ch == '_';
 }
@@ -1194,6 +1270,7 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkSwallowedFailures(paths);
         try g.checkIgnoredVendorResults(paths);
         try g.checkSeamParity();
+        try g.checkOrphanModules();
     } else if (std.mem.eql(u8, mode, "--tree")) {
         const paths = try g.trackedPaths();
         try g.checkIgnoreIntegrity();
@@ -1208,6 +1285,7 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkSwallowedFailures(paths);
         try g.checkIgnoredVendorResults(paths);
         try g.checkSeamParity();
+        try g.checkOrphanModules();
     } else if (std.mem.eql(u8, mode, "--commit-msg")) {
         const file = args.next() orelse {
             std.debug.print("gate: --commit-msg needs a file argument\n", .{});

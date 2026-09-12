@@ -47,6 +47,11 @@ same C ABI the Swift, Kotlin and TypeScript SDKs use, and a session's
 [scope](API.md) governs what it will answer: a read out of scope is dropped from
 the record, and a verb out of scope is refused.
 
+The spatial questions are not tools here, deliberately. They answer over the
+planes, anchors and mesh a host submits, and this server stands up its own
+session that no host feeds, so every one of them would answer "nothing submitted"
+forever. They reach a model through an SDK inside an app that has a world.
+
 The engine and its session are made on the first call that needs them, so a
 client that only lists tools brings up no renderer. A tool whose precondition is
 missing says which one it is, rather than returning an empty answer a model would

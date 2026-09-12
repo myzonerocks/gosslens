@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 162u
+#define GOSS_ABI_MINOR 169u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -513,6 +513,77 @@ goss_status goss_session_submit_world(goss_session *session, const goss_world_st
  * three per triangle. The engine copies it, and a ray meets it through
  * goss_session_raycast_world_mesh. An empty submission clears the stored mesh. */
 goss_status goss_session_submit_world_mesh(goss_session *session, const float *vertices, size_t vertex_count, const uint32_t *indices, size_t index_count);
+
+/* A walkable path across the submitted world mesh, from start to goal, written as
+ * out_count xyz triples. GOSS_AGAIN when no mesh is submitted, when no route
+ * exists, or with the count when the buffer was short: a caller can act on "not
+ * here" and cannot act on an empty list it mistook for a straight line. */
+goss_status goss_session_path_across_world(goss_session *session, const float *start, const float *goal, float *out_points, size_t capacity, size_t *out_count);
+
+/* A footprint to place, in metres. Height is asked for even on a flat surface:
+ * it decides whether a thing fits under a shelf. */
+typedef struct goss_footprint {
+    float width;
+    float depth;
+    float height;
+} goss_footprint;
+
+/* Where a footprint can go: which plane, where on it in world space, and how
+ * much of that surface stays free afterwards, as a fraction. */
+typedef struct goss_placement {
+    uint64_t plane_id;
+    float position[3];
+    float free_fraction;
+} goss_placement;
+
+/* Something already on a plane, on that plane's own axes in metres from its
+ * centre, so a placement query answers about the surface as it is now. */
+typedef struct goss_occupant {
+    uint64_t plane_id;
+    float x;
+    float z;
+    float width;
+    float depth;
+} goss_occupant;
+
+/* One landmark as it crosses between two devices. No pose: a pose is meaningless
+ * in another origin. The position is in the sender's own frame, read only for the
+ * distances between landmarks. */
+typedef struct goss_shared_landmark {
+    uint64_t id;
+    float x;
+    float y;
+    float z;
+    float confidence;
+} goss_shared_landmark;
+
+/* What a submitted plane is, as a named kind rather than the platform's own
+ * number: 0 unknown, 1 floor, 2 wall, 3 ceiling, 4 table, 5 seat, 6 door,
+ * 7 window, 8 screen. out_bearing is 1 when a thing can rest on it. */
+goss_status goss_session_plane_kind(goss_session *session, uint64_t plane_id, uint32_t *out_kind, uint32_t *out_bearing);
+
+/* The plane this session would call the floor: the lowest bearing surface it has
+ * been shown. GOSS_AGAIN when it has been shown none. */
+goss_status goss_session_floor_plane(goss_session *session, uint64_t *out_plane_id);
+
+/* Where this footprint fits, best surface first: the bearing plane with the most
+ * room left afterwards. out_count is the number found; GOSS_AGAIN with the count
+ * when the buffer was short. Zero placements is an answer. */
+goss_status goss_session_place_on(goss_session *session, const goss_footprint *item, const goss_occupant *occupants, size_t occupant_count, goss_placement *out, size_t capacity, size_t *out_count);
+
+/* Point to point in metres, with the uncertainty that follows from the accuracy
+ * each end carried. Pass a non-positive accuracy to vouch for none; out_known is
+ * then 0, so a sigma of zero is never read as certainty. */
+goss_status goss_session_measure_between(goss_session *session, const float *from, float from_accuracy_m, const float *to, float to_accuracy_m, float *out_metres, float *out_sigma, uint32_t *out_known);
+
+/* What this device can offer another: one landmark per world anchor it holds, in
+ * its own frame. GOSS_AGAIN with the count when the buffer was short. */
+goss_status goss_session_shared_landmarks(goss_session *session, goss_shared_landmark *out, size_t capacity, size_t *out_count);
+
+/* The transform from the sender's origin into this one, column-major, solved over
+ * the landmarks both sides recognise, with the fit it achieved. GOSS_AGAIN when
+ * fewer than three matched, which cannot fix a rigid transform. */
+goss_status goss_session_align_shared(goss_session *session, const goss_shared_landmark *theirs, size_t count, float *out_transform, float *out_rms_error, uint32_t *out_matched);
 
 /* Casts a world-space ray (origin and direction) against the submitted world
  * mesh and writes the nearest surface hit into out_point with its ray distance

@@ -383,6 +383,13 @@ object Gosslens {
     internal external fun nativeHitTest(session: Long, screenX: Float, screenY: Float, outBuffer: ByteBuffer): Int
     internal external fun nativeSubmitWorldMesh(session: Long, verticesBuffer: ByteBuffer, vertexCount: Int, indicesBuffer: ByteBuffer, indexCount: Int): Int
     internal external fun nativeRaycastWorldMesh(session: Long, originBuffer: ByteBuffer, directionBuffer: ByteBuffer, pointBuffer: ByteBuffer, distanceBuffer: ByteBuffer): Int
+    internal external fun nativePathAcrossWorld(session: Long, startBuffer: ByteBuffer, goalBuffer: ByteBuffer, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
+    internal external fun nativePlaneKind(session: Long, planeId: Long, outBuffer: ByteBuffer): Int
+    internal external fun nativeFloorPlane(session: Long, outBuffer: ByteBuffer): Int
+    internal external fun nativePlaceOn(session: Long, itemBuffer: ByteBuffer, occupantBuffer: ByteBuffer?, occupantCount: Int, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
+    internal external fun nativeMeasureBetween(session: Long, fromBuffer: ByteBuffer, fromAccuracy: Float, toBuffer: ByteBuffer, toAccuracy: Float, outBuffer: ByteBuffer): Int
+    internal external fun nativeSharedLandmarks(session: Long, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
+    internal external fun nativeAlignShared(session: Long, theirBuffer: ByteBuffer, count: Int, outBuffer: ByteBuffer): Int
     internal external fun nativePullAudio(session: Long, outBuffer: ByteBuffer, frames: Int): Int
     internal external fun nativeMixOutputAudio(session: Long, micBuffer: ByteBuffer?, outBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
     internal external fun nativeSetCameraControls(session: Long, buffer: ByteBuffer): Int
@@ -2564,6 +2571,142 @@ class GossSession private constructor(
         val distBuf = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
         if (Gosslens.nativeRaycastWorldMesh(handle, oBuf, dBuf, pBuf, distBuf) != 0) return null
         return WorldMeshHit(floatArrayOf(pBuf.getFloat(0), pBuf.getFloat(4), pBuf.getFloat(8)), distBuf.getFloat(0))
+    }
+
+    /** A walkable route over the submitted world mesh, so an agent walks content
+     * across real scanned ground. Null when no mesh is submitted or no route
+     * exists. */
+    fun pathAcrossWorld(start: FloatArray, goal: FloatArray): List<FloatArray>? {
+        val capacity = 256
+        val a = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
+        a.asFloatBuffer().put(start)
+        val b = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
+        b.asFloatBuffer().put(goal)
+        val out = ByteBuffer.allocateDirect(capacity * 12).order(ByteOrder.nativeOrder())
+        val count = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativePathAcrossWorld(handle, a, b, out, capacity, count) != 0) return null
+        val found = minOf(count.getLong(0).toInt(), capacity)
+        return (0 until found).map { i ->
+            floatArrayOf(out.getFloat(i * 12), out.getFloat(i * 12 + 4), out.getFloat(i * 12 + 8))
+        }
+    }
+
+    /** What a submitted plane is, as a named kind rather than the platform's own
+     * number, and whether a thing can rest on it. */
+    enum class PlaneKind { UNKNOWN, FLOOR, WALL, CEILING, TABLE, SEAT, DOOR, WINDOW, SCREEN }
+
+    data class PlaneFacts(val kind: PlaneKind, val bearing: Boolean)
+
+    fun planeKind(planeId: Long): PlaneFacts? {
+        val out = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativePlaneKind(handle, planeId, out) != 0) return null
+        val ordinal = out.getInt(0)
+        val kinds = PlaneKind.entries
+        return PlaneFacts(if (ordinal in kinds.indices) kinds[ordinal] else PlaneKind.UNKNOWN, out.getInt(4) == 1)
+    }
+
+    /** The plane this session would call the floor: the lowest bearing surface it
+     * has been shown, or null when it has been shown none. */
+    fun floorPlaneId(): Long? {
+        val out = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeFloorPlane(handle, out) != 0) return null
+        return out.getLong(0)
+    }
+
+    /** Something already on a plane, on that plane's own axes in metres from its
+     * centre, so a placement answers about the surface as it is now. */
+    data class Occupant(val planeId: Long, val x: Float, val z: Float, val width: Float, val depth: Float)
+
+    data class Placement(val planeId: Long, val position: FloatArray, val freeFraction: Float)
+
+    /** Where a footprint fits, best surface first: the bearing plane with the most
+     * room left afterwards. An empty list is an answer. */
+    fun placeOn(width: Float, depth: Float, height: Float = 0f, occupants: List<Occupant> = emptyList()): List<Placement> {
+        val item = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
+        item.putFloat(0, width)
+        item.putFloat(4, depth)
+        item.putFloat(8, height)
+        val taken = if (occupants.isEmpty()) null else ByteBuffer.allocateDirect(occupants.size * 24).order(ByteOrder.nativeOrder())
+        occupants.forEachIndexed { i, o ->
+            val base = i * 24
+            taken!!.putLong(base, o.planeId)
+            taken.putFloat(base + 8, o.x)
+            taken.putFloat(base + 12, o.z)
+            taken.putFloat(base + 16, o.width)
+            taken.putFloat(base + 20, o.depth)
+        }
+        val capacity = 32
+        val out = ByteBuffer.allocateDirect(capacity * 24).order(ByteOrder.nativeOrder())
+        val count = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val status = Gosslens.nativePlaceOn(handle, item, taken, occupants.size, out, capacity, count)
+        // GOSS_AGAIN means more fit than the buffer held, which is still an answer.
+        if (status != 0 && status != 7) return emptyList()
+        val found = minOf(count.getLong(0).toInt(), capacity)
+        return (0 until found).map { i ->
+            val base = i * 24
+            Placement(
+                out.getLong(base),
+                floatArrayOf(out.getFloat(base + 8), out.getFloat(base + 12), out.getFloat(base + 16)),
+                out.getFloat(base + 20),
+            )
+        }
+    }
+
+    /** Point to point in metres with its uncertainty. [known] is false when either
+     * end vouched for no accuracy, so a sigma of zero is never read as certainty. */
+    data class Distance(val metres: Float, val sigma: Float, val known: Boolean)
+
+    fun measureBetween(from: FloatArray, to: FloatArray, fromAccuracyM: Float = 0f, toAccuracyM: Float = 0f): Distance? {
+        val a = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
+        a.asFloatBuffer().put(from)
+        val b = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
+        b.asFloatBuffer().put(to)
+        val out = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeMeasureBetween(handle, a, fromAccuracyM, b, toAccuracyM, out) != 0) return null
+        return Distance(out.getFloat(0), out.getFloat(4), out.getInt(8) == 1)
+    }
+
+    /** One landmark as it crosses to another device. No pose: a pose is
+     * meaningless in another origin. */
+    data class SharedLandmark(val id: Long, val position: FloatArray, val confidence: Float = 1f)
+
+    /** What this device can offer another: one landmark per world anchor it holds. */
+    fun sharedLandmarks(): List<SharedLandmark> {
+        val capacity = 32
+        val out = ByteBuffer.allocateDirect(capacity * 24).order(ByteOrder.nativeOrder())
+        val count = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val status = Gosslens.nativeSharedLandmarks(handle, out, capacity, count)
+        if (status != 0 && status != 7) return emptyList()
+        val found = minOf(count.getLong(0).toInt(), capacity)
+        return (0 until found).map { i ->
+            val base = i * 24
+            SharedLandmark(
+                out.getLong(base),
+                floatArrayOf(out.getFloat(base + 8), out.getFloat(base + 12), out.getFloat(base + 16)),
+                out.getFloat(base + 20),
+            )
+        }
+    }
+
+    /** The transform from the sender's origin into this one, column-major, with the
+     * fit it achieved. Null when fewer than three matched, which cannot fix a
+     * rigid transform. */
+    data class Alignment(val transform: FloatArray, val rmsError: Float, val matched: Int)
+
+    fun alignShared(theirs: List<SharedLandmark>): Alignment? {
+        val list = ByteBuffer.allocateDirect(maxOf(theirs.size, 1) * 24).order(ByteOrder.nativeOrder())
+        theirs.forEachIndexed { i, l ->
+            val base = i * 24
+            list.putLong(base, l.id)
+            list.putFloat(base + 8, l.position[0])
+            list.putFloat(base + 12, l.position[1])
+            list.putFloat(base + 16, l.position[2])
+            list.putFloat(base + 20, l.confidence)
+        }
+        val out = ByteBuffer.allocateDirect(18 * 4).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeAlignShared(handle, list, theirs.size, out) != 0) return null
+        val transform = FloatArray(16) { out.getFloat(it * 4) }
+        return Alignment(transform, out.getFloat(64), out.getInt(68))
     }
 
     /** Pulls the next block of mixed lens audio into a direct [out] buffer
