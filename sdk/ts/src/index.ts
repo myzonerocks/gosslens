@@ -1092,6 +1092,42 @@ export class GossEngine {
     return sum;
   }
 
+
+
+  /// What the engine is doing now, as against what it was asked for. Every
+  /// field is measured. The u64 fields are read as their low word, which holds
+  /// the whole count at any rate this engine reaches.
+  engineReport(): GossEngineReport | null {
+    const bytes = 14 * 4 + 3 * 8;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    try {
+      if (this.mod.ccall("goss_engine_read_report", "number", ["number", "number"], [this.handle, ptr]) !== 0) return null;
+      // The low word of each u64 is the whole count at any size this engine
+      // reaches, and reading it avoids a BigInt in the hot read.
+      const w = (offset: number) => this.mod.HEAPU32[(ptr + offset) >> 2];
+      return {
+        rendererBackend: w(0),
+        zeroCopyImport: w(4) !== 0,
+        texturePoolCapacity: w(8),
+        texturePoolLive: w(12),
+        texturePoolPeak: w(16),
+        texturePoolExhausted: w(20),
+        stagingPoolCapacity: w(24),
+        stagingPoolLive: w(28),
+        stagingPoolPeak: w(32),
+        stagingPoolExhausted: w(36),
+        texturePoolBins: w(40),
+        texturePoolBinsRefused: w(44),
+        stagingPoolBins: w(48),
+        bgfxLiveBytes: w(56),
+        bgfxAllocCallsLastFrame: w(64),
+        bgfxBytesLastFrame: w(72),
+      };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+    }
+  }
+
   destroy(): void {
     this.mod.ccall("goss_engine_destroy", null, ["number"], [this.handle]);
     // The renderer is gone now, so bgfx no longer references the selector.
@@ -1147,6 +1183,42 @@ export interface GossCaptureUi {
 /// its own scratch allocations (frame descriptor, pixel buffer,
 /// landmarks) rather than one shared per-engine pool - matches every
 /// other SDK's own per-session confinement.
+/// What the engine is doing now, as against what it was asked for.
+export interface GossEngineReport {
+  rendererBackend: number;
+  zeroCopyImport: boolean;
+  texturePoolCapacity: number;
+  texturePoolLive: number;
+  texturePoolPeak: number;
+  texturePoolExhausted: number;
+  stagingPoolCapacity: number;
+  stagingPoolLive: number;
+  stagingPoolPeak: number;
+  stagingPoolExhausted: number;
+  texturePoolBins: number;
+  texturePoolBinsRefused: number;
+  stagingPoolBins: number;
+  bgfxLiveBytes: number;
+  bgfxAllocCallsLastFrame: number;
+  bgfxBytesLastFrame: number;
+}
+
+/// This session's counters: work asked for against work done.
+export interface GossSessionReport {
+  framesSubmitted: number;
+  framesRendered: number;
+  degradeLevel: GossDegradeLevel;
+  degradeTransitions: number;
+  faceAnalysis: number;
+  handAnalysis: number;
+  poseAnalysis: number;
+  segmentationAnalysis: number;
+  mlAnalysis: number;
+  nodesDegraded: number;
+  nodeReportsLost: number;
+  scriptFaults: number;
+}
+
 /// What a lens node is doing, as against what its manifest asked for.
 export enum GossNodeState {
   Ready = 0,
@@ -1166,6 +1238,7 @@ export enum GossNodeReason {
   ModelRejected = 7,
   ModelUnsupported = 8,
   CapabilityUnavailable = 9,
+  ConstraintFailed = 10,
 }
 
 /// One lens node that is not doing what its manifest asked.
@@ -1207,6 +1280,7 @@ export class GossSession {
   /// freed in destroy() - no per-call wasm heap churn.
   private scratchPtr = 0;
   private scratchCapacity = 0;
+  private lensChangeInFlight = false;
 
   private constructor(
     private readonly mod: EngineModule,
@@ -1286,16 +1360,45 @@ export class GossSession {
   /// A lens built entirely from beauty.* nodes (beauty-baseline, say)
   /// activates and runs for real regardless, since those go through
   /// applyWebBeautyChain's own embedded shaders, not a per-lens one.
-  activateLens(manifestJson: string): void {
+  /// Activates a lens. On the WebGPU build this suspends, like the renderer init
+  /// and the capture readback: it creates shader programs and textures that reach
+  /// Dawn's async device work, so the module unwinds part way. Not awaiting left
+  /// it suspended and the next render reentered it, which killed the tab.
+  async activateLens(manifestJson: string): Promise<void> {
     const bytes = new TextEncoder().encode(manifestJson);
     const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]);
     this.mod.HEAPU8.set(bytes, ptr);
-    this.mod.ccall("goss_session_activate_lens", "number", ["number", "number", "number"], [this.handle, ptr, bytes.length]);
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
+    this.lensChangeInFlight = true;
+    try {
+      await this.mod.ccall(
+        "goss_session_activate_lens",
+        "number",
+        ["number", "number", "number"],
+        [this.handle, ptr, bytes.length],
+        { async: true },
+      );
+    } finally {
+      this.lensChangeInFlight = false;
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
+    }
   }
 
-  deactivateLens(): void {
-    this.mod.ccall("goss_session_deactivate_lens", null, ["number"], [this.handle]);
+  /// Deactivation destroys the same resources, so it suspends for the same
+  /// reason and is awaited for the same reason.
+  async deactivateLens(): Promise<void> {
+    this.lensChangeInFlight = true;
+    try {
+      await this.mod.ccall("goss_session_deactivate_lens", null, ["number"], [this.handle], { async: true });
+    } finally {
+      this.lensChangeInFlight = false;
+    }
+  }
+
+  /// True while an activation or deactivation is unwound. A render during that
+  /// window reenters a suspended module, which Asyncify cannot do, so a caller
+  /// driving its own frame loop skips the frame rather than calling in.
+  get isLensChangeInFlight(): boolean {
+    return this.lensChangeInFlight;
   }
 
   /// Advances the active lens's triggers/param ramps by dtUs, evaluating
@@ -2907,6 +3010,35 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 
+  /// This session's counters: frames in and out, the rung and how often it
+  /// moved, the analysis each modality ran, the nodes that are not ready.
+  sessionReport(): GossSessionReport | null {
+    const bytes = 2 * 8 + 2 * 4 + 5 * 8 + 3 * 4;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    try {
+      if (this.mod.ccall("goss_session_read_report", "number", ["number", "number"], [this.handle, ptr]) !== 0) return null;
+      // The low word of each u64 is the whole count at any rate this engine
+      // reaches, and reading it avoids a BigInt in the hot read.
+      const low = (offset: number) => this.mod.HEAPU32[(ptr + offset) >> 2];
+      return {
+        framesSubmitted: low(0),
+        framesRendered: low(8),
+        degradeLevel: low(16),
+        degradeTransitions: low(20),
+        faceAnalysis: low(24),
+        handAnalysis: low(32),
+        poseAnalysis: low(40),
+        segmentationAnalysis: low(48),
+        mlAnalysis: low(56),
+        nodesDegraded: low(64),
+        nodeReportsLost: low(68),
+        scriptFaults: low(72),
+      };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+    }
+  }
+
   /// Every node of the active lens that is not doing what its manifest asked,
   /// beside how many diagnostics could not be recorded at all. An empty list
   /// with a non-zero lost count means the lens degraded in ways the session
@@ -3155,12 +3287,20 @@ export class GossPreviewSession {
     this.session.setBlush(amount);
   }
 
-  activateLens(manifestJson: string): void {
-    this.session.activateLens(manifestJson);
+  /// Awaited, because activation suspends on the WebGPU build. A caller that
+  /// fires and forgets leaves the module unwound and the next render reenters
+  /// it.
+  activateLens(manifestJson: string): Promise<void> {
+    return this.session.activateLens(manifestJson);
   }
 
-  deactivateLens(): void {
-    this.session.deactivateLens();
+  deactivateLens(): Promise<void> {
+    return this.session.deactivateLens();
+  }
+
+  /// True while a lens change is unwound; a frame loop skips its render.
+  get isLensChangeInFlight(): boolean {
+    return this.session.isLensChangeInFlight;
   }
 
   tickLens(dtUs: number, signals: GossLensSignals = {}): void {

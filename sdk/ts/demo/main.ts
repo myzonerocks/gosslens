@@ -488,9 +488,9 @@ async function run(): Promise<void> {
     bloom: '{"glf":"1.0","id":"goss.demo.bloom","version":"1.0.0","display_name":"Bloom","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"m","type":"bloom.pass","inputs":{"frame":"camera"},"params":{},"bloom":{"threshold":0.6,"intensity":0.8}}],"triggers":[]}',
     ember: '{"glf":"1.0","id":"goss.demo.ember","version":"1.0.0","display_name":"Ember","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"e","type":"model.gltf","inputs":{"frame":"camera"},"params":{},"particles":{"count":200,"gravity":3.0,"speed":0.5,"lifetime":1.5,"fade":true,"cool":[0.7,0.05,0.0],"size":8,"glow":true}}],"triggers":[]}',
   };
-  document.getElementById("filter-none")?.addEventListener("click", () => preview.deactivateLens());
+  document.getElementById("filter-none")?.addEventListener("click", () => void preview.deactivateLens());
   for (const name of ["blur", "grade", "bloom", "ember"]) {
-    document.getElementById(`filter-${name}`)?.addEventListener("click", () => preview.activateLens(filterLenses[name]));
+    document.getElementById(`filter-${name}`)?.addEventListener("click", () => void preview.activateLens(filterLenses[name]));
   }
   (window as unknown as Record<string, unknown>).setBlush = (value: number) => {
     preview.setBlush(value);
@@ -502,7 +502,7 @@ async function run(): Promise<void> {
   (window as unknown as Record<string, unknown>).captureFrame = () => preview.captureFrame();
   (window as unknown as Record<string, unknown>).activateLens = async (url: string) => {
     const manifestJson = await (await fetch(url)).text();
-    preview.activateLens(manifestJson);
+    await preview.activateLens(manifestJson);
   };
   (window as unknown as Record<string, unknown>).deactivateLens = () => preview.deactivateLens();
 

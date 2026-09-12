@@ -289,6 +289,22 @@ export fn Java_com_gosslens_Gosslens_nativeWriteReconstruction(env: *JniEnv, cls
     return @intFromEnum(abi.goss_session_write_reconstruction(sessionFromHandle(session), @ptrCast(@alignCast(bytes)), @intCast(count)));
 }
 
+/// The engine and session reports as raw structs in a direct buffer, so Kotlin
+/// reads one crossing and decodes the fields it wants.
+export fn Java_com_gosslens_Gosslens_nativeEngineReport(env: *JniEnv, cls: jobject, engine: i64, out_buffer: jobject) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out: *align(1) abi.EngineReport = @ptrCast(out_bytes);
+    return @intFromEnum(abi.goss_engine_read_report(engineFromHandle(engine), out));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSessionReport(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out: *align(1) abi.SessionReport = @ptrCast(out_bytes);
+    return @intFromEnum(abi.goss_session_read_report(sessionFromHandle(session), out));
+}
+
 /// The node diagnostics, flattened into one direct buffer so Kotlin reads the
 /// whole report in one crossing rather than three per node: count and lost
 /// first, then three u32 per node (graph index, state, reason).
@@ -677,6 +693,44 @@ export fn Java_com_gosslens_Gosslens_nativeSubmitHardwareBuffer(
         .timestamp_us = timestamp_us,
     };
     return @intFromEnum(abi.goss_session_submit_hardware_buffer(sessionFromHandle(session), &desc, buffer));
+}
+
+/// The same import for a named composite source, so a second camera or a screen
+/// reaches the compositor without a full RGBA copy.
+export fn Java_com_gosslens_Gosslens_nativeSubmitSourceHardwareBuffer(
+    env: *JniEnv,
+    cls: jobject,
+    session: i64,
+    name_buffer: jobject,
+    name_len: i32,
+    hardware_buffer: jobject,
+    width: i32,
+    height: i32,
+    flags: i32,
+    color_standard: i32,
+    color_range: i32,
+    timestamp_us: i64,
+) i32 {
+    _ = cls;
+    const name_bytes = getDirectBufferAddress(env, name_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    if (name_len <= 0) return @intFromEnum(abi.Status.invalid_argument);
+    const buffer = AHardwareBuffer_fromHardwareBuffer(env, hardware_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var desc: abi.FrameDesc = .{
+        .width = @intCast(@max(width, 0)),
+        .height = @intCast(@max(height, 0)),
+        .pixel_format = 0,
+        .color_standard = @intCast(@max(color_standard, 0)),
+        .color_range = @intCast(@max(color_range, 0)),
+        .flags = @bitCast(flags),
+        .timestamp_us = timestamp_us,
+    };
+    return @intFromEnum(abi.goss_session_submit_source_hardware_buffer(
+        sessionFromHandle(session),
+        @ptrCast(name_bytes),
+        @intCast(name_len),
+        &desc,
+        buffer,
+    ));
 }
 
 export fn Java_com_gosslens_Gosslens_nativeEnableFaceTracking(env: *JniEnv, cls: jobject, session: i64, task_buffer: jobject, task_len: i32, threads: i32) i32 {

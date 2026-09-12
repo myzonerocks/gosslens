@@ -19,7 +19,9 @@ public final class GossSession: @unchecked Sendable {
     /// on every call and at destroy, so it holds the engine strongly: ARC
     /// cannot deinit the engine while any session is still alive, which
     /// keeps goss_session_destroy ordered before goss_engine_destroy.
-    private let engine: GossEngine
+    /// Held strongly, and readable by the extensions: the engine report is an
+    /// engine-level call a session is the natural place to reach.
+    let engine: GossEngine
     private var destroyed = false
 
     // Grow-only scratch for the per-frame multi-face and multi-body
@@ -103,6 +105,16 @@ public final class GossSession: @unchecked Sendable {
     /// on Android); hardwareBuffer is the opaque platform handle. False means
     /// the buffer could not be imported, the signal to fall back to
     /// submitFrameCopy for this stream.
+    /// A named composite source's frame straight from a platform buffer. Apple
+    /// has no AHardwareBuffer, so this reports false there; the source path for
+    /// this platform is submitSourceFrame with a Metal texture.
+    public func submitSourceHardwareBuffer(name: String, desc: GossFrameDesc, hardwareBuffer: UnsafeMutableRawPointer) -> Bool {
+        var raw = desc.raw
+        return name.withCString { cName in
+            goss_session_submit_source_hardware_buffer(handle, UnsafeRawPointer(cName).assumingMemoryBound(to: UInt8.self), strlen(cName), &raw, hardwareBuffer) == GOSS_OK
+        }
+    }
+
     public func submitHardwareBuffer(desc: GossFrameDesc, hardwareBuffer: UnsafeMutableRawPointer) -> Bool {
         var raw = desc.raw
         return goss_session_submit_hardware_buffer(handle, &raw, hardwareBuffer) == GOSS_OK

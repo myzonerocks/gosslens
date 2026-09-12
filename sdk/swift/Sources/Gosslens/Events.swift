@@ -447,6 +447,7 @@ extension GossSession {
         case none = 0, outOfMemory = 1, assetMissing = 2, assetMalformed = 3
         case assetTooLarge = 4, shaderMissing = 5, shaderLinkFailed = 6
         case modelRejected = 7, modelUnsupported = 8, capabilityUnavailable = 9
+        case constraintFailed = 10
     }
 
     /// How many nodes of the active lens are not ready, beside how many
