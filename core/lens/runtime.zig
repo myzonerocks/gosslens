@@ -158,6 +158,9 @@ const LensNode = struct {
     /// .shader_pass only: the named mask channel's index into
     /// manifest.mask_channels, when the manifest names one.
     mask_channel: ?u8 = null,
+    /// The lens declared this node best-effort, so a resource it cannot draw
+    /// without degrades it rather than failing the whole activation.
+    optional: bool = false,
     /// .model_gltf only: the node anchors to the tracked face.
     face_anchor: bool = false,
     /// .model_gltf face anchor only: which tracked face to bind to, an index
@@ -306,6 +309,8 @@ pub const ShaderPassNode = struct {
     shader_stem: []const u8,
     /// Index into manifest.mask_channels when the node names one.
     mask_channel: ?u8 = null,
+    /// The lens declared this pass best-effort.
+    optional: bool = false,
 };
 
 /// One lut.pass node ready for the caller to load and draw - which
@@ -965,7 +970,7 @@ pub const Lens = struct {
         for (order) |graph_index| {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .shader_pass) continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .shader_stem = node.asset_stem.?, .mask_channel = node.mask_channel });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .shader_stem = node.asset_stem.?, .mask_channel = node.mask_channel, .optional = node.optional });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1913,8 +1918,26 @@ pub const Lens = struct {
         return null;
     }
 
+    /// Whether the lens declared the node at this graph index best-effort. An
+    /// index this lens does not hold reads as required, which is the safe answer:
+    /// a failure on an unknown node is not something to wave through.
+    pub fn nodeIsOptional(self: *const Lens, graph_index: graph.NodeIndex) bool {
+        const node = self.findNode(graph_index) orelse return false;
+        return node.optional;
+    }
+
     /// The manifest id of the node at a graph index, so a diagnostic a caller
     /// reads names the node its author wrote rather than an internal index.
+    /// The graph index of the node with this manifest id, for a caller walking
+    /// manifest nodes rather than spliced ones. Null when the id was not spliced,
+    /// which a diagnostic treats as nothing to record against.
+    pub fn graphIndexFor(self: *const Lens, node_id: []const u8) ?graph.NodeIndex {
+        for (self.nodes) |node| {
+            if (std.mem.eql(u8, node.node_id, node_id)) return node.graph_index;
+        }
+        return null;
+    }
+
     pub fn nodeIdAt(self: *const Lens, graph_index: graph.NodeIndex) ?[]const u8 {
         const node = self.findNode(graph_index) orelse return null;
         if (node.node_id.len == 0) return null;
@@ -2050,6 +2073,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
                 else => null,
             },
             .mask_channel = if (node_type == .shader_pass) node.mask_channel else null,
+            .optional = node.optional,
             .face_anchor = node_type == .model_gltf and node.face_anchor,
             .face_index = node.face_index,
             .retarget = node_type == .model_gltf and node.retarget,

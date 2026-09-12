@@ -1364,19 +1364,22 @@ export class GossSession {
   /// and the capture readback: it creates shader programs and textures that reach
   /// Dawn's async device work, so the module unwinds part way. Not awaiting left
   /// it suspended and the next render reentered it, which killed the tab.
-  async activateLens(manifestJson: string): Promise<void> {
+  /// Resolves false when the lens is live but a node the manifest did not mark
+  /// optional could not do what it asked; nodeReports says which and why.
+  async activateLens(manifestJson: string): Promise<boolean> {
     const bytes = new TextEncoder().encode(manifestJson);
     const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]);
     this.mod.HEAPU8.set(bytes, ptr);
     this.lensChangeInFlight = true;
     try {
-      await this.mod.ccall(
+      const status = (await this.mod.ccall(
         "goss_session_activate_lens",
         "number",
         ["number", "number", "number"],
         [this.handle, ptr, bytes.length],
         { async: true },
-      );
+      )) as number;
+      return status === GOSS_OK;
     } finally {
       this.lensChangeInFlight = false;
       this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
@@ -3290,7 +3293,7 @@ export class GossPreviewSession {
   /// Awaited, because activation suspends on the WebGPU build. A caller that
   /// fires and forgets leaves the module unwound and the next render reenters
   /// it.
-  activateLens(manifestJson: string): Promise<void> {
+  activateLens(manifestJson: string): Promise<boolean> {
     return this.session.activateLens(manifestJson);
   }
 

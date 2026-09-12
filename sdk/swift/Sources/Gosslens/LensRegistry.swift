@@ -52,9 +52,13 @@ extension GossSession {
     /// Replaces any currently active lens with the one manifestJson
     /// describes, and applies its default effect values to the beauty
     /// chain if one is enabled.
-    public func activateLens(manifestJson: Data) throws {
+    /// Returns false when the lens is live but a node the manifest did not mark
+    /// optional could not do what it asked; nodeReports says which and why.
+    /// Throws only when the lens did not activate at all.
+    @discardableResult
+    public func activateLens(manifestJson: Data) throws -> Bool {
         try manifestJson.withUnsafeBytes { buffer in
-            try checked(goss_session_activate_lens(handle, buffer.bindMemory(to: UInt8.self).baseAddress, buffer.count))
+            try activated(goss_session_activate_lens(handle, buffer.bindMemory(to: UInt8.self).baseAddress, buffer.count))
         }
     }
 
@@ -72,10 +76,12 @@ extension GossSession {
     /// Same activation activateLens performs, from
     /// bundlePath/manifest.json, plus compiling a program for every
     /// shader.pass node the lens splices.
-    public func activateLensFromDirectory(bundlePath: String) throws {
+    /// The directory sibling of activateLens, with the same Bool meaning.
+    @discardableResult
+    public func activateLensFromDirectory(bundlePath: String) throws -> Bool {
         let bytes = Array(bundlePath.utf8)
-        try bytes.withUnsafeBufferPointer { buffer in
-            try checked(goss_session_activate_lens_from_directory(handle, buffer.baseAddress, buffer.count))
+        return try bytes.withUnsafeBufferPointer { buffer in
+            try activated(goss_session_activate_lens_from_directory(handle, buffer.baseAddress, buffer.count))
         }
     }
 

@@ -1988,6 +1988,11 @@ class GossSession private constructor(
 
     /** Replaces any currently active lens with the one manifestJson
      * describes, splicing its nodes into the session graph. */
+    /**
+     * False when the lens did not activate, and also when it is live with a node
+     * the manifest did not mark optional that could not do what it asked;
+     * nodeReports distinguishes the two and says which node and why.
+     */
     fun activateLens(manifestJson: ByteArray): Boolean {
         val buffer = ByteBuffer.allocateDirect(manifestJson.size)
         buffer.put(manifestJson)

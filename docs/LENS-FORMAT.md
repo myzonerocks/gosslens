@@ -64,6 +64,13 @@ adds its own fields. The types group into a few families:
 - **Logic**: `logic.graph` and the scripting node - deterministic per-tick
   computation with no ambient authority.
 
+Every node takes `"optional": true` to declare itself best effort: a resource it
+cannot draw without then degrades that node, and activation still answers that the
+lens is ready. Without it a node that loses its shader, asset or model makes
+activation answer `GOSS_LENS_NODE_FAILED`, with the node and the reason readable
+from the node reports. The lens decides which of its nodes it can live without;
+the engine no longer assumes all of them.
+
 The authoritative list of node types and their fields is the parser; this
 document names the families rather than pinning a count that grows.
 

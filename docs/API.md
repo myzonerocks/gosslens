@@ -327,8 +327,8 @@ wasm engine by default) returns `unsupported`, and the web producer path
 
 | ABI function | Public operation | Scope |
 |---|---|---|
-| `goss_session_activate_lens` | `activateLens(manifestJson)` | all SDKs |
-| `goss_session_activate_lens_from_directory` | `activateLensFromDirectory(bundlePath)` | native SDKs |
+| `goss_session_activate_lens` | `activateLens(manifestJson)`, answering whether every node reached ready. `GOSS_LENS_NODE_FAILED` means the lens is live and a node the manifest did not mark `"optional": true` could not do what it asked, which the node reports name; the SDKs return that as false rather than an error, since the lens is drawing | all SDKs |
+| `goss_session_activate_lens_from_directory` | `activateLensFromDirectory(bundlePath)`, the same answer from a bundle directory | native SDKs |
 | `goss_session_deactivate_lens` | `deactivateLens()` | all SDKs |
 | `goss_session_tick_lens` | `tickLens(dtUs, signals)` | all SDKs |
 | `goss_session_fire_event` | `fireEvent(name)`, fires a named event the next `tickLens` delivers to the lens's `event('name')` triggers for exactly one tick, then clears - drives an on-screen effect from an app-level moment (a reaction, an arriving gift); the engine knows the name, never its meaning. Buffered without allocation | all SDKs |

@@ -337,6 +337,10 @@ pub const Status = enum(c_int) {
     renderer_unavailable = 5,
     unsupported = 6,
     again = 7,
+    /// A lens activated with a node that could not do what its manifest asked and
+    /// was not declared optional. The lens is live and the rest of it draws; the
+    /// node reports name which node and why, so a host can decide.
+    lens_node_failed = 8,
 };
 
 pub const FrameDesc = extern struct {
@@ -8062,6 +8066,32 @@ fn noteNode(s: *Session, graph_index: graph.NodeIndex, state: NodeState, reason:
     };
 }
 
+/// The status an activation answers once its resources are built: ok, or
+/// lens_node_failed when a node the lens did not mark optional ended failed. Read
+/// immediately after activation and before any frame, because the frame path
+/// records a failed node too and that is not an activation result.
+fn activationStatus(s: *Session) Status {
+    for (s.node_reports.items) |report| {
+        if (report.state == @intFromEnum(NodeState.failed)) return .lens_node_failed;
+    }
+    return .ok;
+}
+
+/// A resource a node cannot draw without. A node the lens marked optional
+/// degrades; any other node failed, and activation says so rather than handing
+/// back a lens that is quietly missing a pass.
+fn noteResourceFailure(s: *Session, graph_index: graph.NodeIndex, optional: bool, reason: NodeReason) void {
+    noteNode(s, graph_index, if (optional) .degraded else .failed, reason);
+}
+
+/// The same as noteResourceFailure for a caller walking manifest nodes, where a
+/// node that was never spliced has no index to record against. Nothing is lost:
+/// an unspliced node is not drawing either way.
+fn noteMl(s: *Session, graph_index: ?graph.NodeIndex, optional: bool, reason: NodeReason) void {
+    const gi = graph_index orelse return;
+    noteResourceFailure(s, gi, optional, reason);
+}
+
 /// A joint the physics backend refused. The node still draws, so without this a
 /// chained hair or tail that silently failed to hang reads as a lens bug the host
 /// has no way to see.
@@ -11363,7 +11393,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     // shaders, textures and models all failed to load looked activated. It is
     // recorded against the lens now, and read back through the node reports.
     createLensResources(s, gpa, "") catch |err| noteLensResourceFailure(s, err);
-    return .ok;
+    return activationStatus(s);
 }
 
 /// Records a whole-pass resource failure when createLensResources gives up part
@@ -11394,22 +11424,29 @@ fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: 
 
     const tag = render.Renderer.currentShaderProfileTag() catch |err| {
         std.log.info("gosslens: every shader.pass left inert - no shader profile for this backend ({t})", .{err});
+        for (passes) |pass| noteResourceFailure(session, pass.graph_index, pass.optional, .capability_unavailable);
         return;
     };
     for (passes) |pass| {
         var bin_buf: [512]u8 = undefined;
-        const bin_name = std.fmt.bufPrint(&bin_buf, "{s}.{s}.bin", .{ pass.shader_stem, tag }) catch continue;
+        const bin_name = std.fmt.bufPrint(&bin_buf, "{s}.{s}.bin", .{ pass.shader_stem, tag }) catch {
+            noteResourceFailure(session, pass.graph_index, pass.optional, .asset_too_large);
+            continue;
+        };
         const bytes = readBundleFile(session, gpa, bundle_path, "shaders", bin_name, 256 * 1024) orelse {
             std.log.info("gosslens: shader.pass {s} left inert - shaders/{s} unreadable", .{ pass.shader_stem, bin_name });
+            noteResourceFailure(session, pass.graph_index, pass.optional, .shader_missing);
             continue;
         };
         defer gpa.free(bytes);
         const program = render.Renderer.loadLensProgram(bytes) catch |err| {
             std.log.info("gosslens: shader.pass {s} left inert - {s}.{s} program creation failed ({t})", .{ pass.shader_stem, pass.shader_stem, tag, err });
+            noteResourceFailure(session, pass.graph_index, pass.optional, .shader_link_failed);
             continue;
         };
         session.shader_programs.put(gpa, pass.graph_index, program.idx) catch {
             render.Renderer.destroyProgram(program);
+            noteOom(session, pass.graph_index);
             continue;
         };
         if (pass.mask_channel) |channel| {
@@ -12914,21 +12951,30 @@ const MlWorker = struct {
 };
 
 /// Builds an inference worker for every ml.infer node from its bundled model,
-/// holding the node's output-to-parameter and output-to-mask bindings.
-/// Best-effort per node: a missing, malformed, or oversized model leaves that
-/// node inert.
+/// holding the node's output-to-parameter and output-to-mask bindings. Each way
+/// this can fail records its own reason against the node: a model that is
+/// missing, refused by the digest allowlist, or that the runtime will not take.
 fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
     const lens = if (session.active_lens) |*l| l else return;
     for (lens.manifest.nodes) |node| {
         const ml = node.ml orelse continue;
+        const gi = lens.graphIndexFor(node.id);
         if (session.ml_workers_loaded >= session.ml_worker_budget) {
             std.log.info("gosslens: ml.infer node over the {d}-worker budget left inert", .{session.ml_worker_budget});
+            // A degrade whatever the lens declared: the budget is the engine's
+            // own limit, so a lens that asked for more nodes than this build
+            // runs is not a lens with a defect in it.
+            if (gi) |index| noteNode(session, index, .degraded, .capability_unavailable);
             continue;
         }
-        const bytes = readBundleAsset(session, gpa, bundle_path, ml.model, 32 * 1024 * 1024) orelse continue;
+        const bytes = readBundleAsset(session, gpa, bundle_path, ml.model, 32 * 1024 * 1024) orelse {
+            noteMl(session, gi, node.optional, .asset_missing);
+            continue;
+        };
         defer gpa.free(bytes);
         if (!modelAllowed(session, bytes)) {
             std.log.info("gosslens: ml.infer model {s} not on the digest allowlist, node inert", .{ml.model});
+            noteMl(session, gi, node.optional, .model_rejected);
             continue;
         }
         const norm: ml_infer.Norm = .{ .symmetric = ml.input_symmetric, .mean = ml.input_mean, .std_dev = ml.input_std };
@@ -12940,26 +12986,36 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
             if (ml.temporal) {
                 break :blk ml_infer.create(gpa, bytes, .{}, 2, norm, null, 0, 0, true) catch |err| {
                     std.log.info("gosslens: ml.infer model {s} left inert ({t})", .{ ml.model, err });
+                    noteMl(session, gi, node.optional, .model_unsupported);
                     continue;
                 };
             }
             if (ml.aux_reference.len > 0) {
-                const ref_name = std.fmt.allocPrint(gpa, "{s}.png", .{ml.aux_reference}) catch continue;
+                const ref_name = std.fmt.allocPrint(gpa, "{s}.png", .{ml.aux_reference}) catch {
+                    noteMl(session, gi, node.optional, .out_of_memory);
+                    continue;
+                };
                 defer gpa.free(ref_name);
-                const ref_bytes = readBundleAsset(session, gpa, bundle_path, ref_name, 4 * 1024 * 1024) orelse continue;
+                const ref_bytes = readBundleAsset(session, gpa, bundle_path, ref_name, 4 * 1024 * 1024) orelse {
+                    noteMl(session, gi, node.optional, .asset_missing);
+                    continue;
+                };
                 defer gpa.free(ref_bytes);
                 const dec = image.decode(gpa, ref_bytes) catch |err| {
                     std.log.info("gosslens: ml.infer reference {s} did not decode ({t})", .{ ml.aux_reference, err });
+                    noteMl(session, gi, node.optional, .asset_malformed);
                     continue;
                 };
                 defer gpa.free(dec.rgba);
                 break :blk ml_infer.create(gpa, bytes, .{}, 2, norm, dec.rgba, @intCast(dec.width), @intCast(dec.height), false) catch |err| {
                     std.log.info("gosslens: ml.infer model {s} left inert ({t})", .{ ml.model, err });
+                    noteMl(session, gi, node.optional, .model_unsupported);
                     continue;
                 };
             }
             break :blk ml_infer.create(gpa, bytes, .{}, 2, norm, null, 0, 0, false) catch |err| {
                 std.log.info("gosslens: ml.infer model {s} left inert ({t})", .{ ml.model, err });
+                noteMl(session, gi, node.optional, .model_unsupported);
                 continue;
             };
         };
@@ -15440,7 +15496,7 @@ pub export fn goss_session_activate_lens_from_directory(session: ?*Session, bund
         error.Unsupported => .unsupported,
         else => .invalid_argument,
     };
-    return .ok;
+    return activationStatus(s);
 }
 
 /// Releases every render target a lens's capabilities brought up. These were

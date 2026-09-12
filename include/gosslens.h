@@ -71,6 +71,10 @@ typedef enum goss_status {
     GOSS_ERROR_RENDERER_UNAVAILABLE = 5,
     GOSS_ERROR_UNSUPPORTED = 6,
     GOSS_AGAIN = 7,
+    /* A lens is live but a node the manifest did not mark optional could not do
+     * what it asked. The rest of the lens draws; the node reports say which node
+     * and why, so the host decides whether that is acceptable. */
+    GOSS_LENS_NODE_FAILED = 8,
 } goss_status;
 
 typedef struct goss_engine goss_engine;

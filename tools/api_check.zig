@@ -59,6 +59,44 @@ const mirrored_enums = [_][]const u8{
     "GOSS_THERMAL_",
 };
 
+/// Every `Java_com_gosslens_Gosslens_<name>` in the JNI file, names only. A
+/// binding with no Kotlin declaration is reachable from Zig and from nothing an
+/// app can call, which the op-level check cannot see because the op IS bound.
+fn collectJniNames(arena: Allocator, jni: []const u8) !std.ArrayList([]const u8) {
+    const prefix = "Java_com_gosslens_Gosslens_";
+    var names: std.ArrayList([]const u8) = .empty;
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, jni, at, prefix)) |start| {
+        at = start + prefix.len;
+        var end = at;
+        while (end < jni.len and isIdentChar(jni[end])) end += 1;
+        const name = jni[at..end];
+        if (name.len == 0 or seen.contains(name)) continue;
+        try seen.put(arena, name, {});
+        try names.append(arena, name);
+    }
+    return names;
+}
+
+/// Every `external fun <name>` Kotlin declares, names only.
+fn collectKotlinExternals(arena: Allocator, kotlin: []const u8) !std.ArrayList([]const u8) {
+    const marker = "external fun ";
+    var names: std.ArrayList([]const u8) = .empty;
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, kotlin, at, marker)) |start| {
+        at = start + marker.len;
+        var end = at;
+        while (end < kotlin.len and isIdentChar(kotlin[end])) end += 1;
+        const name = kotlin[at..end];
+        if (name.len == 0 or seen.contains(name)) continue;
+        try seen.put(arena, name, {});
+        try names.append(arena, name);
+    }
+    return names;
+}
+
 /// The tail of a header enum member, spelled the way each SDK spells a case.
 /// CONSTRAINT_FAILED stays itself for Kotlin, becomes constraintFailed for
 /// Swift and ConstraintFailed for TypeScript.
@@ -245,10 +283,29 @@ pub fn main(init: std.process.Init) !u8 {
         }
     }
 
+    const kotlin = try c.read("sdk/kotlin/src/main/kotlin/com/gosslens/Gosslens.kt");
+
+    // A JNI binding Kotlin never declares is reachable from nothing an app can
+    // call, and a Kotlin declaration with no binding fails at load rather than at
+    // build. The op-level check above sees neither, because the op is bound.
+    const jni_names = try collectJniNames(arena, jni);
+    const kotlin_names = try collectKotlinExternals(arena, kotlin);
+    // Set membership, not a word search: the JNI symbol prefixes the name with
+    // an underscore, which a word-boundary match reads as one long identifier.
+    var kotlin_set: std.StringHashMapUnmanaged(void) = .empty;
+    for (kotlin_names.items) |name| try kotlin_set.put(arena, name, {});
+    var jni_set: std.StringHashMapUnmanaged(void) = .empty;
+    for (jni_names.items) |name| try jni_set.put(arena, name, {});
+    for (jni_names.items) |name| {
+        if (!kotlin_set.contains(name)) try c.flag("the JNI binds {s} and Kotlin declares no external fun for it", .{name});
+    }
+    for (kotlin_names.items) |name| {
+        if (!jni_set.contains(name)) try c.flag("Kotlin declares external fun {s} and the JNI binds nothing for it", .{name});
+    }
+
     // Every value of a mirrored enum reaches all three SDKs, spelled each one's
     // way. The Kotlin reader decodes by ordinal, so a missing case there does not
     // fail to compile, it mislabels every value after the gap.
-    const kotlin = try c.read("sdk/kotlin/src/main/kotlin/com/gosslens/Gosslens.kt");
     for (mirrored_enums) |prefix| {
         const tails = try collectEnumTails(arena, header, prefix);
         if (tails.items.len == 0) {
@@ -319,4 +376,24 @@ test "enum members are collected, uses of the same name are not" {
     try std.testing.expectEqual(@as(usize, 2), tails.items.len);
     try std.testing.expectEqualStrings("NONE", tails.items[0]);
     try std.testing.expectEqualStrings("OUT_OF_MEMORY", tails.items[1]);
+}
+
+test "JNI names and Kotlin externals are collected, and only those" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const jni =
+        "export fn Java_com_gosslens_Gosslens_nativeAbiVersion(env: *JniEnv) i32 {}\n" ++
+        "export fn Java_com_gosslens_Gosslens_nativeCapabilities(env: *JniEnv) i64 {}\n" ++
+        "// Java_com_gosslens_Gosslens_nativeAbiVersion named twice is still one\n";
+    const names = try collectJniNames(a, jni);
+    try std.testing.expectEqual(@as(usize, 2), names.items.len);
+    try std.testing.expectEqualStrings("nativeAbiVersion", names.items[0]);
+
+    const kotlin =
+        "    internal external fun nativeAbiVersion(): Int\n" ++
+        "    fun abiVersion(): Int = Gosslens.nativeAbiVersion()\n";
+    const externals = try collectKotlinExternals(a, kotlin);
+    try std.testing.expectEqual(@as(usize, 1), externals.items.len);
+    try std.testing.expectEqualStrings("nativeAbiVersion", externals.items[0]);
 }

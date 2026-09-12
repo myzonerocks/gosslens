@@ -1305,6 +1305,10 @@ pub const Node = struct {
     params: []const NodeParam,
     /// Index into mask_channels, set only when the manifest names one.
     mask_channel: ?u8 = null,
+    /// True when the lens declares this node best-effort: a resource it cannot
+    /// draw without degrades the node instead of failing the activation. Without
+    /// it, best effort was the engine's assumption rather than the lens's claim.
+    optional: bool = false,
     /// True when a model.gltf node anchors to the tracked face.
     face_anchor: bool = false,
     /// Which tracked face a face-anchored model.gltf binds to: -1 (the default)
@@ -3855,6 +3859,12 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 retarget = rv.bool;
             } else try diags.add(path.slice(), "retarget must be a boolean", .{});
         }
+        var optional = false;
+        if (getField(object, "optional")) |ov| {
+            if (ov == .bool) {
+                optional = ov.bool;
+            } else try diags.add(path.slice(), "optional must be a boolean", .{});
+        }
         var talk = false;
         if (getField(object, "talk")) |tv| {
             if (!std.mem.eql(u8, node_type, "model.gltf")) {
@@ -4074,6 +4084,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .inputs = try inputs.toOwnedSlice(arena),
             .params = try params.toOwnedSlice(arena),
             .mask_channel = mask_channel,
+            .optional = optional,
             .face_anchor = face_anchor,
             .face_index = face_index,
             .retarget = retarget,

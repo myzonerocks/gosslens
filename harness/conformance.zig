@@ -16482,6 +16482,116 @@ fn proveLensTargetsRelease(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 /// needing different capability targets run in turn; the pool must hand out
 /// slots, reach a peak, and end with none live, which is what sharing a target
 /// between capabilities that never meet looks like from outside.
+/// Best effort is the lens's claim, not the engine's assumption: a node that
+/// loses a resource it cannot draw without fails the activation, unless the
+/// manifest marked that node optional, in which case the lens is ready and the
+/// node is degraded. Both halves, over one bundle with its shader binary hidden.
+fn proveOptionalNodeDeclaresBestEffort(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle = ".lens-packages/hair-matte";
+    const cwd = std.Io.Dir.cwd();
+    // Hide every compiled variant, so the pass has no program whatever backend
+    // this host brought up, and put them all back however this proof ends.
+    const variants = [_][]const u8{ "recolor.metal.bin", "recolor.essl.bin", "recolor.spv.bin", "recolor.dx11.bin" };
+    var hidden: [variants.len]bool = @splat(false);
+    defer for (variants, 0..) |name, i| {
+        if (!hidden[i]) continue;
+        const from = std.fmt.allocPrint(gpa, "{s}/shaders/{s}.hidden", .{ bundle, name }) catch continue;
+        defer gpa.free(from);
+        const to = std.fmt.allocPrint(gpa, "{s}/shaders/{s}", .{ bundle, name }) catch continue;
+        defer gpa.free(to);
+        cwd.rename(from, cwd, to, harness_io) catch {}; // failure ignored: a restore that did not happen shows up as the next run missing the binary
+    };
+    for (variants, 0..) |name, i| {
+        const from = try std.fmt.allocPrint(gpa, "{s}/shaders/{s}", .{ bundle, name });
+        defer gpa.free(from);
+        const to = try std.fmt.allocPrint(gpa, "{s}/shaders/{s}.hidden", .{ bundle, name });
+        defer gpa.free(to);
+        cwd.rename(from, cwd, to, harness_io) catch continue; // failure ignored: this host's bundle may not carry that backend's variant
+        hidden[i] = true;
+    }
+
+    const required = try activationOf(gpa, engine, bundle);
+    if (required.status != .lens_node_failed) {
+        std.debug.print("conformance: FAIL a required node with no shader activated {t}, not lens_node_failed\n", .{required.status});
+        return false;
+    }
+    if (required.first_state != @intFromEnum(abi.NodeState.failed) or required.first_reason != @intFromEnum(abi.NodeReason.shader_missing)) {
+        std.debug.print("conformance: FAIL the report said state {d} reason {d}, wanted failed and shader_missing\n", .{ required.first_state, required.first_reason });
+        return false;
+    }
+
+    // The same bundle with that node marked optional: the lens is ready and the
+    // node is degraded, which is the whole point of the flag.
+    const manifest_path = try std.fmt.allocPrint(gpa, "{s}/manifest.json", .{bundle});
+    defer gpa.free(manifest_path);
+    const original = try cwd.readFileAlloc(harness_io, manifest_path, gpa, .limited(1 << 20));
+    defer gpa.free(original);
+    const marked = try markFirstShaderPassOptional(gpa, original);
+    defer gpa.free(marked);
+    if (marked.len == original.len) {
+        std.debug.print("conformance: FAIL could not mark a shader.pass optional in {s}\n", .{manifest_path});
+        return false;
+    }
+    const optional = try activationOfManifest(gpa, engine, marked);
+    if (optional.status != .ok) {
+        std.debug.print("conformance: FAIL an optional node with no shader activated {t}, not ok\n", .{optional.status});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a node with no shader fails the activation and names shader_missing, and the same node marked optional activates ready instead\n", .{});
+    return true;
+}
+
+const ActivationResult = struct { status: abi.Status, first_state: u32 = 0, first_reason: u32 = 0 };
+
+/// Activates a bundle on a throwaway session and reads back the status beside
+/// the first node report, which is what the two halves above compare.
+fn activationOf(gpa: std.mem.Allocator, engine: *abi.Engine, bundle: []const u8) !ActivationResult {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    _ = gpa;
+    const status = abi.goss_session_activate_lens_from_directory(session, bundle.ptr, bundle.len);
+    return firstReport(session, status);
+}
+
+/// The same for a manifest held in memory, so the optional half needs no second
+/// bundle on disk.
+fn activationOfManifest(gpa: std.mem.Allocator, engine: *abi.Engine, manifest: []const u8) !ActivationResult {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    _ = gpa;
+    const status = abi.goss_session_activate_lens(session, manifest.ptr, manifest.len);
+    return firstReport(session, status);
+}
+
+fn firstReport(session: *abi.Session, status: abi.Status) ActivationResult {
+    var count: u32 = 0;
+    var lost: u32 = 0;
+    if (abi.goss_session_node_report_count(session, &count, &lost) != .ok or count == 0) {
+        return .{ .status = status };
+    }
+    var report: abi.NodeReport = undefined;
+    if (abi.goss_session_node_report_at(session, 0, &report) != .ok) return .{ .status = status };
+    return .{ .status = status, .first_state = report.state, .first_reason = report.reason };
+}
+
+/// Inserts `"optional": true` into the first shader.pass node object of a
+/// manifest. Returns the original length unchanged when it finds none, which the
+/// caller treats as a failed proof rather than a passing one.
+fn markFirstShaderPassOptional(gpa: std.mem.Allocator, manifest: []const u8) ![]u8 {
+    const needle = "\"type\": \"shader.pass\"";
+    const at = std.mem.indexOf(u8, manifest, needle) orelse return gpa.dupe(u8, manifest);
+    const insert = ", \"optional\": true";
+    var out = try gpa.alloc(u8, manifest.len + insert.len);
+    const head = at + needle.len;
+    @memcpy(out[0..head], manifest[0..head]);
+    @memcpy(out[head..][0..insert.len], insert);
+    @memcpy(out[head + insert.len ..], manifest[head..]);
+    return out;
+}
+
 fn provePoolServesScratchTargets(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
@@ -22742,6 +22852,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveLensTargetsRelease(gpa, engine)) return 1;
     watchHold("lens targets release");
     if (!try provePoolServesScratchTargets(gpa, engine)) return 1;
+    if (!try proveOptionalNodeDeclaresBestEffort(gpa, engine)) return 1;
+    watchHold("optional node declares best effort");
     watchHold("pool serves scratch targets");
     return 0;
 }
