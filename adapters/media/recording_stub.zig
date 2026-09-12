@@ -1,20 +1,27 @@
 //! Recording for targets whose backend has not landed: same surface,
 //! every operation reports the capability honestly absent.
 
+const media = @import("media");
+
 /// How the vended native handle binds: a sampleable texture, or a
 /// platform window the renderer presents into.
 pub const NativeHandleKind = enum { texture, window };
 pub const native_handle_kind: NativeHandleKind = .texture;
-/// Whether this backend muxes a submitted audio track.
-pub const audio_supported = false;
 
-/// Whether a real backend exists on this target.
-pub const supported = false;
-
-pub const Codec = enum(u32) {
-    h264 = 0,
-    hevc = 1,
+/// A backend that declares nothing, which is the honest declaration for a target
+/// whose encoder has not landed. Selection finds no backend and the caller hears
+/// that, rather than reading a false boolean and trying.
+pub const backend: media.Backend = .{
+    .name = "none",
+    .video = &.{},
+    .audio = &.{},
+    .containers = &.{},
 };
+
+pub const supported = backend.video.len > 0;
+pub const audio_supported = backend.audio.len > 0;
+
+pub const Codec = media.VideoCodec;
 
 pub const Config = struct {
     width: u32,

@@ -23,6 +23,7 @@ const png = @import("png");
 const gif = @import("gif");
 const jpeg = @import("jpeg");
 const color = @import("color");
+const media = @import("media");
 const media_recording = @import("media_recording");
 const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
@@ -6312,6 +6313,20 @@ pub export fn goss_engine_recording_set_realtime(engine: ?*Engine, realtime: boo
     return .ok;
 }
 
+/// The codec number a host passes, as the core's own enum. A number outside the
+/// set is refused rather than cast, so an SDK built against a later header cannot
+/// name a codec this build does not have.
+fn videoCodecFromAbi(raw: u32) ?media.VideoCodec {
+    return switch (raw) {
+        0 => .h264,
+        1 => .hevc,
+        2 => .vp8,
+        3 => .vp9,
+        4 => .av1,
+        else => null,
+    };
+}
+
 pub export fn goss_engine_recording_start(engine: ?*Engine, session: ?*Session, path: ?[*]const u8, path_len: usize, config: ?*const RecordingConfig) Status {
     const e = engine orelse return .invalid_argument;
     const s = session orelse return .invalid_argument;
@@ -6324,7 +6339,21 @@ pub export fn goss_engine_recording_start(engine: ?*Engine, session: ?*Session, 
     const cfg: RecordingConfig = if (config) |c_| c_.* else .{ .width = 0, .height = 0, .bitrate_bps = 0, .codec = 0 };
     const width = (if (cfg.width == 0) @as(u32, r.width) else cfg.width) & ~@as(u32, 1);
     const height = (if (cfg.height == 0) @as(u32, r.height) else cfg.height) & ~@as(u32, 1);
-    if (!validDims(width, height) or cfg.codec > 1) return .invalid_argument;
+    if (!validDims(width, height)) return .invalid_argument;
+    // The backend's own declaration decides, rather than a range check against a
+    // codec count: a size or codec it does not encode is refused here instead of
+    // failing at the first frame with a file already open.
+    const wanted: media.EncodedVideoDesc = .{
+        .width = width,
+        .height = height,
+        .codec = videoCodecFromAbi(cfg.codec) orelse return .invalid_argument,
+        .bitrate_bps = cfg.bitrate_bps,
+    };
+    _ = media.selectBackend(&.{media_recording.backend}, .{
+        .video = wanted,
+        .audio = if (media_recording.audio_supported) .aac else null,
+        .container = .mp4,
+    }) catch return .unsupported;
 
     e.recording = media_recording.Recording.start(p[0..path_len], .{
         .width = width,
