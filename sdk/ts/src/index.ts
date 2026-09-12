@@ -3134,6 +3134,21 @@ export class GossSession {
     }
   }
 
+  /// The session's events as an async iterable, which is how a page wants them:
+  /// `for await (const e of session.eventStream())`. Polls on an interval because
+  /// the ring is drained by the caller and there is nothing to await on the
+  /// engine side. A drop is yielded as an event of its own rather than swallowed.
+  async *eventStream(pollMs = 16, batch = 64): AsyncGenerator<GossEvent> {
+    for (;;) {
+      const drained = this.pollEvents(batch);
+      for (const event of drained.events) yield event;
+      if (drained.dropped > 0) {
+        yield { kind: 0, sequence: 0, timestampUs: 0, a: drained.dropped, b: 0, value: 0 };
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+  }
+
   /// Drains the session's event ring in order. `dropped` says whether anything
   /// was missed since the last drain, and is cleared by the read.
   pollEvents(capacity = 64): { events: GossEvent[]; dropped: number } {

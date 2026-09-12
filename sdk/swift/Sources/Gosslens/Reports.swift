@@ -221,3 +221,36 @@ public enum GossEventKind: UInt32, Sendable {
     case recordingStarted = 32, recordingPaused = 33, recordingResumed = 34, recordingStopped = 35
     case interruption = 36, frameDropped = 37, budgetExceeded = 38, thermalChanged = 39
 }
+
+extension GossSession {
+    /// The session's events as an `AsyncSequence`, which is how a Swift caller
+    /// wants them: `for await event in session.events()`. Polls on an interval
+    /// rather than blocking a thread, because the ring is drained by the caller
+    /// and there is nothing to await on the engine side.
+    ///
+    /// `dropped` is surfaced as an event of its own rather than swallowed: a
+    /// consumer that missed something must be able to know it did.
+    public func events(pollInterval: Duration = .milliseconds(16), batch: Int = 64) -> AsyncStream<GossEvent> {
+        AsyncStream { continuation in
+            let task = Task {
+                while !Task.isCancelled {
+                    if let drained = try? self.pollEvents(capacity: batch) {
+                        for event in drained.events { continuation.yield(event) }
+                        if drained.dropped > 0 {
+                            // A synthetic event carrying the count, so a drop is
+                            // visible in the same stream rather than in a return
+                            // value a for-await loop never sees.
+                            var notice = GossEvent(goss_event())
+                            notice.kind = .unknown
+                            notice.a = UInt32(truncatingIfNeeded: drained.dropped)
+                            continuation.yield(notice)
+                        }
+                    }
+                    try? await Task.sleep(for: pollInterval)
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}

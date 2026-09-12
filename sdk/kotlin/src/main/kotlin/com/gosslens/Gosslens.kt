@@ -899,6 +899,18 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * Drains the session's event ring in order. dropped says whether anything was
      * missed since the last drain, and is cleared by the read.
      */
+    /**
+     * Drains the ring and hands each event to a callback, returning what was
+     * dropped. A caller using coroutines wraps this in a flow in one line; the SDK
+     * takes no coroutines dependency, because forcing one on every Android
+     * consumer to offer a Flow is a cost they did not ask for.
+     */
+    fun drainEvents(capacity: Int = 64, onEvent: (GossEvent) -> Unit): Long {
+        val batch = pollEvents(capacity)
+        for (event in batch.events) onEvent(event)
+        return batch.dropped
+    }
+
     fun pollEvents(capacity: Int = 64): EventBatch {
         // kind u32 at 0, sequence u64 at 8, timestamp i64 at 16, a u32 at 24,
         // b u32 at 28, value f32 at 32; forty bytes with the tail padding.
