@@ -33,11 +33,15 @@ pub const Tag = enum(u16) {
     audio = 10,
     lens = 11,
     engine = 12,
+    /// A model output that is one vector: the frame's embedding. It is a
+    /// section rather than a side channel so a semantic index reads it from the
+    /// same snapshot as everything else it stores.
+    embedding = 13,
     _,
 };
 
 /// Which sections a caller wants. A snapshot is read every frame by an agent that
-/// usually cares about two of them, and writing all twelve to be ignored is the
+/// usually cares about two of them, and writing every one to be ignored is the
 /// cost this avoids.
 pub const Select = packed struct(u32) {
     frame: bool = false,
@@ -52,7 +56,8 @@ pub const Select = packed struct(u32) {
     audio: bool = false,
     lens: bool = false,
     engine: bool = false,
-    _reserved: u20 = 0,
+    embedding: bool = false,
+    _reserved: u19 = 0,
 
     pub const all: Select = .{
         .frame = true,
@@ -67,6 +72,7 @@ pub const Select = packed struct(u32) {
         .audio = true,
         .lens = true,
         .engine = true,
+        .embedding = true,
     };
 
     pub fn wants(s: Select, tag: Tag) bool {
@@ -83,6 +89,7 @@ pub const Select = packed struct(u32) {
             .audio => s.audio,
             .lens => s.lens,
             .engine => s.engine,
+            .embedding => s.embedding,
             _ => false,
         };
     }

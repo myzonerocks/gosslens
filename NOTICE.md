@@ -103,18 +103,18 @@ permissively licensed and on the vendor allowlist; none is a runtime dependency 
 a target that has a platform encoder it prefers.
 
 - **libopus** (`third_party/opus`, v1.5.2, BSD-3-Clause, Xiph.Org Foundation and
-  contributors) — the one audio codec the engine can own on every target, and the
+  contributors): the one audio codec the engine can own on every target, and the
   codec WebM requires.
-- **libwebm** (`third_party/libwebm`, 1.0.0.31, BSD-3-Clause, Google Inc.) — WebM
+- **libwebm** (`third_party/libwebm`, 1.0.0.31, BSD-3-Clause, Google Inc.): WebM
   mux and demux, so the web has a container the engine owns.
 - **libvpx** (`third_party/libvpx`, v1.15.0, BSD-3-Clause, The WebM Project
-  authors) — VP8 and VP9, the web's compatibility floor. Opt-in: only a target
+  authors): VP8 and VP9, the web's compatibility floor. Opt-in: only a target
   that needs it pays for the build.
 - **dav1d** (`third_party/dav1d`, 1.5.1, BSD-2-Clause, VideoLAN and dav1d authors)
-  — AV1 decode. Opt-in.
-- **libaom** (`third_party/aom`, 3.12.0, BSD-2-Clause, Alliance for Open Media) —
+  gives AV1 decode. Opt-in.
+- **libaom** (`third_party/aom`, 3.12.0, BSD-2-Clause, Alliance for Open Media):
   AV1 encode, and decode where dav1d does not win the measured budget. Opt-in.
-- **openh264** (`third_party/openh264`, v2.6.0, BSD-2-Clause, Cisco Systems) — the
+- **openh264** (`third_party/openh264`, v2.6.0, BSD-2-Clause, Cisco Systems): the
   H.264 software fallback where no hardware encoder exists. Opt-in.
 
 **Patent posture, stated rather than assumed.** H.264 and AV1 both sit under

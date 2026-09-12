@@ -90,6 +90,13 @@ fn writeSection(w: *Out, section: snapshot.Section) void {
             w.field("beat", readU32(section.payload, 4));
             w.field("engine_fed", readU32(section.payload, 8));
         },
+        .embedding => {
+            // The vector itself stays in the binary record: a JSON projection
+            // of 512 floats is the one section nothing gains from reading as
+            // text, so the shape is projected and the numbers are not.
+            w.field("dim", readU32(section.payload, 0));
+            w.field("source", readU32(section.payload, 4));
+        },
         .engine => {
             w.field("degrade_level", readU32(section.payload, 0));
             w.field("degrade_transitions", readU32(section.payload, 4));
@@ -124,6 +131,7 @@ fn tagName(tag: snapshot.Tag) []const u8 {
         .audio => "audio",
         .lens => "lens",
         .engine => "engine",
+        .embedding => "embedding",
         _ => "unknown",
     };
 }

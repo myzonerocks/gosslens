@@ -296,6 +296,26 @@ pub const Core = struct {
         return core.outputs[tensor].len;
     }
 
+    /// Whether an output is one vector rather than a feature map: a shape the
+    /// model declares as [N] or [1, N]. An embedding is exactly that, and this
+    /// is what tells it apart from a mask a caller must not index as one.
+    pub fn outputIsVector(core: *const Core, tensor: u32) bool {
+        if (tensor >= core.output_count) return false;
+        var dims_buf: [8]i32 = undefined;
+        const dims = core.engine.outputDims(tensor, &dims_buf) catch return false;
+        var non_unit: usize = 0;
+        for (dims) |d| {
+            if (d > 1) non_unit += 1;
+        }
+        return non_unit == 1 and core.outputs[tensor].len > 1;
+    }
+
+    /// The published values of an output tensor, empty until the first publish.
+    pub fn outputSlice(core: *const Core, tensor: u32) []const f32 {
+        if (!core.published or tensor >= core.output_count) return &.{};
+        return core.outputs[tensor];
+    }
+
     /// Whether the model's image tensors are channel-first (NCHW). A style
     /// output is read in the same layout the input declared.
     pub fn layoutIsNchw(core: *const Core) bool {
@@ -724,3 +744,9 @@ pub const TemporalCore = struct {
         return core.in_sq.layout == .nchw;
     }
 };
+
+/// Names the operators a model needs that the engine does not implement, which
+/// is what turns "unsupported" into a precise list a caller can act on.
+pub fn missingOps(gpa: std.mem.Allocator, model_bytes: []const u8, out: []u8) usize {
+    return ml_engine.missingOps(gpa, model_bytes, out);
+}

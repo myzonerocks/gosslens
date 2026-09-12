@@ -303,6 +303,20 @@ export fn Java_com_gosslens_Gosslens_nativeEngineReport(env: *JniEnv, cls: jobje
     return @intFromEnum(status);
 }
 
+/// The operators a model needs and this build lacks, written into a direct
+/// buffer as newline-separated names. The return is the full byte count, so a
+/// short buffer is a known truncation.
+export fn Java_com_gosslens_Gosslens_nativeMlOpSupport(env: *JniEnv, cls: jobject, model: jobject, model_len: i32, out_buffer: jobject, capacity: i32) i32 {
+    _ = cls;
+    if (model_len <= 0 or capacity < 0) return -1;
+    const model_bytes = getDirectBufferAddress(env, model) orelse return -1;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return -1;
+    var written: usize = 0;
+    const status = abi.goss_ml_op_support(model_bytes, @intCast(model_len), out_bytes, @intCast(capacity), &written);
+    if (status != .ok and status != .again) return -1;
+    return @intCast(written);
+}
+
 export fn Java_com_gosslens_Gosslens_nativeSessionReport(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject) i32 {
     _ = cls;
     const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);

@@ -211,7 +211,7 @@ pub const Decoder = struct {
         if (self.duration_us > 0 and target_us > self.duration_us) return false;
         const st: *State = @ptrCast(@alignCast(self.handle));
         if (c.AMediaExtractor_seekTo(st.extractor, target_us, c.AMEDIAEXTRACTOR_SEEK_PREVIOUS_SYNC) != c.AMEDIA_OK) return false;
-        _ = c.AMediaCodec_flush(st.codec);
+        _ = c.AMediaCodec_flush(st.codec); // result ignored: a failed flush leaves the decoder's queued frames, and the next read drains them
         self.last_pts_us = target_us;
         return true;
     }

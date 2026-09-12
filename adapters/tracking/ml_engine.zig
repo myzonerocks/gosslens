@@ -75,3 +75,12 @@ pub const Engine = struct {
         };
     }
 };
+
+/// Names the operators a model needs that neither backend implements, one per
+/// line, and answers the full size so a short buffer is a known truncation
+/// rather than a silent one. A TFLite model reports nothing missing: its
+/// operator set is the vendor runtime's, not this engine's.
+pub fn missingOps(gpa: std.mem.Allocator, model_bytes: []const u8, out: []u8) usize {
+    if (model_bytes.len >= 8 and std.mem.eql(u8, model_bytes[4..8], "TFL3")) return 0;
+    return onnx.missingOps(gpa, model_bytes, out) catch 0;
+}

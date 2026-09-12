@@ -64,12 +64,16 @@ pub fn build(b: *std.Build) void {
 
     // The SDKs compile. Three of them did not, each for a different reason, and
     // nothing in any gate would have said so: only running a compiler does.
-    const sdk_check_step = b.step("sdk-check", "Typecheck the Swift SDK and compile the Kotlin SDK where the toolchains exist");
+    const sdk_check_step = b.step("sdk-check", "Typecheck every SDK where its toolchain exists");
     if (swiftTypecheckCommand(b)) |cmd| {
         sdk_check_step.dependOn(&cmd.step);
         ci_step.dependOn(&cmd.step);
     }
     if (kotlinCompileCommand(b)) |cmd| {
+        sdk_check_step.dependOn(&cmd.step);
+        ci_step.dependOn(&cmd.step);
+    }
+    if (typescriptTypecheckCommand(b)) |cmd| {
         sdk_check_step.dependOn(&cmd.step);
         ci_step.dependOn(&cmd.step);
     }
@@ -4140,6 +4144,18 @@ fn swiftTypecheckCommand(b: *std.Build) ?*std.Build.Step.Run {
 /// Android SDK: the library is an android-library, so gradle cannot resolve its
 /// plugin there, and a gate that fails for a missing toolchain rather than a
 /// missing symbol is the false gate this wave spent its time removing.
+/// The TypeScript SDK typechecks. It was the one SDK sdk-check did not run a
+/// compiler over, and an undeclared constant slipped through on exactly that.
+fn typescriptTypecheckCommand(b: *std.Build) ?*std.Build.Step.Run {
+    var code: u8 = undefined;
+    _ = b.runAllowFail(&.{ "/bin/sh", "-c", "command -v bun >/dev/null && test -f sdk/ts/tsconfig.json" }, &code, .ignore) catch return null;
+    if (code != 0) return null;
+    const cmd = b.addSystemCommand(&.{ "bun", "x", "tsc", "--noEmit" });
+    cmd.setCwd(b.path("sdk/ts"));
+    cmd.setName("tsc --noEmit (sdk/ts)");
+    return cmd;
+}
+
 fn kotlinCompileCommand(b: *std.Build) ?*std.Build.Step.Run {
     var code: u8 = undefined;
     _ = b.runAllowFail(&.{

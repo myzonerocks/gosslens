@@ -225,3 +225,19 @@ pub fn outputCount(ml: *MlInfer) u32 {
     _ = ml;
     return 0;
 }
+
+/// No engine here, so nothing is missing and nothing is claimed: a caller on
+/// this target learns the answer is unavailable rather than "all supported".
+pub fn missingOps(gpa: std.mem.Allocator, model_bytes: []const u8, out: []u8) usize {
+    _ = gpa;
+    _ = model_bytes;
+    _ = out;
+    return 0;
+}
+
+pub fn copyEmbedding(ml: *MlInfer, tensor: u32, dst: []f32) usize {
+    _ = ml;
+    _ = tensor;
+    _ = dst;
+    return 0;
+}

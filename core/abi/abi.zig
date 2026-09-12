@@ -344,6 +344,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_node_report_count(goss_session *session, uint32_t *out_count, uint32_t *out_lost)",
     "goss_status goss_session_node_report_at(goss_session *session, uint32_t index, goss_node_report *out_report)",
     "goss_status goss_session_node_report_id(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_ml_op_support(const uint8_t *model, size_t model_len, uint8_t *out, size_t capacity, size_t *out_len)",
 };
 
 // The minor advances from the surface, never by hand: a new op lengthens
@@ -803,6 +804,11 @@ const max_geofence_name: usize = 48;
 
 /// The most bring-your-own model digests a session may allowlist at once. With
 /// any set, a model whose SHA-256 is not among them is refused at enable time.
+/// The widest embedding the snapshot carries inline. Real image and text
+/// encoders land at 512 or 768; past that a caller wants the model's own
+/// output buffer, not a copy in every snapshot.
+const max_embedding_dim = 1024;
+
 const max_model_digests: usize = 16;
 
 /// A geofence a lens references by name, so a lens fires `geo.in_region('name')`
@@ -8214,12 +8220,23 @@ pub export fn goss_session_open_clip(session: ?*Session, path: ?[*]const u8, pat
     const out = out_clip orelse return .invalid_argument;
     if (path_len == 0) return .invalid_argument;
     if (!video.supported) return .unsupported;
-    const gpa = s.engine.gpa;
+    openClip(s, p[0..path_len], out) catch |err| return switch (err) {
+        error.NoDecoder => .invalid_argument,
+        error.BadDimensions => .unsupported,
+        error.OutOfMemory => .out_of_memory,
+    };
+    return .ok;
+}
 
-    var decoder = video.Decoder.open(p[0..path_len]) orelse return .invalid_argument;
+/// The fallible half, so the decoder and its buffer are actually released when
+/// a later step fails. An errdefer only runs where a real error can propagate,
+/// which is why this returns an error set rather than a status.
+fn openClip(s: *Session, path: []const u8, out: *u32) error{ NoDecoder, BadDimensions, OutOfMemory }!void {
+    const gpa = s.engine.gpa;
+    var decoder = video.Decoder.open(path) orelse return error.NoDecoder;
     errdefer decoder.close();
-    if (!validDims(decoder.width, decoder.height)) return .unsupported;
-    const bgra = gpa.alloc(u8, @as(usize, decoder.width) * decoder.height * 4) catch return .out_of_memory;
+    if (!validDims(decoder.width, decoder.height)) return error.BadDimensions;
+    const bgra = try gpa.alloc(u8, @as(usize, decoder.width) * decoder.height * 4);
     errdefer gpa.free(bgra);
 
     // A slot freed by a close is reused, so opening and closing clips in a loop
@@ -8228,11 +8245,10 @@ pub export fn goss_session_open_clip(session: ?*Session, path: ?[*]const u8, pat
         if (slot != null) continue;
         s.clips.items[i] = .{ .decoder = decoder, .bgra = bgra };
         out.* = @intCast(i);
-        return .ok;
+        return;
     }
-    s.clips.append(gpa, .{ .decoder = decoder, .bgra = bgra }) catch return .out_of_memory;
+    try s.clips.append(gpa, .{ .decoder = decoder, .bgra = bgra });
     out.* = @intCast(s.clips.items.len - 1);
-    return .ok;
 }
 
 fn clipAt(s: *Session, index: u32) ?*Clip {
@@ -8380,6 +8396,28 @@ pub export fn goss_session_perception_snapshot(session: ?*Session, select: u32, 
             w.i64v(0);
             w.u64v(s.frames_submitted);
         }
+        w.endSection();
+    }
+
+    if (want.embedding) {
+        // The frame's embedding: the first loaded model output that is one
+        // vector. It rides the snapshot rather than a side channel so a
+        // semantic index stores it against the same timestamp as everything
+        // else it keeps.
+        w.beginSection(.embedding, 1);
+        var vector: [max_embedding_dim]f32 = undefined;
+        var dim: usize = 0;
+        var source: u32 = 0;
+        for (s.ml_workers.items, 0..) |mw, index| {
+            const n = ml_infer.copyEmbedding(mw.worker, 0, &vector);
+            if (n == 0) continue;
+            dim = n;
+            source = @intCast(index);
+            break;
+        }
+        w.u32v(@intCast(dim));
+        w.u32v(source);
+        for (vector[0..dim]) |v| w.f32v(v);
         w.endSection();
     }
 
@@ -9891,6 +9929,21 @@ pub export fn goss_session_reset_capture(session: ?*Session) Status {
 /// how many diagnostics could not be recorded at all. A zero count with a
 /// non-zero lost count means the lens degraded in ways this session could not
 /// even write down, which is a different thing from a lens that is fine.
+/// Names the operators a model needs and this engine does not implement, one
+/// per line. A caller learns exactly what is missing before loading, and a
+/// buffer too short reports the full size rather than a truncated list.
+pub export fn goss_ml_op_support(model: ?[*]const u8, model_len: usize, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const bytes = model orelse return .invalid_argument;
+    const len = out_len orelse return .invalid_argument;
+    if (model_len == 0) return .invalid_argument;
+    var buffer: []u8 = &.{};
+    if (out) |o| buffer = o[0..capacity];
+    const needed = ml_infer.missingOps(abiAllocator(), bytes[0..model_len], buffer);
+    len.* = needed;
+    if (needed > capacity) return .again;
+    return .ok;
+}
+
 pub export fn goss_engine_read_report(engine: ?*Engine, out_report: ?*EngineReport) Status {
     const e = engine orelse return .invalid_argument;
     const out = out_report orelse return .invalid_argument;

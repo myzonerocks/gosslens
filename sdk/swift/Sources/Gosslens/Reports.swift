@@ -330,3 +330,26 @@ public struct GossAnnotation: Sendable {
         )
     }
 }
+
+/// The operators a model needs that this build does not implement. An empty
+/// list means the model runs; anything in it names exactly what is missing,
+/// which beats a bare "unsupported" when choosing a model.
+public func gossMlOpSupport(_ model: [UInt8]) -> [String] {
+    var capacity = 256
+    while capacity <= 1 << 16 {
+        var out = [UInt8](repeating: 0, count: capacity)
+        var needed = 0
+        let status = model.withUnsafeBufferPointer { modelPtr in
+            out.withUnsafeMutableBufferPointer { outPtr in
+                goss_ml_op_support(modelPtr.baseAddress, model.count, outPtr.baseAddress, capacity, &needed)
+            }
+        }
+        if status != GOSS_OK && status != GOSS_AGAIN { return [] }
+        if needed <= capacity {
+            let text = String(decoding: out[0..<needed], as: UTF8.self)
+            return text.split(separator: "\n").map(String.init)
+        }
+        capacity = needed
+    }
+    return []
+}

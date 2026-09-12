@@ -218,6 +218,8 @@ object Gosslens {
     internal external fun nativeChainReport(session: Long, outBuffer: ByteBuffer): Int
     internal external fun nativeReadReconstruction(session: Long, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
     internal external fun nativeWriteReconstruction(session: Long, buffer: ByteBuffer, count: Int): Int
+    internal external fun nativeMlOpSupport(model: ByteBuffer, modelLen: Int, out: ByteBuffer, capacity: Int): Int
+
     internal external fun nativeEngineReport(engine: Long, out: ByteBuffer): Int
     internal external fun nativeSessionReport(session: Long, out: ByteBuffer): Int
     internal external fun nativeNodeReports(session: Long, out: ByteBuffer, capacityU32: Int): Int
@@ -2683,4 +2685,25 @@ class GossSession private constructor(
         closed = true
         if (cleanable != null) NativeCleaner.disarm(cleanable) else Gosslens.nativeSessionDestroy(handle)
     }
+}
+
+/// The operators a model needs that this build does not implement. An empty
+/// list means the model runs; anything in it names exactly what is missing,
+/// which beats a bare "unsupported" when choosing a model.
+fun mlOpSupport(model: ByteArray): List<String> {
+    val modelBuf = ByteBuffer.allocateDirect(model.size)
+    modelBuf.put(model)
+    var capacity = 256
+    while (capacity <= 1 shl 16) {
+        val out = ByteBuffer.allocateDirect(capacity)
+        val written = Gosslens.nativeMlOpSupport(modelBuf, model.size, out, capacity)
+        if (written < 0) return emptyList()
+        if (written <= capacity) {
+            val bytes = ByteArray(written)
+            out.get(bytes)
+            return String(bytes).split("\n").filter { it.isNotEmpty() }
+        }
+        capacity = written
+    }
+    return emptyList()
 }

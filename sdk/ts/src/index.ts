@@ -7,6 +7,7 @@
 // rotation) straight to the engine.
 
 export const GOSS_OK = 0;
+export const GOSS_AGAIN = 7;
 
 /// What this build's media backend declares it encodes.
 export interface GossMediaCapabilities {
@@ -1212,6 +1213,41 @@ export class GossEngine {
       };
     } finally {
       this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+    }
+  }
+
+  /// The operators a model needs that this build does not implement. An empty
+  /// list means the model runs; anything in it names exactly what is missing.
+  mlOpSupport(model: Uint8Array): string[] {
+    const modelPtr = this.mod.ccall("goss_alloc", "number", ["number"], [model.length]) as number;
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    this.mod.HEAPU8.set(model, modelPtr);
+    let capacity = 256;
+    try {
+      while (capacity <= 1 << 16) {
+        const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [capacity]) as number;
+        try {
+          const status = this.mod.ccall(
+            "goss_ml_op_support",
+            "number",
+            ["number", "number", "number", "number", "number"],
+            [modelPtr, model.length, outPtr, capacity, lenPtr],
+          ) as number;
+          if (status !== GOSS_OK && status !== GOSS_AGAIN) return [];
+          const needed = this.mod.HEAPU32[lenPtr >> 2];
+          if (needed <= capacity) {
+            const text = new TextDecoder().decode(this.mod.HEAPU8.subarray(outPtr, outPtr + needed));
+            return text.split("\n").filter((line) => line.length !== 0);
+          }
+          capacity = needed;
+        } finally {
+          this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, capacity]);
+        }
+      }
+      return [];
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [modelPtr, model.length]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 8]);
     }
   }
 

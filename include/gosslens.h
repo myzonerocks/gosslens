@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 136u
+#define GOSS_ABI_MINOR 137u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -859,6 +859,10 @@ goss_status goss_session_submit_source_hardware_buffer(goss_session *session, co
 /* Graph thread. What the engine is doing now: the backend it actually brought
  * up, the bounded pools with their peaks and exhaustion counts, and the heap
  * traffic of the frame just drawn. */
+/* Names the operators a model needs and this build does not implement, one per
+   line. GOSS_AGAIN with out_len set means the buffer was too short. */
+goss_status goss_ml_op_support(const uint8_t *model, size_t model_len, uint8_t *out, size_t capacity, size_t *out_len);
+
 goss_status goss_engine_read_report(goss_engine *engine, goss_engine_report *out_report);
 
 /* Graph thread. This session's counters: frames in and out, the rung and how

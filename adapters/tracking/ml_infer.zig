@@ -199,6 +199,20 @@ pub fn outputLen(ml: *MlInfer, tensor: u32) usize {
     return ml.core.outputLen(tensor);
 }
 
+/// Copies an output that is one vector into dst and answers how many values
+/// landed. A frame embedding is read here rather than through copyOutput so a
+/// caller cannot mistake a feature map for one.
+pub fn copyEmbedding(ml: *MlInfer, tensor: u32, dst: []f32) usize {
+    const io = ml.io_state.io();
+    ml.out_mutex.lockUncancelable(io);
+    defer ml.out_mutex.unlock(io);
+    if (!ml.core.outputIsVector(tensor)) return 0;
+    const src = ml.core.outputSlice(tensor);
+    const n = @min(src.len, dst.len);
+    @memcpy(dst[0..n], src[0..n]);
+    return n;
+}
+
 /// The predicted class of an output tensor (its argmax), thread-safe.
 pub fn argmaxOutput(ml: *MlInfer, tensor: u32) u32 {
     const io = ml.io_state.io();
@@ -413,3 +427,5 @@ fn temporalMain(ti: *TemporalInfer) void {
         ti.core.publish();
     }
 }
+
+pub const missingOps = core_mod.missingOps;
