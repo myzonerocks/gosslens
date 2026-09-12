@@ -468,6 +468,7 @@ pub fn build(b: *std.Build) void {
     const text_core_tests = b.addTest(.{ .root_module = textModule(b, target, optimize) });
     const screen_core_tests = b.addTest(.{ .root_module = screenModule(b, target, optimize) });
     const memory_core_tests = b.addTest(.{ .root_module = memoryModule(b, target, optimize) });
+    const spatial_core_tests = b.addTest(.{ .root_module = spatialModule(b, target, optimize) });
 
     // The media harness: the checks that belong to the contracts rather than to a
     // rendered frame, so they need no window and no gpu. What needs a real
@@ -554,6 +555,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(text_core_tests).step);
     test_step.dependOn(&b.addRunArtifact(screen_core_tests).step);
     test_step.dependOn(&b.addRunArtifact(memory_core_tests).step);
+    test_step.dependOn(&b.addRunArtifact(spatial_core_tests).step);
     test_step.dependOn(&b.addRunArtifact(quiet_tests).step);
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
     test_step.dependOn(&b.addRunArtifact(bundle_tests).step);
@@ -2328,6 +2330,17 @@ fn buildQuickjsLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
 /// target and an adapter implements it rather than defining it.
 /// The perception record's format: versioned, self-describing, and pure, so a
 /// consumer can be written against it without a renderer.
+/// Spatial semantics: what a plane is, and the placement questions asked of it.
+fn spatialModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-spatial-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{
+        .root_source_file = b.path("core/spatial/spatial.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
 /// The memory plane: the navigable graph over the embeddings and the exact
 /// search it is measured against.
 fn memoryModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
