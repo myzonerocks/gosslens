@@ -2253,11 +2253,16 @@ fn buildQuickjsLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
 fn quietModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     const key = b.fmt("goss-quiet-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
     if (b.modules.get(key)) |existing| return existing;
-    return b.addModule(key, .{
+    const module = b.addModule(key, .{
         .root_source_file = b.path("core/diag/quiet.zig"),
         .target = target,
         .optimize = optimize,
     });
+    // dup, dup2 and open are libc. macOS links it whatever a module declares, so
+    // this compiled here and failed on the linux lane, which is the whole reason
+    // that lane exists.
+    module.link_libc = true;
+    return module;
 }
 
 fn scriptModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, real: bool) *std.Build.Module {
