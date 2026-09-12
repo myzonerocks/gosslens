@@ -254,3 +254,47 @@ extension GossSession {
         }
     }
 }
+
+/// What the brain sees and what it costs. The budget is held before any trigger
+/// is consulted, because a budget a trigger can talk past is not a budget.
+public struct GossEgressConfig: Sendable {
+    public var targetLongEdge: UInt32 = 0
+    public var format: UInt32 = 0
+    public var quality: UInt32 = 80
+    public var maxFps: UInt32 = 0
+    public var maxBytesPerSecond: UInt64 = 0
+    public var source: UInt32 = 0
+    public var trigger: UInt32 = 0b1010
+    public var changeThreshold: Float = 0.02
+    public var keyframeIntervalUs: Int64 = 5_000_000
+
+    public init() {}
+
+    var raw: goss_egress_config {
+        goss_egress_config(
+            target_long_edge: targetLongEdge, format: format, quality: quality,
+            max_fps: maxFps, max_bytes_per_second: maxBytesPerSecond, source: source,
+            trigger: trigger, change_threshold: changeThreshold,
+            keyframe_interval_us: keyframeIntervalUs
+        )
+    }
+}
+
+/// Why a frame was or was not sent, so a gateway can explain itself.
+public struct GossEgressDecision: Sendable {
+    public var send: Bool
+    public var reason: UInt32
+    public var changeScore: Float
+    public var sinceLastUs: Int64
+    public var sentTotal: UInt64
+    public var heldTotal: UInt64
+
+    init(_ raw: goss_egress_decision) {
+        send = raw.send != 0
+        reason = raw.reason
+        changeScore = raw.change_score
+        sinceLastUs = raw.since_last_us
+        sentTotal = raw.sent_total
+        heldTotal = raw.held_total
+    }
+}

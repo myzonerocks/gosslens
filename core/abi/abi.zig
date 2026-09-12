@@ -28,6 +28,7 @@ const perception_mod = @import("perception");
 const perception = perception_mod.snapshot;
 const perception_json = perception_mod.json;
 const perception_events = perception_mod.events;
+const perception_egress = perception_mod.egress;
 
 /// Events a session holds before a drainer must catch up. Bounded so a consumer
 /// that stops draining cannot grow the engine; overflow is counted and reported.
@@ -303,6 +304,9 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_perception_snapshot(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len)",
     "goss_status goss_session_perception_json(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len)",
     "goss_status goss_session_poll_events(goss_session *session, goss_event *out, uint32_t capacity, uint32_t *out_count, uint64_t *out_dropped)",
+    "goss_status goss_session_egress_configure(goss_session *session, const goss_egress_config *config)",
+    "goss_status goss_session_egress_request(goss_session *session)",
+    "goss_status goss_session_egress_decide(goss_session *session, goss_egress_decision *out_decision)",
     "goss_status goss_session_beautify_frame(goss_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out)",
     "goss_status goss_session_activate_lens(goss_session *session, const uint8_t *manifest_json, size_t manifest_len)",
     "goss_status goss_session_activate_lens_from_directory(goss_session *session, const uint8_t *bundle_path, size_t bundle_path_len)",
@@ -422,6 +426,31 @@ pub const Event = extern struct {
     a: u32,
     b: u32,
     value: f32,
+};
+
+/// The egress policy a host installs: what the brain sees and what it costs.
+pub const EgressConfig = extern struct {
+    target_long_edge: u32,
+    format: u32,
+    quality: u32,
+    max_fps: u32,
+    max_bytes_per_second: u64,
+    source: u32,
+    /// GOSS_EGRESS_ON_* bits.
+    trigger: u32,
+    change_threshold: f32,
+    keyframe_interval_us: i64,
+};
+
+/// Why a frame was or was not sent, so a gateway can explain itself rather than
+/// guess. A decision with no reason is one nobody can tune.
+pub const EgressDecision = extern struct {
+    send: u32,
+    reason: u32,
+    change_score: f32,
+    since_last_us: i64,
+    sent_total: u64,
+    held_total: u64,
 };
 
 pub const Status = enum(c_int) {
@@ -1308,6 +1337,11 @@ pub const Session = struct {
     /// exists to prevent.
     event_slots: []perception_events.Event = &.{},
     events: perception_events.Ring = .{ .slots = &.{} },
+    /// The egress policy, and the downsampled luma grid the change score is
+    /// measured against. Allocated once on configure and reused, so deciding
+    /// costs no allocation per frame.
+    egress: ?perception_egress.Policy = null,
+    egress_previous: []u8 = &.{},
     script_inited: bool = false,
     /// Script handlers that threw, counted so a faulting script is visible.
     script_faults: u32 = 0,
@@ -5315,6 +5349,7 @@ pub fn destroySession(session: *Session) void {
     session.clips.deinit(session.engine.gpa);
     if (session.perception_scratch.len != 0) session.engine.gpa.free(session.perception_scratch);
     if (session.event_slots.len != 0) session.engine.gpa.free(session.event_slots);
+    if (session.egress_previous.len != 0) session.engine.gpa.free(session.egress_previous);
     destroySounds(session);
     destroyShaderPrograms(session);
     session.shader_programs.deinit(session.engine.gpa);
@@ -8415,6 +8450,110 @@ pub export fn goss_session_perception_snapshot(session: ?*Session, select: u32, 
 /// Drains the session's event ring in order. The drop count says whether anything
 /// was missed since the last drain, and is cleared by the read, so a consumer sees
 /// each drop once rather than the same number for ever.
+/// A luma grid of the frame, read from the thumbnail the engine already keeps for
+/// its own white balance. Comparing a grid rather than the frame is the whole
+/// reason a still room is cheap: a full comparison at 1080p costs more than the
+/// encode it is avoiding, and the thumbnail is already there.
+fn sampleLumaGrid(s: *Session, out: []u8, side: usize) bool {
+    @memset(out, 0);
+    // No thumbnail means no pixels to compare. Answering that plainly is the
+    // point: inventing a score from the descriptor would report every frame as
+    // changed and defeat the gate entirely.
+    if (!s.thumb_valid) return false;
+    for (0..@min(out.len, side * side)) |i| {
+        const ty = (i / side) * thumb_side / side;
+        const tx = (i % side) * thumb_side / side;
+        const at = (ty * thumb_side + tx) * 3;
+        if (at + 2 >= s.frame_thumb.len) continue;
+        // Rec.709 luma off the thumbnail's linear rgb, which is what a change in
+        // brightness or in a moved subject both show up in.
+        const luma = 0.2126 * s.frame_thumb[at] + 0.7152 * s.frame_thumb[at + 1] + 0.0722 * s.frame_thumb[at + 2];
+        out[i] = @intFromFloat(std.math.clamp(luma, 0, 1) * 255.0);
+    }
+    return true;
+}
+
+/// Installs the egress policy. A configuration outside its own ranges is refused
+/// here rather than producing a stream nobody can explain.
+pub export fn goss_session_egress_configure(session: ?*Session, config: ?*const EgressConfig) Status {
+    const s = session orelse return .invalid_argument;
+    const c_ = config orelse return .invalid_argument;
+    const cfg: perception_egress.Config = .{
+        .target_long_edge = c_.target_long_edge,
+        .format = switch (c_.format) {
+            0 => .jpeg,
+            1 => .png,
+            2 => .webp,
+            3 => .rgba,
+            4 => .nv12,
+            else => return .invalid_argument,
+        },
+        .quality = @intCast(@min(c_.quality, 255)),
+        .max_fps = c_.max_fps,
+        .max_bytes_per_second = c_.max_bytes_per_second,
+        .source = switch (c_.source) {
+            0 => .composited,
+            1 => .camera,
+            2 => .named_source,
+            3 => .named_screen,
+            4 => .segmentation_mask,
+            5 => .depth,
+            else => return .invalid_argument,
+        },
+        .trigger = @bitCast(c_.trigger),
+        .change_threshold = c_.change_threshold,
+        .keyframe_interval_us = c_.keyframe_interval_us,
+    };
+    if (!cfg.valid()) return .invalid_argument;
+    s.egress = perception_egress.Policy.init(cfg);
+    return .ok;
+}
+
+/// The host asking for one frame, whatever the change score says.
+pub export fn goss_session_egress_request(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    const policy = if (s.egress) |*p| p else return .invalid_argument;
+    policy.request();
+    return .ok;
+}
+
+/// Whether this frame is worth sending, and why. The score is measured against a
+/// downsampled luma grid of the last frame, so a still room costs one grid
+/// comparison rather than an encode.
+pub export fn goss_session_egress_decide(session: ?*Session, out_decision: ?*EgressDecision) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_decision orelse return .invalid_argument;
+    const policy = if (s.egress) |*p| p else return .invalid_argument;
+
+    const grid_side: usize = 16;
+    const grid_len = grid_side * grid_side;
+    const grid = growScratch(s.engine.gpa, &s.egress_previous, grid_len * 2) orelse return .out_of_memory;
+    const previous = grid[0..grid_len];
+    const current = grid[grid_len .. grid_len * 2];
+    // Without pixels there is nothing to score, and a frame nobody can score is
+    // not one to send on a change trigger.
+    if (!sampleLumaGrid(s, current, grid_side)) return .again;
+
+    const score = perception_egress.changeScore(previous, current);
+    const now_us = if (s.current) |cur| cur.desc.timestamp_us else 0;
+    // The estimate is the encode's own rough cost, which is what a byte ceiling
+    // has to be checked against before the encode rather than after it.
+    const dims: [2]u32 = if (s.current) |cur| .{ cur.desc.width, cur.desc.height } else .{ 0, 0 };
+    const estimated: u64 = @as(u64, dims[0]) * dims[1] / 8;
+    const decision = policy.decide(now_us, score, estimated);
+    if (decision.send) @memcpy(previous, current);
+
+    out.* = .{
+        .send = if (decision.send) 1 else 0,
+        .reason = @intFromEnum(decision.reason),
+        .change_score = decision.change_score,
+        .since_last_us = decision.since_last_us,
+        .sent_total = policy.sent,
+        .held_total = policy.held,
+    };
+    return .ok;
+}
+
 pub export fn goss_session_poll_events(session: ?*Session, out: ?[*]Event, capacity: u32, out_count: ?*u32, out_dropped: ?*u64) Status {
     const s = session orelse return .invalid_argument;
     const count_out = out_count orelse return .invalid_argument;

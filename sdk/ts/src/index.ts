@@ -20,6 +20,29 @@ export interface GossMediaCapabilities {
   zeroCopy: boolean;
 }
 
+/// What the brain sees and what it costs.
+export interface GossEgressConfig {
+  targetLongEdge?: number;
+  format?: number;
+  quality?: number;
+  maxFps?: number;
+  maxBytesPerSecond?: number;
+  source?: number;
+  trigger?: number;
+  changeThreshold?: number;
+  keyframeIntervalUs?: number;
+}
+
+/// Why a frame was or was not sent, so a gateway can explain itself.
+export interface GossEgressDecision {
+  send: boolean;
+  reason: number;
+  changeScore: number;
+  sinceLastUs: number;
+  sentTotal: number;
+  heldTotal: number;
+}
+
 /// One thing that happened. What a and b mean is per kind.
 export interface GossEvent {
   kind: number;
@@ -3131,6 +3154,55 @@ export class GossSession {
       }
     } finally {
       this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    }
+  }
+
+  /// Installs the egress policy: what the brain sees and what it costs.
+  egressConfigure(config: GossEgressConfig): boolean {
+    const bytes = 48;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    try {
+      const u32 = (off: number, v: number) => { this.mod.HEAPU32[(ptr + off) >> 2] = v; };
+      u32(0, config.targetLongEdge ?? 0);
+      u32(4, config.format ?? 0);
+      u32(8, config.quality ?? 80);
+      u32(12, config.maxFps ?? 0);
+      u32(16, config.maxBytesPerSecond ?? 0);
+      u32(20, 0);
+      u32(24, config.source ?? 0);
+      u32(28, config.trigger ?? 0b1010);
+      this.mod.HEAPF32[(ptr + 32) >> 2] = config.changeThreshold ?? 0.02;
+      u32(40, config.keyframeIntervalUs ?? 5_000_000);
+      u32(44, 0);
+      return this.mod.ccall("goss_session_egress_configure", "number", ["number", "number"], [this.handle, ptr]) === GOSS_OK;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+    }
+  }
+
+  /// One frame, whatever the change score says.
+  egressRequest(): boolean {
+    return this.mod.ccall("goss_session_egress_request", "number", ["number"], [this.handle]) === GOSS_OK;
+  }
+
+  /// Whether this frame is worth sending and why. Null when there are no pixels
+  /// to score, which is not a failure.
+  egressDecide(): GossEgressDecision | null {
+    const bytes = 40;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    try {
+      if (this.mod.ccall("goss_session_egress_decide", "number", ["number", "number"], [this.handle, ptr]) !== GOSS_OK) return null;
+      const w = (off: number) => this.mod.HEAPU32[(ptr + off) >> 2];
+      return {
+        send: w(0) !== 0,
+        reason: w(4),
+        changeScore: this.mod.HEAPF32[(ptr + 8) >> 2],
+        sinceLastUs: w(16),
+        sentTotal: w(24),
+        heldTotal: w(32),
+      };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
     }
   }
 

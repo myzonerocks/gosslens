@@ -1223,6 +1223,29 @@ export fn Java_com_gosslens_Gosslens_nativePerceptionSnapshot(env: *JniEnv, cls:
 
 /// Events into a direct buffer as their raw structs, returning the count, with the
 /// drop count written into the first eight bytes of a second buffer.
+export fn Java_com_gosslens_Gosslens_nativeEgressConfigure(env: *JniEnv, cls: jobject, session: i64, config: jobject) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, config) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var cfg: abi.EgressConfig = undefined;
+    @memcpy(std.mem.asBytes(&cfg), bytes[0..@sizeOf(abi.EgressConfig)]);
+    return @intFromEnum(abi.goss_session_egress_configure(sessionFromHandle(session), &cfg));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeEgressRequest(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_egress_request(sessionFromHandle(session)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeEgressDecide(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var decision: abi.EgressDecision = undefined;
+    const status = abi.goss_session_egress_decide(sessionFromHandle(session), &decision);
+    if (status == .ok) @memcpy(out_bytes[0..@sizeOf(abi.EgressDecision)], std.mem.asBytes(&decision));
+    return @intFromEnum(status);
+}
+
 export fn Java_com_gosslens_Gosslens_nativePollEvents(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject, capacity: i32, dropped_buffer: jobject) i32 {
     _ = cls;
     const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return -1;

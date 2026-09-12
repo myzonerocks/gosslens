@@ -412,6 +412,32 @@ public final class GossSession: @unchecked Sendable {
         return (raw.prefix(Int(count)).map(GossEvent.init), dropped)
     }
 
+    // MARK: - Egress
+
+    /// Installs the egress policy: what the brain sees and what it costs. Throws
+    /// on a configuration outside its own ranges rather than producing a stream
+    /// nobody can explain.
+    public func egressConfigure(_ config: GossEgressConfig) throws {
+        var raw = config.raw
+        try checked(goss_session_egress_configure(handle, &raw))
+    }
+
+    /// One frame, whatever the change score says.
+    public func egressRequest() throws {
+        try checked(goss_session_egress_request(handle))
+    }
+
+    /// Whether this frame is worth sending and why. Nil when there are no pixels
+    /// to score, which is not a failure: a frame nobody can score is not one to
+    /// send on a change trigger.
+    public func egressDecide() throws -> GossEgressDecision? {
+        var raw = goss_egress_decision()
+        let status = goss_session_egress_decide(handle, &raw)
+        if status == GOSS_AGAIN { return nil }
+        try checked(status)
+        return GossEgressDecision(raw)
+    }
+
     // MARK: - Beauty
 
     public func enableBeauty(resourceDir: String) throws {

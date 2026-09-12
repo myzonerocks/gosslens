@@ -1,4 +1,4 @@
-abi 0.129
+abi 0.132
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -297,6 +297,9 @@ fn goss_status goss_engine_media_capabilities(goss_engine *engine, goss_media_ca
 fn goss_status goss_session_perception_snapshot(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len)
 fn goss_status goss_session_perception_json(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len)
 fn goss_status goss_session_poll_events(goss_session *session, goss_event *out, uint32_t capacity, uint32_t *out_count, uint64_t *out_dropped)
+fn goss_status goss_session_egress_configure(goss_session *session, const goss_egress_config *config)
+fn goss_status goss_session_egress_request(goss_session *session)
+fn goss_status goss_session_egress_decide(goss_session *session, goss_egress_decision *out_decision)
 fn goss_status goss_session_beautify_frame(goss_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out)
 fn goss_status goss_session_activate_lens(goss_session *session, const uint8_t *manifest_json, size_t manifest_len)
 fn goss_status goss_session_activate_lens_from_directory(goss_session *session, const uint8_t *bundle_path, size_t bundle_path_len)

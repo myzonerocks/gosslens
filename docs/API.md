@@ -233,6 +233,9 @@ the capability is present on all three platforms; only the mechanism differs.
 | `goss_session_perception_snapshot` | `perceptionSnapshot(select)`, one versioned record of what the engine currently sees: the frame, faces, hands, bodies, audio, the active lens with its node states, and the engine's own counters, each section tagged with its own version and byte length so a consumer built against an older schema steps over what it does not know. `GOSS_AGAIN` with the needed size when the buffer is short | all SDKs |
 | `goss_session_perception_json` | `perceptionJson(select)`, the same record as compact JSON, projected from the binary form rather than written a second time from the session, so the two cannot drift. A section this build cannot name is reported with its tag and byte length rather than dropped | all SDKs |
 | `goss_session_poll_events` | `pollEvents(capacity)`, drains the session's bounded event ring in order: faces appearing and leaving, gestures, the ladder moving, a pool turning a request away, lens nodes degrading or failing, the recording lifecycle, declared interruptions, the audio beat. The drop count says whether anything was missed and is cleared by the read | all SDKs |
+| `goss_session_egress_configure` | `egressConfigure(config)`, what the brain sees and what it costs: the target edge, format, quality, the rate and byte ceilings, the source, and when a frame is worth sending | all SDKs |
+| `goss_session_egress_request` | `egressRequest()`, the host asking for one frame whatever the change score says | all SDKs |
+| `goss_session_egress_decide` | `egressDecide()`, whether this frame is worth sending and why, with the change score and the running sent and held counts, so a gateway can explain itself rather than guess. The budget is checked before any trigger, because a budget a trigger can talk past is not a budget | all SDKs |
 
 ### Events and degradation
 

@@ -35,6 +35,29 @@ data class MediaCapabilities(
     val zeroCopy: Boolean,
 )
 
+/** What the brain sees and what it costs. */
+data class EgressConfig(
+    val targetLongEdge: Int = 0,
+    val format: Int = 0,
+    val quality: Int = 80,
+    val maxFps: Int = 0,
+    val maxBytesPerSecond: Long = 0,
+    val source: Int = 0,
+    val trigger: Int = (1 shl 1) or (1 shl 3),
+    val changeThreshold: Float = 0.02f,
+    val keyframeIntervalUs: Long = 5_000_000,
+)
+
+/** Why a frame was or was not sent, so a gateway can explain itself. */
+data class EgressDecision(
+    val send: Boolean,
+    val reason: Int,
+    val changeScore: Float,
+    val sinceLastUs: Long,
+    val sentTotal: Long,
+    val heldTotal: Long,
+)
+
 /** One thing that happened. What a and b mean is per kind. */
 data class GossEvent(
     val kind: Int,
@@ -146,6 +169,9 @@ object Gosslens {
     internal external fun nativePerceptionSnapshot(session: Long, select: Int, out: ByteBuffer, capacity: Int): Int
     internal external fun nativePerceptionJson(session: Long, select: Int, out: ByteBuffer, capacity: Int): Int
     internal external fun nativePollEvents(session: Long, out: ByteBuffer, capacity: Int, dropped: ByteBuffer): Int
+    internal external fun nativeEgressConfigure(session: Long, config: ByteBuffer): Int
+    internal external fun nativeEgressRequest(session: Long): Int
+    internal external fun nativeEgressDecide(session: Long, out: ByteBuffer): Int
     internal external fun nativeRecordingPause(engine: Long): Int
     internal external fun nativeRecordingResume(engine: Long): Int
     internal external fun nativeReportInterruption(session: Long, kind: Int): Int
@@ -905,6 +931,38 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * takes no coroutines dependency, because forcing one on every Android
      * consumer to offer a Flow is a cost they did not ask for.
      */
+    /** Installs the egress policy; false when the configuration is out of range. */
+    fun egressConfigure(config: EgressConfig): Boolean {
+        // Six u32, one u64, one u32, one u32, one f32, one i64 with alignment.
+        val buf = ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder())
+        buf.putInt(0, config.targetLongEdge)
+        buf.putInt(4, config.format)
+        buf.putInt(8, config.quality)
+        buf.putInt(12, config.maxFps)
+        buf.putLong(16, config.maxBytesPerSecond)
+        buf.putInt(24, config.source)
+        buf.putInt(28, config.trigger)
+        buf.putFloat(32, config.changeThreshold)
+        buf.putLong(40, config.keyframeIntervalUs)
+        return Gosslens.nativeEgressConfigure(handle, buf) == 0
+    }
+
+    fun egressRequest(): Boolean = Gosslens.nativeEgressRequest(handle) == 0
+
+    /** Whether this frame is worth sending, and why. Null when nothing to score. */
+    fun egressDecide(): EgressDecision? {
+        val buf = ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeEgressDecide(handle, buf) != 0) return null
+        return EgressDecision(
+            buf.getInt(0) != 0,
+            buf.getInt(4),
+            buf.getFloat(8),
+            buf.getLong(16),
+            buf.getLong(24),
+            buf.getLong(32),
+        )
+    }
+
     fun drainEvents(capacity: Int = 64, onEvent: (GossEvent) -> Unit): Long {
         val batch = pollEvents(capacity)
         for (event in batch.events) onEvent(event)

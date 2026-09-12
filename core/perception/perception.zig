@@ -7,6 +7,7 @@ pub const snapshot = @import("snapshot.zig");
 pub const json = @import("json.zig");
 pub const events = @import("events.zig");
 pub const replay = @import("replay.zig");
+pub const egress = @import("egress.zig");
 
 pub const schema_version = snapshot.schema_version;
 pub const Tag = snapshot.Tag;
@@ -24,6 +25,15 @@ pub const ReplayEntry = replay.Entry;
 pub const ReplayKind = replay.Kind;
 pub const replayDiverges = replay.diverges;
 pub const hashFrame = replay.hashFrame;
+
+pub const EgressConfig = egress.Config;
+pub const EgressPolicy = egress.Policy;
+pub const EgressDecision = egress.Decision;
+pub const EgressReason = egress.Reason;
+pub const changeScore = egress.changeScore;
+pub const redactRect = egress.redactRect;
+pub const RedactMode = egress.RedactMode;
+pub const Rect = egress.Rect;
 
 test {
     @import("std").testing.refAllDecls(@This());

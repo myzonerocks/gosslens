@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 129u
+#define GOSS_ABI_MINOR 132u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -1185,6 +1185,65 @@ typedef struct goss_event {
  * whether anything was missed since the last drain and is cleared by the read, so
  * a consumer sees each drop once rather than the same number for ever. */
 goss_status goss_session_poll_events(goss_session *session, goss_event *out, uint32_t capacity, uint32_t *out_count, uint64_t *out_dropped);
+
+/* When an egress frame is worth sending. Combinable: "every keyframe, plus
+ * anything that changed, plus anything an event touched" is one policy. */
+#define GOSS_EGRESS_ALWAYS (1u << 0)
+#define GOSS_EGRESS_ON_CHANGE (1u << 1)
+#define GOSS_EGRESS_ON_EVENT (1u << 2)
+#define GOSS_EGRESS_ON_INTERVAL (1u << 3)
+#define GOSS_EGRESS_ON_REQUEST (1u << 4)
+
+typedef enum goss_egress_format {
+    GOSS_EGRESS_JPEG = 0, GOSS_EGRESS_PNG = 1, GOSS_EGRESS_WEBP = 2,
+    GOSS_EGRESS_RGBA = 3, GOSS_EGRESS_NV12 = 4,
+} goss_egress_format;
+
+typedef enum goss_egress_source {
+    GOSS_EGRESS_COMPOSITED = 0, GOSS_EGRESS_CAMERA = 1, GOSS_EGRESS_NAMED_SOURCE = 2,
+    GOSS_EGRESS_NAMED_SCREEN = 3, GOSS_EGRESS_SEGMENTATION_MASK = 4, GOSS_EGRESS_DEPTH = 5,
+} goss_egress_source;
+
+/* Why a frame was or was not sent, so a gateway can explain itself. */
+typedef enum goss_egress_reason {
+    GOSS_EGRESS_SENT_ALWAYS = 0, GOSS_EGRESS_SENT_CHANGED = 1, GOSS_EGRESS_SENT_EVENT = 2,
+    GOSS_EGRESS_SENT_INTERVAL = 3, GOSS_EGRESS_SENT_REQUESTED = 4,
+    GOSS_EGRESS_HELD_RATE = 5, GOSS_EGRESS_HELD_BYTES = 6,
+    GOSS_EGRESS_HELD_UNCHANGED = 7, GOSS_EGRESS_HELD_NO_TRIGGER = 8,
+} goss_egress_reason;
+
+typedef struct goss_egress_config {
+    uint32_t target_long_edge;   /* 0 means no scaling */
+    uint32_t format;
+    uint32_t quality;            /* 1..100 for the lossy formats */
+    uint32_t max_fps;            /* 0 means no ceiling */
+    uint64_t max_bytes_per_second;
+    uint32_t source;
+    uint32_t trigger;            /* GOSS_EGRESS_* bits */
+    float change_threshold;      /* 0..1 */
+    int64_t keyframe_interval_us;
+} goss_egress_config;
+
+typedef struct goss_egress_decision {
+    uint32_t send;
+    uint32_t reason;
+    float change_score;
+    int64_t since_last_us;
+    uint64_t sent_total;
+    uint64_t held_total;
+} goss_egress_decision;
+
+/* Graph thread. Installs the policy; a configuration outside its own ranges is
+ * refused rather than producing a stream nobody can explain. */
+goss_status goss_session_egress_configure(goss_session *session, const goss_egress_config *config);
+
+/* Graph thread. The host asking for one frame whatever the change score says. */
+goss_status goss_session_egress_request(goss_session *session);
+
+/* Graph thread. Whether this frame is worth sending, and why. The score is
+ * measured on a luma grid, so a still room costs a grid comparison rather than an
+ * encode. GOSS_AGAIN when there are no pixels to score. */
+goss_status goss_session_egress_decide(goss_session *session, goss_egress_decision *out_decision);
 
 /* Graph thread. Multi-source composition (Duet, Stitch, live grids). Register a
  * named RGBA source with define_source, feed it with submit_source_frame_rgba_copy,
