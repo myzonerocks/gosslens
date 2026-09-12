@@ -4048,10 +4048,16 @@ fn swiftTypecheckCommand(b: *std.Build) ?*std.Build.Step.Run {
     return cmd;
 }
 
-/// Compiles the Kotlin SDK on the jvm. Null where the wrapper is missing.
+/// Compiles the Kotlin SDK on the jvm. Null without the wrapper or without an
+/// Android SDK: the library is an android-library, so gradle cannot resolve its
+/// plugin there, and a gate that fails for a missing toolchain rather than a
+/// missing symbol is the false gate this wave spent its time removing.
 fn kotlinCompileCommand(b: *std.Build) ?*std.Build.Step.Run {
     var code: u8 = undefined;
-    _ = b.runAllowFail(&.{ "/bin/sh", "-c", "test -x sdk/kotlin/gradlew" }, &code, .ignore) catch return null;
+    _ = b.runAllowFail(&.{
+        "/bin/sh", "-c",
+        "test -x sdk/kotlin/gradlew && { test -n \"$ANDROID_HOME\" || test -n \"$ANDROID_SDK_ROOT\" || test -d \"$HOME/Library/Android/sdk\"; }",
+    }, &code, .ignore) catch return null;
     if (code != 0) return null;
     const cmd = b.addSystemCommand(&.{ "./gradlew", "--quiet", "compileDebugKotlin" });
     cmd.setCwd(b.path("sdk/kotlin"));
