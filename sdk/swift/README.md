@@ -454,6 +454,40 @@ try session.setSourceComposite("guest", opacity: 1, key: 2,
 instead of stretching, for a shared screen that keeps its aspect. `removeSource`
 and `clearLayout` tear the composition back down.
 
+## The agent rail
+
+One versioned record of everything the engine sees, what the frame says, what it
+remembers, and the screen it is looking at.
+
+```swift
+// What the engine sees, as one record and as JSON.
+let record = try session.perceptionSnapshot(.all)
+let json = try session.perceptionJson(.all)
+
+// What the frame says, once the text rail is on.
+try session.enableText(detector: detectorBytes, recognizer: recognizerBytes, dictionary: keysBytes)
+for reading in try session.readings() {
+    print(reading.text, reading.quad, reading.trackId)
+}
+
+// What it remembers, and finding it again.
+try session.memoryOpen(dim: 512)
+try session.remember(id: 1, embedding: embedding)
+for match in try session.memorySearch(query, k: 5) { print(match.id, match.score) }
+
+// A screen as a source, and where a point an agent sent lands.
+let surfaces = try engine.screens()
+let screen = try session.openScreen(surfaceId: surfaces[0].id)
+_ = session.stepScreen(screen)
+let landing = try session.screenPoint(screen, x: 0.5, y: 0.5)
+
+// And what this session will answer at all.
+try session.setScope(sections: 0xFFFF_FFFF, verbs: 0)
+```
+
+A read out of scope is dropped from the record rather than failing the call; a
+verb out of scope throws. Nothing here sends a frame anywhere.
+
 ## Lives and calls
 
 Publishing the lens-baked frames into a LiveKit or WebRTC call is a custom

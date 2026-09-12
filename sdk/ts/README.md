@@ -467,6 +467,41 @@ session.setSourceComposite("guest", 1, 2, [0, 1, 0], 0.4);   // chroma-key green
 `defineScreenShare` registers a source whose frame letterboxes to fit its cell,
 `removeSource` drops one, and `clearLayout` returns to the camera alone.
 
+## The agent rail
+
+One versioned record of everything the engine sees, what the frame says, what it
+remembers, and the screen it is looking at.
+
+```ts
+// What the engine sees, as one record and as JSON.
+const record = session.perceptionSnapshot(GossSelect.All);
+const json = session.perceptionJson(GossSelect.All);
+
+// What the frame says, once the text rail is on.
+session.enableText(detectorBytes, recognizerBytes, keysBytes);
+for (const reading of session.readings()) {
+  console.log(reading.text, reading.quad, reading.trackId);
+}
+
+// What it remembers, and finding it again.
+session.memoryOpen(512);
+session.remember(1, embedding);
+for (const match of session.memorySearch(query, 5)) console.log(match.id, match.score);
+
+// A screen, through the browser's own picker and consent.
+const share = await shareScreen();
+if (share) {
+  share.step(session);
+  share.stop();
+}
+
+// And what this session will answer at all.
+session.setScope(0xffffffff, 0);
+```
+
+A read out of scope is dropped from the record rather than failing the call; a
+verb out of scope is refused. Nothing here sends a frame anywhere.
+
 ## Lives and calls
 
 The web is the easy case: the rendered canvas is already a live video source.

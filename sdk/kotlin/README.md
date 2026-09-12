@@ -491,6 +491,37 @@ is in [API.md](../../docs/API.md).
 
 [`demo/`](demo/) is a real Android app; see [`demo/README.md`](demo/README.md).
 
+## The agent rail
+
+One versioned record of everything the engine sees, what the frame says, what it
+remembers, and the screen it is looking at.
+
+```kotlin
+// What the engine sees, as one record and as JSON.
+val record = session.perceptionSnapshot(GossSelect.ALL)
+val json = session.perceptionJson(GossSelect.ALL)
+
+// What the frame says, once the text rail is on.
+session.enableText(detectorBytes, recognizerBytes, keysBytes)
+session.readings().forEach { println("${it.text} ${it.trackId}") }
+
+// What it remembers, and finding it again.
+session.memoryOpen(512)
+session.remember(1L, embedding)
+session.memorySearch(query, 5).forEach { println("${it.id} ${it.score}") }
+
+// A screen, after MediaProjection consent the Activity collects.
+GossScreenCapture.grant(widthPx, heightPx, density, "Phone display")
+val screen = session.openScreen(surfaceId)
+session.stepScreen(screen)
+
+// And what this session will answer at all.
+session.setScope(-1, 0)
+```
+
+A read out of scope is dropped from the record rather than failing the call; a
+verb out of scope is refused. Nothing here sends a frame anywhere.
+
 ## Tests
 
 Conformance runs through the demo app's `ConformanceRunner` and
