@@ -1189,7 +1189,7 @@ class GossSession private constructor(
      * clock; the engine has no way to reach the thermal API on its own.
      */
     fun reportFrame(frameTimeUs: Int, context: android.content.Context): DegradeLevel =
-        reportFrame(frameTimeUs, platformThermal(context))
+        reportFrame(frameTimeUs, Gosslens.platformThermal(context))
 
     fun degradeLevel(): DegradeLevel = DegradeLevel.from(Gosslens.nativeDegradeLevel(handle))
 

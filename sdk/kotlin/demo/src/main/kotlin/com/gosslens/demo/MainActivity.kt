@@ -454,22 +454,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     // PowerManager's thermal statuses collapse onto the engine's four
     // levels the same way the ios demo maps ProcessInfo.thermalState.
-    private fun thermalLevel(): Int {
-        if (android.os.Build.VERSION.SDK_INT < 29) return 0
-        val power = getSystemService(android.os.PowerManager::class.java) ?: return 0
-        return when (power.currentThermalStatus) {
-            android.os.PowerManager.THERMAL_STATUS_NONE -> 0
-            android.os.PowerManager.THERMAL_STATUS_LIGHT -> 1
-            android.os.PowerManager.THERMAL_STATUS_MODERATE -> 2
-            else -> 3
-        }
-    }
-
     private fun renderTick(frameTimeNanos: Long) {
         val engine = engine ?: return
         val frameTimeUs = if (lastFrameNanos == 0L) 0 else ((frameTimeNanos - lastFrameNanos) / 1000).toInt()
         lastFrameNanos = frameTimeNanos
-        session?.reportFrame(frameTimeUs, thermalLevel())
+        session?.reportFrame(frameTimeUs, this)
         session?.let { overlay.poll(it) }
         session?.let { tickLens(it, frameTimeUs) }
         if (engine.renderFrame(session)) {
