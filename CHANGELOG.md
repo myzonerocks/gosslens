@@ -55,6 +55,9 @@ A release moves that section under its tag with the date, and the release notes 
 - The perception format is written down (`docs/PERCEPTION-FORMAT.md`) so a consumer implements
   against it without reading the engine, and a baseline gate holds the layout still.
 
+- A changelog, covering every release from the first, and the release notes are the section it
+  cuts, so a reader of the release and a reader of `main` see the same words.
+
 ## v0.12.0-alpha.3 (2026-09-09)
 
 - A named source takes a page-made texture, so the web ingress is zero-copy like the others.

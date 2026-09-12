@@ -143,4 +143,6 @@ and none is committed. The ONNX rail is proven against real published nets:
 - **Depth Anything V2 Small** (Apache-2.0, LiheYoung and contributors) gives
   monocular depth, and is the transformer shape the operator set was widened
   for.
+- **PP-OCRv4** (Apache-2.0, PaddlePaddle authors) gives text detection and
+  recognition, with the character dictionary it was trained against.
 
