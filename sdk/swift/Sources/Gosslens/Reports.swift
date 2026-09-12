@@ -223,13 +223,10 @@ public enum GossEventKind: UInt32, Sendable {
 }
 
 extension GossSession {
-    /// The session's events as an `AsyncSequence`, which is how a Swift caller
-    /// wants them: `for await event in session.events()`. Polls on an interval
-    /// rather than blocking a thread, because the ring is drained by the caller
-    /// and there is nothing to await on the engine side.
-    ///
-    /// `dropped` is surfaced as an event of its own rather than swallowed: a
-    /// consumer that missed something must be able to know it did.
+    /// The session's events as an `AsyncSequence`: `for await event in
+    /// session.events()`. Polls on an interval rather than blocking a thread, and
+    /// surfaces `dropped` as an event of its own rather than swallowing it, because
+    /// a consumer that missed something must be able to know it did.
     public func events(pollInterval: Duration = .milliseconds(16), batch: Int = 64) -> AsyncStream<GossEvent> {
         AsyncStream { continuation in
             let task = Task {

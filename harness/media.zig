@@ -20,10 +20,9 @@ const Result = struct {
     }
 };
 
-/// What a timebase actually guarantees: a tick survives a round trip exactly, and
-/// a microsecond lands within half a tick. It cannot be exact both ways, because a
-/// timebase quantises: one second is 29.97 ticks at 1001/30000, not an integer.
-/// Asserting exactness in both directions is the mistake that looks like a bug in
+/// What a timebase guarantees: a tick survives a round trip exactly, a microsecond
+/// lands within half a tick. It cannot be exact both ways, because one second is
+/// 29.97 ticks at 1001/30000. Asserting exactness both ways looks like a bug in
 /// the conversion and is a bug in the expectation.
 fn proveTimebaseRoundTrips(r: *Result) void {
     const rates = [_]media.Timebase{

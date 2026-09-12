@@ -1,8 +1,8 @@
 //! Loads a real model, plans it, and runs it, printing what it needs, what it
 //! costs and what it kept. It is how the sides in the model proofs were chosen:
 //! a naive interpreter's budget is a measurement, never a guess.
-//!
-//!   model-probe -- <model.onnx> [side] [runs]
+
+// Usage: model-probe -- <model.onnx> [side] [runs]
 
 const std = @import("std");
 const onnx = @import("onnx");

@@ -1,8 +1,7 @@
-//! Screen capture behind the adapter boundary: the platform backend enumerates
-//! what can be captured and streams a chosen surface's frames as BGRA, the pixel
-//! order every platform's screen API vends. No vendor type crosses this file's
-//! surface, and a throw behind it surfaces as a status rather than unwinding
-//! into Zig.
+//! Screen capture behind the adapter boundary: the backend enumerates what can
+//! be captured and streams a surface's frames as BGRA, the order every screen API
+//! vends. No vendor type crosses this surface, and a throw behind it arrives as a
+//! status rather than unwinding into Zig.
 
 const std = @import("std");
 

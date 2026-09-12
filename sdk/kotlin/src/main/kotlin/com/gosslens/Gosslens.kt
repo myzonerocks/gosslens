@@ -995,8 +995,7 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     /**
      * Drains the ring and hands each event to a callback, returning what was
      * dropped. A caller using coroutines wraps this in a flow in one line; the SDK
-     * takes no coroutines dependency, because forcing one on every Android
-     * consumer to offer a Flow is a cost they did not ask for.
+     * takes no coroutines dependency of its own.
      */
     /**
      * Adds or updates one annotation. The same id replaces rather than

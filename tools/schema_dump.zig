@@ -1,8 +1,8 @@
 //! Prints the snapshot record's schema as deterministic text and checks it
 //! against the tracked baseline, so reordering or dropping a field shows up in
 //! review rather than as a consumer reading the wrong bytes.
-//!
-//!   schema_dump --print | --check <baseline> | --update <baseline>
+
+// Usage: schema_dump --print | --check <baseline> | --update <baseline>
 
 const std = @import("std");
 const perception = @import("perception");

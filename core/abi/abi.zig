@@ -10069,9 +10069,6 @@ pub export fn goss_session_reset_capture(session: ?*Session) Status {
 /// how many diagnostics could not be recorded at all. A zero count with a
 /// non-zero lost count means the lens degraded in ways this session could not
 /// even write down, which is a different thing from a lens that is fine.
-/// Names the operators a model needs and this engine does not implement, one
-/// per line. A caller learns exactly what is missing before loading, and a
-/// buffer too short reports the full size rather than a truncated list.
 /// One thing the frame says, flattened for the crossing: where it is, how sure
 /// the engine is, what found it, and which line and paragraph it belongs to. The
 /// string comes through goss_session_text_string, so a caller sizes once.
@@ -10199,14 +10196,6 @@ pub export fn goss_session_text_string(session: ?*Session, index: u32, out: ?[*]
     return .ok;
 }
 
-/// Opens the memory plane at a fixed embedding width. Nothing is remembered
-/// until a caller says so, and the bound is the caller's, so the memory it was
-/// promised is the memory it gets.
-/// Narrows what this session will answer. It opens fully permissive, because
-/// this engine had callers before scopes existed and a default that silently
-/// denied them would break working code rather than protect anything. A host
-/// that wants a narrow scope says so, once, and every read and action after it
-/// answers to this.
 /// One thing that can be captured, as the platform reports it. The scale factor
 /// is the field a caller must not ignore: a point sent back without it lands at
 /// half its intended place on a retina display.

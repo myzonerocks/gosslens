@@ -223,10 +223,9 @@ test "an identity orientation is the default" {
 }
 
 /// The colour metadata mapped onto the engine's own conversion vocabulary. The
-/// media layer carries primaries, transfer, matrix, range, siting and bit depth,
-/// and the frame path's maths takes a standard and a range: without this bridge
-/// the richer set is decoration, and a bt2020 frame converts as bt709 because
-/// nothing carried the difference across.
+/// media layer carries primaries, transfer, matrix, range, siting and depth; the
+/// frame path takes a standard and a range. Without this bridge a bt2020 frame
+/// converts as bt709 because nothing carried the difference across.
 pub const MatrixStandard = enum { bt601, bt709, bt2020 };
 
 /// The standard the conversion matrix is built from. Derived from the matrix

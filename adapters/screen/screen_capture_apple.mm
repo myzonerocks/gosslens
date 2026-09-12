@@ -1,10 +1,7 @@
 // ScreenCaptureKit behind the screen-capture boundary. Every entry point catches
-// at the boundary and returns a status, because an NSException crossing into Zig
-// is an unwind Zig has no frame for.
-//
-// ScreenCaptureKit is asynchronous by design: it hands frames to a delegate. A
-// latest-wins mailbox turns that into the pull the seam wants, so a caller reads
-// the newest frame rather than queueing behind a stream it cannot drain.
+// and returns a status, because an NSException crossing into Zig is an unwind Zig
+// has no frame for. The API hands frames to a delegate, so a latest-wins mailbox
+// turns that into the pull the seam wants.
 
 #import <Foundation/Foundation.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>

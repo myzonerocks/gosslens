@@ -3939,11 +3939,10 @@ fn proveColorManagedCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 }
 
 
-/// The real models the ONNX rail is held to. Each is fetched by digest and
-/// never committed, so a host without them says so and the rest of the suite
-/// runs. The side is the size the model is run at, measured with model-probe:
-/// a resolution-flexible net runs at the smallest size that still exercises
-/// every operator it uses.
+/// The real models the ONNX rail is held to, each fetched by digest and never
+/// committed, so a host without them says so and the rest of the suite runs. The
+/// side is measured with model-probe: a resolution-flexible net runs at the
+/// smallest size that still exercises every operator it uses.
 const zoo_models = [_]struct {
     kind: []const u8,
     path: []const u8,
@@ -3975,12 +3974,10 @@ const zoo_load_only = [_]struct {
 const zoo_depth_side: u32 = 126;
 const zoo_segmentation_side: u32 = 128;
 
-/// Every model class the rail claims to run, run through the real ABI on a real
-/// frame: a classifier, a detector, an embedding, a depth net and a segmenter,
-/// each in float and quantized form. Each must load, name no missing operator,
-/// produce a finite value, produce the same value twice, and respond to the
-/// pixels. The budget is printed rather than asserted, because an interpreter's
-/// cost is a fact about the host.
+/// Every model class the rail claims to run, through the real ABI on a real
+/// frame, float and quantized. Each must load, name no missing operator, produce a
+/// finite value twice over, and respond to the pixels. The budget is printed
+/// rather than asserted: an interpreter's cost is a fact about the host.
 fn proveModelZoo(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -13050,11 +13047,10 @@ fn proveColorMatchesOnBothPaths(gpa: std.mem.Allocator, engine: *abi.Engine) !bo
         .{ .name = "bt601 video", .standard = 0, .range = 0, .info = .{ .matrix = .bt601, .range = .video } },
         .{ .name = "bt601 full", .standard = 0, .range = 1, .info = .{ .matrix = .bt601, .range = .full } },
     };
-    // Eight bits of chroma tolerance: the GPU samples a half-resolution chroma
-    // plane with bilinear filtering where the reference reads the exact sample,
-    // so a flat field is comparable and a gradient is not. The fields below are
-    // flat per tile for that reason, and the number is stated rather than tuned
-    // until it passed.
+    // Eight bits of chroma tolerance: the GPU filters a half-resolution plane
+    // where the reference reads the exact sample, so a flat field is comparable
+    // and a gradient is not. The fields below are flat per tile for that reason,
+    // and the number is stated rather than tuned until it passed.
     const tolerance: u8 = 8;
 
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
