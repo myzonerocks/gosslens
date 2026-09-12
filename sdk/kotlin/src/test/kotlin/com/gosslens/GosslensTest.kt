@@ -26,27 +26,27 @@ class GosslensTest {
 
     @Test
     fun `an upright unmirrored frame carries no flags`() {
-        assertEquals(0, Gosslens.flagsFor(0, false))
+        assertEquals(0, GossFlags.flagsFor(0, false))
     }
 
     @Test
     fun `a rotation packs as quarter turns above the shift`() {
-        assertEquals(1 shl Gosslens.ROTATION_SHIFT, Gosslens.flagsFor(90, false))
-        assertEquals(2 shl Gosslens.ROTATION_SHIFT, Gosslens.flagsFor(180, false))
-        assertEquals(3 shl Gosslens.ROTATION_SHIFT, Gosslens.flagsFor(270, false))
+        assertEquals(1 shl GossFlags.ROTATION_SHIFT, GossFlags.flagsFor(90, false))
+        assertEquals(2 shl GossFlags.ROTATION_SHIFT, GossFlags.flagsFor(180, false))
+        assertEquals(3 shl GossFlags.ROTATION_SHIFT, GossFlags.flagsFor(270, false))
     }
 
     @Test
     fun `a full turn is the same as none, and the quarter turns wrap`() {
-        assertEquals(Gosslens.flagsFor(0, false), Gosslens.flagsFor(360, false))
-        assertEquals(Gosslens.flagsFor(90, false), Gosslens.flagsFor(450, false))
+        assertEquals(GossFlags.flagsFor(0, false), GossFlags.flagsFor(360, false))
+        assertEquals(GossFlags.flagsFor(90, false), GossFlags.flagsFor(450, false))
     }
 
     @Test
     fun `a mirror rides beside the rotation rather than over it`() {
-        val mirrored = Gosslens.flagsFor(90, true)
-        assertTrue(mirrored and Gosslens.FLAG_MIRROR != 0)
-        assertEquals(1 shl Gosslens.ROTATION_SHIFT, mirrored and (0x3 shl Gosslens.ROTATION_SHIFT))
+        val mirrored = GossFlags.flagsFor(90, true)
+        assertTrue(mirrored and GossFlags.FLAG_MIRROR != 0)
+        assertEquals(1 shl GossFlags.ROTATION_SHIFT, mirrored and (0x3 shl GossFlags.ROTATION_SHIFT))
     }
 
     @Test

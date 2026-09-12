@@ -16695,7 +16695,18 @@ fn provePerFrameBudget(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *Co
     return true;
 }
 
-const AllocCallScenario = struct { name: []const u8, dir: []const u8, depth: bool };
+const AllocCallScenario = struct {
+    name: []const u8,
+    dir: []const u8,
+    depth: bool,
+    /// The analysis rails a scenario stands up. F11 of the audit: the gate named
+    /// eleven lenses and not one of them enabled tracking, segmentation or
+    /// beauty, which are the per-frame paths most likely to allocate.
+    face: bool = false,
+    hands: bool = false,
+    segmentation: bool = false,
+    beauty: bool = false,
+};
 
 /// Every per-frame path Branch 5 moved onto persistent staging, each named so
 /// a regression points at the exact conversion that leaked back an allocation.
@@ -16711,6 +16722,14 @@ const alloc_call_scenarios = [_]AllocCallScenario{
     .{ .name = "hair solver", .dir = ".lens-packages/hair-sim", .depth = false },
     .{ .name = "morph mesh", .dir = ".lens-packages/morph-blend", .depth = false },
     .{ .name = "depth submit", .dir = ".lens-packages/dof-blur", .depth = true },
+    // The rails the gate used to skip entirely. Each runs its inference every
+    // frame on the steady window, so a tensor or a result buffer reallocated per
+    // frame fails here rather than on a device.
+    .{ .name = "face tracking", .dir = ".lens-packages/studio-full", .depth = false, .face = true },
+    .{ .name = "hand tracking", .dir = ".lens-packages/studio-full", .depth = false, .hands = true },
+    .{ .name = "segmentation", .dir = ".lens-packages/studio-full", .depth = false, .segmentation = true },
+    .{ .name = "beauty chain", .dir = ".lens-packages/beauty-baseline", .depth = false, .beauty = true },
+    .{ .name = "every rail at once", .dir = ".lens-packages/studio-full", .depth = true, .face = true, .hands = true, .segmentation = true, .beauty = true },
 };
 
 /// The steady-window allocation-CALL gate: renders each converted per-frame
@@ -16728,6 +16747,29 @@ fn proveScenarioAllocFree(gpa: std.mem.Allocator, engine: *abi.Engine, counter: 
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
     defer settle(engine);
+    // Every rail stands up before activation, the order renderOnceWith uses: a
+    // chain enabled afterward misses the lens's own default effect values.
+    if (sc.face or sc.hands) {
+        const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        defer gpa.free(face_bytes);
+        if (sc.face and abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) return error.EnableFaceTrackingFailed;
+        if (sc.hands) {
+            const hand_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, hand_bundle_path, gpa, .limited(16 << 20));
+            defer gpa.free(hand_bytes);
+            if (abi.goss_session_enable_hand_tracking(session, hand_bytes.ptr, hand_bytes.len, 2) != .ok) return error.EnableHandTrackingFailed;
+        }
+    }
+    if (sc.segmentation) {
+        const segmentation_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(16 << 20));
+        defer gpa.free(segmentation_bytes);
+        if (abi.goss_session_enable_segmentation(session, segmentation_bytes.ptr, segmentation_bytes.len, 2) != .ok) return error.EnableSegmentationFailed;
+    }
+    if (sc.beauty) {
+        switch (abi.goss_session_enable_beauty(session, beauty_resource_path)) {
+            .ok, .unsupported => {},
+            else => return error.EnableBeautyFailed,
+        }
+    }
     if (abi.goss_session_activate_lens_from_directory(session, sc.dir.ptr, sc.dir.len) != .ok) {
         std.debug.print("conformance: FAIL alloc-call scenario {s} lens activation\n", .{sc.name});
         return false;

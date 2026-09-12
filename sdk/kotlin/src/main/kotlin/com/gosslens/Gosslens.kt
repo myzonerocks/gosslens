@@ -28,7 +28,24 @@ enum class DegradeLevel(val raw: Int) {
     }
 }
 
-object Gosslens {
+/**
+ * The pure helpers, off the Gosslens object on purpose: that one loads the native
+ * library in its initialiser, so anything reachable only through it is out of a
+ * plain jvm's reach. The unit suite tests these and could not touch them.
+ */
+object GossFlags {
+    const val FLAG_MIRROR = 1
+    const val ROTATION_SHIFT = 8
+
+    /** Quarter turns above the shift, with the mirror bit beside them. */
+    @JvmStatic
+    fun flagsFor(rotationDegrees: Int, mirrored: Boolean): Int {
+        val quarterTurns = ((rotationDegrees % 360) / 90) and 0x3
+        var flags = quarterTurns shl ROTATION_SHIFT
+        if (mirrored) flags = flags or FLAG_MIRROR
+        return flags
+    }
+
     /**
      * The device's thermal status mapped onto the engine's four states.
      * Devices below API 29 report none, which reads as nominal.
@@ -45,6 +62,13 @@ object Gosslens {
             else -> Thermal.CRITICAL
         }
     }
+}
+
+object Gosslens {
+    /** Kept so a caller that already holds the engine does not have to learn a
+     * second entry point; the implementation lives on GossFlags. */
+    @JvmStatic
+    fun platformThermal(context: android.content.Context): Thermal = GossFlags.platformThermal(context)
 
     init {
         System.loadLibrary("gosslens")
@@ -300,8 +324,8 @@ object Gosslens {
     const val PIXEL_I420 = 2
     const val PIXEL_BGRA8 = 3
     const val PIXEL_RGBA8 = 4
-    const val FLAG_MIRROR = 1
-    const val ROTATION_SHIFT = 8
+    const val FLAG_MIRROR = GossFlags.FLAG_MIRROR
+    const val ROTATION_SHIFT = GossFlags.ROTATION_SHIFT
     const val FACE_LANDMARK_COUNT = 478
     const val FACE_BLENDSHAPE_COUNT = 52
     const val FACE_RESULT_BYTES = 5968
@@ -402,12 +426,7 @@ object Gosslens {
         return Pair(out.copyOfRange(0, 3), out.copyOfRange(3, 6))
     }
 
-    fun flagsFor(rotationDegrees: Int, mirrored: Boolean): Int {
-        val quarterTurns = ((rotationDegrees % 360) / 90) and 0x3
-        var flags = quarterTurns shl ROTATION_SHIFT
-        if (mirrored) flags = flags or FLAG_MIRROR
-        return flags
-    }
+    fun flagsFor(rotationDegrees: Int, mirrored: Boolean): Int = GossFlags.flagsFor(rotationDegrees, mirrored)
 }
 
 /** Pool capacities for the engine's texture and staging pools; the
