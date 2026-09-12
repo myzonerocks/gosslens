@@ -702,6 +702,74 @@ const Gate = struct {
         }
     }
 
+    // W4 mechanical check: two ownership transfers in one return literal. The
+    // first call empties its source on success, so an errdefer walking that
+    // list protects nothing when the second one fails. Take each into a named
+    // local with its own errdefer first.
+    fn checkOwnershipTransfers(g: *Gate, paths: []const []const u8) !void {
+        for (paths) |path| {
+            if (!std.mem.endsWith(u8, path, ".zig")) continue;
+            if (std.mem.startsWith(u8, path, ".vendor/")) continue;
+            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(1 << 22)) catch continue;
+            var lines = std.mem.splitScalar(u8, content, '\n');
+            var number: usize = 0;
+            while (lines.next()) |line| {
+                number += 1;
+                if (isCommentLine(line)) continue;
+                if (std.mem.indexOf(u8, line, "return") == null) continue;
+                if (countOccurrences(line, "toOwnedSlice") < 2) continue;
+                try g.flag("ownership-transfer: '{s}':{d} moves two owned slices out in one return; take each into a local with its own errdefer first", .{ path, number });
+            }
+        }
+    }
+
+    // W5 mechanical check: a create or acquire whose failure is swallowed. The
+    // resource is already made by then, so an empty catch drops it; and a
+    // parameter store whose failure is dropped degrades a node silently.
+    fn checkSwallowedFailures(g: *Gate, paths: []const []const u8) !void {
+        for (paths) |path| {
+            if (!std.mem.endsWith(u8, path, ".zig")) continue;
+            if (std.mem.startsWith(u8, path, ".vendor/")) continue;
+            // The harness may drop a failure a proof is deliberately ignoring.
+            if (std.mem.startsWith(u8, path, "harness/")) continue;
+            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(1 << 22)) catch continue;
+            var lines = std.mem.splitScalar(u8, content, '\n');
+            var number: usize = 0;
+            while (lines.next()) |line| {
+                number += 1;
+                if (isCommentLine(line)) continue;
+                if (std.mem.indexOf(u8, line, "catch {}") == null) continue;
+                // A drop the author decided on says so, the same form W9 takes.
+                if (std.mem.indexOf(u8, line, "// failure ignored:") != null) continue;
+                for ([_][]const u8{ ".put(", ".append(", "create", "Create", "acquire", "Acquire" }) |shape| {
+                    if (std.mem.indexOf(u8, line, shape) == null) continue;
+                    try g.flag("swallowed-failure: '{s}':{d} drops the failure of a '{s}' with an empty catch; release what was made, or record why the caller cannot know", .{ path, number, shape });
+                    break;
+                }
+            }
+        }
+    }
+
+    // W9 mechanical check: a vendor call whose return encodes failure, ignored
+    // with no reason. Discarding one is allowed when the line says why.
+    fn checkIgnoredVendorResults(g: *Gate, paths: []const []const u8) !void {
+        for (paths) |path| {
+            if (!std.mem.endsWith(u8, path, ".zig")) continue;
+            if (!std.mem.startsWith(u8, path, "adapters/")) continue;
+            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(1 << 22)) catch continue;
+            var lines = std.mem.splitScalar(u8, content, '\n');
+            var number: usize = 0;
+            while (lines.next()) |line| {
+                number += 1;
+                const trimmed = std.mem.trimStart(u8, line, " \t");
+                if (!std.mem.startsWith(u8, trimmed, "_ = c.")) continue;
+                if (std.mem.indexOf(u8, line, "// result ignored:") != null) continue;
+                if (returnIsNotAStatus(trimmed)) continue;
+                try g.flag("ignored-vendor-result: '{s}':{d} discards a vendor call's result; check it, or say `// result ignored: <reason>` on the line", .{ path, number });
+            }
+        }
+    }
+
     // W10 mechanical check: a file-scope var holding a platform
     // reference aliases every instance and outlives its paired release.
     // Per-instance handles live on the instance struct; a top-level var
@@ -947,6 +1015,9 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkFloatCap();
         try g.checkExportErrdefer(paths);
         try g.checkPlatformReferences(paths);
+        try g.checkOwnershipTransfers(paths);
+        try g.checkSwallowedFailures(paths);
+        try g.checkIgnoredVendorResults(paths);
     } else if (std.mem.eql(u8, mode, "--tree")) {
         const paths = try g.trackedPaths();
         try g.checkIgnoreIntegrity();
@@ -957,6 +1028,9 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkFloatCap();
         try g.checkExportErrdefer(paths);
         try g.checkPlatformReferences(paths);
+        try g.checkOwnershipTransfers(paths);
+        try g.checkSwallowedFailures(paths);
+        try g.checkIgnoredVendorResults(paths);
     } else if (std.mem.eql(u8, mode, "--commit-msg")) {
         const file = args.next() orelse {
             std.debug.print("gate: --commit-msg needs a file argument\n", .{});
@@ -997,6 +1071,40 @@ pub fn main(init: std.process.Init) !u8 {
         return 1;
     }
     return 0;
+}
+
+/// Vendor calls whose return is documented as something other than a status, so
+/// discarding one cannot hide a failure. Each entry says what it returns; the
+/// check is about fallible calls, and demanding a reason on a chaining call
+/// would only teach contributors to paste one.
+const not_a_status_calls = [_]struct { prefix: []const u8, returns: []const u8 }{
+    .{ .prefix = "_ = c.bgfx_vertex_layout_", .returns = "the layout, for chaining" },
+    .{ .prefix = "_ = c.bgfx_set_", .returns = "the number of elements bound" },
+    .{ .prefix = "_ = c.bgfx_frame(", .returns = "the frame number" },
+    .{ .prefix = "_ = c.bgfx_render_frame(", .returns = "the render status of a frame not yet submitted" },
+    .{ .prefix = "_ = c.bgfx_touch(", .returns = "the view's draw count" },
+    .{ .prefix = "_ = c.bgfx_submit", .returns = "the view's draw count" },
+    .{ .prefix = "_ = c.bgfx_dispatch", .returns = "the view's dispatch count" },
+    .{ .prefix = "_ = c.bgfx_encoder_", .returns = "a count or nothing, never a status" },
+    .{ .prefix = "_ = c.bgfx_get_avail_", .returns = "an availability count the caller already checked" },
+    .{ .prefix = "_ = c.bgfx_alloc_", .returns = "the allocated buffer, filled through its out pointer" },
+};
+
+fn returnIsNotAStatus(trimmed: []const u8) bool {
+    for (not_a_status_calls) |entry| {
+        if (std.mem.startsWith(u8, trimmed, entry.prefix)) return true;
+    }
+    return false;
+}
+
+fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
+    var count: usize = 0;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, at, needle)) |found| {
+        count += 1;
+        at = found + needle.len;
+    }
+    return count;
 }
 
 fn hasLine(text: []const u8, wanted: []const u8) bool {

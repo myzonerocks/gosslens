@@ -1758,7 +1758,7 @@ pub const Renderer = struct {
                 self.height = height;
             }
             if (self.handle.idx == invalid_handle) return self.handle;
-            _ = c.bgfx_override_internal_texture_ptr(self.handle, native_ptr, 0);
+            _ = c.bgfx_override_internal_texture_ptr(self.handle, native_ptr, 0); // result ignored: returns the previous pointer, not a status
             return self.handle;
         }
 

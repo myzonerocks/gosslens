@@ -212,13 +212,13 @@ pub const Recording = struct {
     pub fn finish(recording: *Recording) Error!void {
         const state: *State = @ptrCast(@alignCast(recording.handle));
         defer {
-            _ = c.AMediaCodec_stop(state.codec);
-            _ = c.AMediaCodec_delete(state.codec);
+            _ = c.AMediaCodec_stop(state.codec); // result ignored: closing anyway, and delete below frees either way
+            _ = c.AMediaCodec_delete(state.codec); // result ignored: nothing to do about a failed delete at teardown
             if (state.audio_codec) |ac| {
-                _ = c.AMediaCodec_stop(ac);
-                _ = c.AMediaCodec_delete(ac);
+                _ = c.AMediaCodec_stop(ac); // result ignored: closing anyway, and delete below frees either way
+                _ = c.AMediaCodec_delete(ac); // result ignored: nothing to do about a failed delete at teardown
             }
-            _ = c.AMediaMuxer_delete(state.muxer);
+            _ = c.AMediaMuxer_delete(state.muxer); // result ignored: nothing to do about a failed delete at teardown
             c.ANativeWindow_release(@ptrCast(state.window));
             _ = std.os.linux.close(state.fd);
             freePending(state);
@@ -229,7 +229,7 @@ pub const Recording = struct {
             const index = c.AMediaCodec_dequeueInputBuffer(ac, 100_000);
             if (index >= 0) {
                 const ts: u64 = @intCast(pcm.framesToDurationUs(state.audio_frames, state.audio_rate));
-                _ = c.AMediaCodec_queueInputBuffer(ac, @intCast(index), 0, 0, ts, c.AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
+                _ = c.AMediaCodec_queueInputBuffer(ac, @intCast(index), 0, 0, ts, c.AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM); // result ignored: a codec that will not take end-of-stream is already past use
                 try drainAudio(state, true);
             }
         }

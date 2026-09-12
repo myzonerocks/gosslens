@@ -46,8 +46,8 @@ pub fn encode(rgba: []const u8, width: u32, height: u32, format: Format, quality
 
     const codec = c.AMediaCodec_createEncoderByType("video/hevc") orelse return error.EncodeFailed;
     defer {
-        _ = c.AMediaCodec_stop(codec);
-        _ = c.AMediaCodec_delete(codec);
+        _ = c.AMediaCodec_stop(codec); // result ignored: closing anyway, and delete below frees either way
+        _ = c.AMediaCodec_delete(codec); // result ignored: nothing to do about a failed delete at teardown
     }
     const fmt = c.AMediaFormat_new() orelse return error.EncodeFailed;
     defer _ = c.AMediaFormat_delete(fmt);

@@ -61,7 +61,7 @@ const Fetch = struct {
         }
         const path = try std.fmt.allocPrint(f.arena, ".models/{s}", .{model.name});
         if (std.fs.path.dirname(path)) |parent| {
-            Io.Dir.cwd().createDirPath(f.io, parent) catch {};
+            Io.Dir.cwd().createDirPath(f.io, parent) catch {}; // failure ignored: the write below reports a path that truly cannot be made
         }
         if (f.digestMatches(path, model.sha256)) {
             std.debug.print("fetch-models: {s} ok\n", .{model.name});
@@ -111,7 +111,7 @@ pub fn main(init: std.process.Init) !u8 {
     const source = try Io.Dir.cwd().readFileAllocOptions(f.io, "third_party/models.lock", arena, .limited(1 << 16), .of(u8), 0);
     const lock = try std.zon.parse.fromSliceAlloc(Lock, arena, source, null, .{});
 
-    if (!check_only) Io.Dir.cwd().createDirPath(f.io, ".models") catch {};
+    if (!check_only) Io.Dir.cwd().createDirPath(f.io, ".models") catch {}; // failure ignored: the write below reports a path that truly cannot be made
     for (lock.models) |model| try f.syncOne(model);
 
     if (f.failures != 0) {

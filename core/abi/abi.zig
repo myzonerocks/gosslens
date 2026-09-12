@@ -8658,7 +8658,7 @@ pub export fn goss_session_capture_view(session: ?*Session, out_guidance: ?*Capt
     s.capture_covered |= (@as(u32, 1) << @intCast(target));
 
     if (s.capture_poses.items.len < capture_max_views) {
-        s.capture_poses.append(gpa, cam_pose) catch {};
+        s.capture_poses.append(gpa, cam_pose) catch {}; // failure ignored: the scan loses one viewpoint, and capture_view reports the coverage
         reconstructView(s, gpa, cam_pose, proj);
     }
 
@@ -11546,9 +11546,9 @@ fn pollLutLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocator
             session.lut_textures.put(gpa, entry.key_ptr.*, texture) catch {
                 r.destroyTexture(texture);
             };
-            finished.append(gpa, entry.key_ptr.*) catch {};
+            finished.append(gpa, entry.key_ptr.*) catch {}; // failure ignored: the next poll collects this key again
         } else if (loader.hasFailed()) {
-            finished.append(gpa, entry.key_ptr.*) catch {};
+            finished.append(gpa, entry.key_ptr.*) catch {}; // failure ignored: the next poll collects this key again
         }
     }
     for (finished.items) |graph_index| {
@@ -11587,9 +11587,9 @@ fn pollBlendLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
             session.blend_textures.put(gpa, entry.key_ptr.*, texture) catch {
                 r.destroyTexture(texture);
             };
-            finished.append(gpa, entry.key_ptr.*) catch {};
+            finished.append(gpa, entry.key_ptr.*) catch {}; // failure ignored: the next poll collects this key again
         } else if (loader.hasFailed()) {
-            finished.append(gpa, entry.key_ptr.*) catch {};
+            finished.append(gpa, entry.key_ptr.*) catch {}; // failure ignored: the next poll collects this key again
         }
     }
     for (finished.items) |graph_index| {
@@ -11628,9 +11628,9 @@ fn pollEnvLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocator
             session.env_textures.put(gpa, entry.key_ptr.*, texture) catch {
                 r.destroyTexture(texture);
             };
-            finished.append(gpa, entry.key_ptr.*) catch {};
+            finished.append(gpa, entry.key_ptr.*) catch {}; // failure ignored: the next poll collects this key again
         } else if (loader.hasFailed()) {
-            finished.append(gpa, entry.key_ptr.*) catch {};
+            finished.append(gpa, entry.key_ptr.*) catch {}; // failure ignored: the next poll collects this key again
         }
     }
     for (finished.items) |graph_index| {
@@ -12100,9 +12100,9 @@ fn pollSpriteLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Alloca
             session.sprite_textures.put(gpa, entry.key_ptr.*, texture) catch {
                 r.destroyTexture(texture);
             };
-            finished.append(gpa, entry.key_ptr.*) catch {};
+            finished.append(gpa, entry.key_ptr.*) catch {}; // failure ignored: the next poll collects this key again
         } else if (loader.hasFailed()) {
-            finished.append(gpa, entry.key_ptr.*) catch {};
+            finished.append(gpa, entry.key_ptr.*) catch {}; // failure ignored: the next poll collects this key again
         }
     }
     for (finished.items) |graph_index| {
@@ -12288,9 +12288,9 @@ fn pollMeshFaceLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allo
             session.mesh_face_textures.put(gpa, entry.key_ptr.*, texture) catch {
                 r.destroyTexture(texture);
             };
-            finished.append(gpa, entry.key_ptr.*) catch {};
+            finished.append(gpa, entry.key_ptr.*) catch {}; // failure ignored: the next poll collects this key again
         } else if (loader.hasFailed()) {
-            finished.append(gpa, entry.key_ptr.*) catch {};
+            finished.append(gpa, entry.key_ptr.*) catch {}; // failure ignored: the next poll collects this key again
         }
     }
     for (finished.items) |graph_index| {
@@ -12339,9 +12339,9 @@ fn pollPaintFaceLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.All
             session.paint_face_textures.put(gpa, entry.key_ptr.*, texture) catch {
                 r.destroyTexture(texture);
             };
-            finished.append(gpa, entry.key_ptr.*) catch {};
+            finished.append(gpa, entry.key_ptr.*) catch {}; // failure ignored: the next poll collects this key again
         } else if (loader.hasFailed()) {
-            finished.append(gpa, entry.key_ptr.*) catch {};
+            finished.append(gpa, entry.key_ptr.*) catch {}; // failure ignored: the next poll collects this key again
         }
     }
     for (finished.items) |graph_index| {
@@ -12390,9 +12390,9 @@ fn pollFaceSwapLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allo
             session.face_swap_textures.put(gpa, entry.key_ptr.*, texture) catch {
                 r.destroyTexture(texture);
             };
-            finished.append(gpa, entry.key_ptr.*) catch {};
+            finished.append(gpa, entry.key_ptr.*) catch {}; // failure ignored: the next poll collects this key again
         } else if (loader.hasFailed()) {
-            finished.append(gpa, entry.key_ptr.*) catch {};
+            finished.append(gpa, entry.key_ptr.*) catch {}; // failure ignored: the next poll collects this key again
         }
     }
     for (finished.items) |graph_index| {
@@ -13658,7 +13658,7 @@ fn pollMlStyle(session: *Session) void {
             mw.style_tex = render.Renderer.createDynamicBgraTexture(@intCast(side), @intCast(side));
         }
         render.Renderer.updateDynamicBgraTexture(sessionRenderer(session) orelse return, mw.style_tex, @intCast(side), @intCast(side), mw.style_bgra);
-        session.ml_style_textures.put(session.engine.gpa, target, mw.style_tex) catch {};
+        session.ml_style_textures.put(session.engine.gpa, target, mw.style_tex) catch noteOom(session, target);
     }
     pollTemporalStyle(session);
 }
@@ -13775,7 +13775,7 @@ fn pollTemporalStyle(session: *Session) void {
             tw.style_tex = render.Renderer.createDynamicBgraTexture(@intCast(side), @intCast(side));
         }
         render.Renderer.updateDynamicBgraTexture(sessionRenderer(session) orelse return, tw.style_tex, @intCast(side), @intCast(side), tw.style_bgra);
-        session.ml_style_textures.put(session.engine.gpa, tw.target, tw.style_tex) catch {};
+        session.ml_style_textures.put(session.engine.gpa, tw.target, tw.style_tex) catch noteOom(session, tw.target);
     }
 }
 
@@ -14476,7 +14476,7 @@ fn pollDiffusion(session: *Session) void {
             dw.tex = render.Renderer.createDynamicBgraTexture(@intCast(side), @intCast(side));
         }
         render.Renderer.updateDynamicBgraTexture(sessionRenderer(session) orelse return, dw.tex, @intCast(side), @intCast(side), dw.bgra);
-        session.ml_style_textures.put(session.engine.gpa, dw.target, dw.tex) catch {};
+        session.ml_style_textures.put(session.engine.gpa, dw.target, dw.tex) catch noteOom(session, dw.target);
     }
 }
 
@@ -14761,7 +14761,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                     if (id != physics.invalid_body) {
                         session.physics_bodies.put(gpa, model.graph_index, id) catch noteOom(session, model.graph_index);
                         // A dynamic body can be grabbed and thrown by a pointer.
-                        if (body.dynamic and !body.kinematic) session.grabbable_bodies.append(gpa, id) catch {};
+                        if (body.dynamic and !body.kinematic) session.grabbable_bodies.append(gpa, id) catch {}; // failure ignored: the body simulates, it just cannot be grabbed
                         // A head-following collider is driven to the tracked head.
                         if (body.follow == .head) session.head_collider_body = id;
                     }
@@ -14894,7 +14894,9 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
             if (session.pending_glb_colliders.get(entry.key_ptr.*)) |pc| {
                 if (session.physics_world) |world| {
                     if (world.addBodyMesh(decoded.positions, decoded.indices, pc.position, pc.rotation, pc.friction, pc.restitution)) |bid| {
-                        session.physics_bodies.put(gpa, entry.key_ptr.*, bid) catch {};
+                        // The map is what removes the body later, so a body it
+                        // cannot hold is one nothing would ever take out.
+                        session.physics_bodies.put(gpa, entry.key_ptr.*, bid) catch world.removeBody(bid);
                     } else |_| {}
                 }
                 _ = session.pending_glb_colliders.remove(entry.key_ptr.*);
@@ -14926,7 +14928,7 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 gltf.freeMorphTargets(gpa, decoded.morph_targets);
                 for (decoded.morph_names) |n| gpa.free(n);
                 gpa.free(decoded.morph_names);
-                finished.append(gpa, entry.key_ptr.*) catch {};
+                finished.append(gpa, entry.key_ptr.*) catch {}; // failure ignored: the next poll collects this key again
                 continue;
             };
             // A skinned mesh keeps its geometry to deform each frame; the
@@ -15000,9 +15002,9 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 if (lit_normals.len > 0) gpa.free(lit_normals);
                 if (lit_indices.len > 0) gpa.free(lit_indices);
             };
-            finished.append(gpa, entry.key_ptr.*) catch {};
+            finished.append(gpa, entry.key_ptr.*) catch {}; // failure ignored: the next poll collects this key again
         } else if (loader.hasFailed()) {
-            finished.append(gpa, entry.key_ptr.*) catch {};
+            finished.append(gpa, entry.key_ptr.*) catch {}; // failure ignored: the next poll collects this key again
         }
     }
     for (finished.items) |graph_index| {

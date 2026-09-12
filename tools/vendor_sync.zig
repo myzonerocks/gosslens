@@ -247,7 +247,7 @@ const Sync = struct {
         const archive_sha256 = if (override) |o| o.sha256 else pin.archive_sha256;
         const archive_ext = if (std.mem.endsWith(u8, url, ".tar.xz")) ".tar.xz" else ".tar.gz";
 
-        Io.Dir.cwd().createDirPath(s.io, ".vendor-archives") catch {};
+        Io.Dir.cwd().createDirPath(s.io, ".vendor-archives") catch {}; // failure ignored: the write below reports a path that truly cannot be made
         const archive_path = try std.fmt.allocPrint(s.arena, ".vendor-archives/{s}-{s}{s}", .{ pin.name, pin.commit, archive_ext });
         if (!s.fileDigestMatches(archive_path, archive_sha256)) {
             std.debug.print("vendor-sync: fetching {s}\n", .{url});
