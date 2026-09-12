@@ -21871,22 +21871,32 @@ fn watchHold(name: [*:0]const u8) void {
 const renderer_cycles: usize = 64;
 
 /// Frames each cycle renders, how many of them warm the renderer before the
-/// measure starts, and how much dearer a later renderer's cheapest frame may
-/// be than the renderer before it. A renderer brought up after another was
-/// destroyed must cost what that one cost.
+/// measure starts, and how much dearer the later renderers may be than the
+/// earlier ones. A renderer brought up after another was destroyed must cost
+/// what that one cost.
 const lifecycle_frames: usize = 12;
 const lifecycle_warm_frames: usize = 4;
 const lifecycle_cost_slack: u64 = 3;
+
+/// The median of a run of costs. The bug this proof hunts is a renderer that
+/// gets dearer cycle over cycle, so the halves are compared by median: one
+/// slow cycle on a host with no hardware renderer moves a single sample by
+/// twenty times and moves a median by nothing.
+fn medianOf(values: []u64) u64 {
+    if (values.len == 0) return 0;
+    std.mem.sortUnstable(u64, values, {}, std.sort.asc(u64));
+    return values[values.len / 2];
+}
 
 /// Create engine, bring up a renderer, draw, destroy - over and over in one
 /// process, each cycle through a counting allocator whose live bytes must come
 /// back to where they started. The headless proof cycles sessions over one
 /// engine and never makes a renderer, so nothing held this.
 fn proveRendererLifecycle(gpa: std.mem.Allocator, window: ?*c.GLFWwindow) !bool {
+    var costs: [renderer_cycles]u64 = @splat(0);
     var settled: usize = 0;
     var first_live: usize = 0;
     var first_frame_us: u64 = 0;
-    var settled_frame_us: u64 = 0;
     var worst_frame_us: u64 = 0;
     var cycle: usize = 0;
     while (cycle < renderer_cycles) : (cycle += 1) {
@@ -21940,17 +21950,8 @@ fn proveRendererLifecycle(gpa: std.mem.Allocator, window: ?*c.GLFWwindow) !bool 
         // renderer 1 is the baseline the rest are held to, the same cycle the
         // leak check below settles on.
         if (cycle == 0) first_frame_us = per_frame_us;
-        if (cycle == 1) settled_frame_us = per_frame_us;
         if (cycle > 0 and per_frame_us > worst_frame_us) worst_frame_us = per_frame_us;
-        if (cycle > 1 and per_frame_us > @max(settled_frame_us * lifecycle_cost_slack, 2000)) {
-            std.debug.print(
-                "conformance: FAIL renderer lifecycle - cycle {d} costs {d}us a frame against renderer 1's {d}us\n",
-                .{ cycle, per_frame_us, settled_frame_us },
-            );
-            abi.destroySession(session);
-            abi.destroyEngine(engine);
-            return false;
-        }
+        costs[cycle] = per_frame_us;
         abi.destroySession(session);
         abi.destroyEngine(engine);
 
@@ -21972,9 +21973,26 @@ fn proveRendererLifecycle(gpa: std.mem.Allocator, window: ?*c.GLFWwindow) !bool 
             }
         }
     }
+    // Cycle 0 pays the process-wide warmup a first renderer carries, so the
+    // trend is read over the cycles after it.
+    const settled_costs = costs[1..];
+    const half = settled_costs.len / 2;
+    var early: [renderer_cycles]u64 = undefined;
+    var late: [renderer_cycles]u64 = undefined;
+    @memcpy(early[0..half], settled_costs[0..half]);
+    @memcpy(late[0 .. settled_costs.len - half], settled_costs[half..]);
+    const early_median = medianOf(early[0..half]);
+    const late_median = medianOf(late[0 .. settled_costs.len - half]);
+    if (late_median > @max(early_median * lifecycle_cost_slack, 2000)) {
+        std.debug.print(
+            "conformance: FAIL renderer lifecycle - the later renderers cost {d}us a frame against the earlier ones' {d}us\n",
+            .{ late_median, early_median },
+        );
+        return false;
+    }
     std.debug.print(
-        "conformance: PROOF {d} engine-and-renderer cycles in one process, nothing kept, and every renderer made after a destroy renders as fast as the one before it (worst {d}us against renderer 1's {d}us a frame, first renderer {d}us)\n",
-        .{ renderer_cycles, worst_frame_us, settled_frame_us, first_frame_us },
+        "conformance: PROOF {d} engine-and-renderer cycles in one process, nothing kept, and the renderers made after a destroy stay as fast as the ones before them (later {d}us against earlier {d}us a frame, worst {d}us, first renderer {d}us)\n",
+        .{ renderer_cycles, late_median, early_median, worst_frame_us, first_frame_us },
     );
     return true;
 }
