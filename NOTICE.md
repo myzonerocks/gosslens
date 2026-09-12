@@ -128,3 +128,19 @@ Alliance for Open Media patent license in each project's `PATENTS` file, which
 travels with the source. VP8 and VP9 carry Google's `PATENTS.TXT` grant on the same
 terms. None of these files is modified here.
 
+## Models
+
+Every model is fetched by pinned url and digest from `third_party/models.lock`
+and none is committed. The ONNX rail is proven against real published nets:
+
+- **MobileNetV2** (Apache-2.0, the ONNX model zoo) gives the image classifier,
+  float and int8.
+- **SSD-MobileNetV1** (MIT, the ONNX model zoo) gives the detector, whose graph
+  carries the loops, TopK and non-max suppression a real head needs.
+- **FCN-ResNet50** (MIT, the ONNX model zoo) gives semantic segmentation.
+- **ArcFace ResNet100** (Apache-2.0, the ONNX model zoo) gives the face
+  embedding.
+- **Depth Anything V2 Small** (Apache-2.0, LiheYoung and contributors) gives
+  monocular depth, and is the transformer shape the operator set was widened
+  for.
+

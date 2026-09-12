@@ -59,6 +59,10 @@ pub const Bounds = struct {
     max_model_bytes: usize = 32 * 1024 * 1024,
     max_tensors: u8 = 16,
     max_tensor_bytes: u64 = 64 * 1024 * 1024,
+    /// The square side to run a model that declares none. A net exported with
+    /// symbolic spatial dims carries no size of its own, so the lens says which
+    /// one to use; zero leaves whatever shape the model declared.
+    requested_input_side: u32 = 0,
 
     /// Whether a model within these counts and sizes is allowed to load.
     pub fn admits(self: Bounds, model_bytes: usize, tensor_count: usize, largest_tensor_bytes: u64) bool {

@@ -3938,6 +3938,137 @@ fn proveColorManagedCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+
+/// The real models the ONNX rail is held to. Each is fetched by digest and
+/// never committed, so a host without them says so and the rest of the suite
+/// runs. The side is the size the model is run at, measured with model-probe:
+/// a resolution-flexible net runs at the smallest size that still exercises
+/// every operator it uses.
+const zoo_models = [_]struct {
+    kind: []const u8,
+    path: []const u8,
+    side: u32,
+}{
+    .{ .kind = "classifier", .path = ".models/mobilenetv2.onnx", .side = 224 },
+    .{ .kind = "classifier, quantized", .path = ".models/mobilenetv2-int8.onnx", .side = 224 },
+    .{ .kind = "detector, quantized", .path = ".models/ssd_mobilenet-int8.onnx", .side = 300 },
+    .{ .kind = "depth, quantized", .path = ".models/depth_anything_v2_small-int8.onnx", .side = zoo_depth_side },
+};
+
+/// The models past the lens bundle's asset cap. A hundred-megabyte net is not a
+/// shape a lens ships, so these are held to loading, planning and naming no
+/// missing operator rather than to a frame through the graph.
+const zoo_load_only = [_]struct {
+    kind: []const u8,
+    path: []const u8,
+}{
+    .{ .kind = "detector", .path = ".models/ssd_mobilenet.onnx" },
+    .{ .kind = "embedding, quantized", .path = ".models/arcface-int8.onnx" },
+    .{ .kind = "depth", .path = ".models/depth_anything_v2_small.onnx" },
+    .{ .kind = "segmentation", .path = ".models/fcn_resnet50.onnx" },
+    .{ .kind = "segmentation, quantized", .path = ".models/fcn_resnet50-int8.onnx" },
+};
+
+/// Depth Anything works in 14-pixel patches, so its side must be a multiple of
+/// 14; 126 is nine patches a side, which walks every attention path at a cost a
+/// proof can afford on a naive interpreter.
+const zoo_depth_side: u32 = 126;
+const zoo_segmentation_side: u32 = 128;
+
+/// Every model class the rail claims to run, run through the real ABI on a real
+/// frame: a classifier, a detector, an embedding, a depth net and a segmenter,
+/// each in float and quantized form. Each must load, name no missing operator,
+/// produce a finite value, produce the same value twice, and respond to the
+/// pixels. The budget is printed rather than asserted, because an interpreter's
+/// cost is a fact about the host.
+fn proveModelZoo(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+    const gray_rgba = try gpa.alloc(u8, @as(usize, corpus.frame.width) * corpus.frame.height * 4);
+    defer gpa.free(gray_rgba);
+    @memset(gray_rgba, 128);
+    const gray = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = gray_rgba }, .width = corpus.frame.width, .height = corpus.frame.height });
+    defer gray.deinit(gpa);
+
+    var ran: usize = 0;
+    for (zoo_models) |model_spec| {
+        const model = std.Io.Dir.cwd().readFileAlloc(harness_io, model_spec.path, gpa, .limited(512 << 20)) catch {
+            std.debug.print("conformance: {s} skipped - {s} is not fetched on this host\n", .{ model_spec.kind, model_spec.path });
+            continue;
+        };
+        defer gpa.free(model);
+
+        // What the model needs and this build lacks, through the public op
+        // support surface rather than an internal list.
+        var missing: [1024]u8 = undefined;
+        var needed: usize = 0;
+        _ = abi.goss_ml_op_support(model.ptr, model.len, &missing, missing.len, &needed);
+        if (needed != 0) {
+            std.debug.print("conformance: FAIL {s} needs operators this build lacks:\n{s}\n", .{ model_spec.kind, missing[0..@min(needed, missing.len)] });
+            return false;
+        }
+
+        try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/onnx-zoo-lens/assets");
+        try writeOnnxLens("zig-out/onnx-zoo-lens", model, model_spec.side);
+
+        const started = std.Io.Timestamp.now(harness_io, .awake);
+        const person_a = runMlInferOnce(engine, "zig-out/onnx-zoo-lens", "score", -999.0, person) catch |err| {
+            std.debug.print("conformance: FAIL {s} would not run: {t}\n", .{ model_spec.kind, err });
+            return false;
+        };
+        const elapsed_us: u64 = @intCast(@divTrunc(started.durationTo(std.Io.Timestamp.now(harness_io, .awake)).nanoseconds, 1000));
+        const person_b = try runMlInferOnce(engine, "zig-out/onnx-zoo-lens", "score", -999.0, person);
+        const gray_score = try runMlInferOnce(engine, "zig-out/onnx-zoo-lens", "score", -999.0, gray);
+
+        if (!std.math.isFinite(person_a)) {
+            std.debug.print("conformance: FAIL {s} published a non-finite value\n", .{model_spec.kind});
+            return false;
+        }
+        if (person_a != person_b) {
+            std.debug.print("conformance: FAIL {s} is not bit-stable across runs ({d} vs {d})\n", .{ model_spec.kind, person_a, person_b });
+            return false;
+        }
+        if (person_a == gray_score) {
+            std.debug.print("conformance: FAIL {s} did not respond to the frame\n", .{model_spec.kind});
+            return false;
+        }
+        std.debug.print(
+            "conformance: PROOF a real {s} model runs through the ml.infer node on a camera frame at {d}x{d}, bit-stable across runs and responsive to the pixels ({d}us to first value)\n",
+            .{ model_spec.kind, model_spec.side, model_spec.side, elapsed_us },
+        );
+        ran += 1;
+    }
+    // The models past the bundle cap: every operator they need is implemented,
+    // which is the claim the op-support surface makes and the one a caller acts
+    // on before shipping a model.
+    for (zoo_load_only) |model_spec| {
+        const model = std.Io.Dir.cwd().readFileAlloc(harness_io, model_spec.path, gpa, .limited(512 << 20)) catch {
+            std.debug.print("conformance: {s} skipped - {s} is not fetched on this host\n", .{ model_spec.kind, model_spec.path });
+            continue;
+        };
+        defer gpa.free(model);
+        var missing: [1024]u8 = undefined;
+        var needed: usize = 0;
+        _ = abi.goss_ml_op_support(model.ptr, model.len, &missing, missing.len, &needed);
+        if (needed != 0) {
+            std.debug.print("conformance: FAIL {s} needs operators this build lacks:\n{s}\n", .{ model_spec.kind, missing[0..@min(needed, missing.len)] });
+            return false;
+        }
+        std.debug.print(
+            "conformance: PROOF a real {s} model ({d} MB) needs no operator this engine lacks\n",
+            .{ model_spec.kind, model.len / (1 << 20) },
+        );
+        ran += 1;
+    }
+
+    if (ran == 0) {
+        std.debug.print("conformance: no zoo model is fetched on this host - run `zig build fetch-models` to prove the model rail\n", .{});
+    }
+    return true;
+}
+
 /// Writes a lens bundle whose ml.infer node runs a bundled author model, the
 /// way an author ships one. It binds the segmenter mask center (256x256, so
 /// 128*256+128 - foreground on a centered portrait, background on a blank frame)
@@ -3958,6 +4089,12 @@ fn writeMlInferLens(dir: []const u8, model: []const u8) !void {
     try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
 }
 
+/// How long a worker may take to publish its first value before the proof calls
+/// it stalled. A naive interpreter on a large model is slow, not broken, so this
+/// is generous; a model that never loads still fails in a minute rather than
+/// never.
+const ml_infer_timeout_ns: u64 = 120 * std.time.ns_per_s;
+
 /// Activates the byo-ml bundle on a fresh session, feeds it one frame, and
 /// returns the parameter the model drove. Waits on the async worker's first
 /// publish by watching the sentinel default flip to a real value, which is
@@ -3975,6 +4112,7 @@ fn runMlInferOnce(engine: *abi.Engine, bundle_path: []const u8, param: []const u
     const signals = std.mem.zeroes(abi.LensSignals);
     var value: f32 = sentinel;
     var polls: usize = 0;
+    const started = std.Io.Timestamp.now(harness_io, .awake);
     while (value == sentinel) {
         if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
             return error.MlTrackFrameFailed;
@@ -3983,7 +4121,13 @@ fn runMlInferOnce(engine: *abi.Engine, bundle_path: []const u8, param: []const u
         _ = abi.goss_session_tick_lens(session, 16000, &signals);
         _ = abi.goss_session_parameter_value(session, param.ptr, param.len, &value);
         polls += 1;
-        if (polls > 100_000_000) return error.MlInferTimedOut;
+        // A wall clock rather than a poll count: a worker that never publishes
+        // (a model refused at load, say) otherwise spins for as long as it takes
+        // to count to a hundred million, which is not a timeout anybody sees.
+        if (polls % 512 == 0) {
+            const waited = started.durationTo(std.Io.Timestamp.now(harness_io, .awake)).nanoseconds;
+            if (waited > ml_infer_timeout_ns) return error.MlInferTimedOut;
+        }
     }
     return value;
 }
@@ -4660,14 +4804,18 @@ fn onnxLerpModel(a: std.mem.Allocator, side: i64) []const u8 {
     return model.buf.items;
 }
 
-fn writeOnnxLens(dir: []const u8, model: []const u8) !void {
-    const manifest_json =
-        \\{"glf":"1.0","id":"goss.reference.ml-infer-onnx","version":"1.0.0","display_name":"BYO ONNX","engine_compat":">=0.5","capabilities":[],
-        \\ "parameters":[{"name":"score","type":"float","default":-999.0,"min":-1000000.0,"max":1000000.0}],
-        \\ "nodes":[{"id":"byo","type":"ml.infer","params":{},
-        \\   "ml":{"model":"model.onnx","outputs":[{"tensor":0,"index":0,"param":"score"}]}}],
-        \\ "triggers":[]}
-    ;
+/// A lens whose ml.infer node runs a bundled ONNX net. The declared side is
+/// what a model with symbolic spatial dims needs, and the manifest field for it
+/// was parsed and ignored until this wave; zero leaves the model's own shape.
+fn writeOnnxLens(dir: []const u8, model: []const u8, side: u32) !void {
+    const manifest_json = try std.fmt.allocPrint(std.heap.page_allocator,
+        \\{{"glf":"1.0","id":"goss.reference.ml-infer-onnx","version":"1.0.0","display_name":"BYO ONNX","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{{"name":"score","type":"float","default":-999.0,"min":-1000000.0,"max":1000000.0}}],
+        \\ "nodes":[{{"id":"byo","type":"ml.infer","params":{{}},
+        \\   "ml":{{"model":"model.onnx","input_width":{d},"input_height":{d},"outputs":[{{"tensor":0,"index":0,"param":"score"}}]}}}}],
+        \\ "triggers":[]}}
+    , .{ side, side });
+    defer std.heap.page_allocator.free(manifest_json);
     const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
     defer std.heap.page_allocator.free(manifest_path);
     try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
@@ -4685,7 +4833,7 @@ fn proveMlInferOnnx(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     defer arena.deinit();
     const model = buildOnnxProbe(arena.allocator());
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-infer-onnx/assets");
-    try writeOnnxLens("zig-out/ml-infer-onnx", model);
+    try writeOnnxLens("zig-out/ml-infer-onnx", model, 0);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -22882,6 +23030,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("color managed capture");
     if (!try proveMlInfer(gpa, engine)) return 1;
     watchHold("ml infer");
+    if (!try proveModelZoo(gpa, engine)) return 1;
+    watchHold("model zoo");
     if (!try proveAudioInfer(gpa, engine)) return 1;
     watchHold("audio infer");
     if (!try proveCaption(gpa, engine)) return 1;

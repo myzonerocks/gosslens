@@ -16,6 +16,8 @@ const render = @import("render");
 const tracking = @import("tracking");
 const segmentation = @import("segmentation");
 const ml_infer = @import("ml_infer");
+const text_core = @import("text");
+const text_infer = @import("text_infer");
 const diffusion = @import("diffusion");
 const face = @import("face");
 const face_geometry = @import("face_geometry");
@@ -345,6 +347,11 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_node_report_at(goss_session *session, uint32_t index, goss_node_report *out_report)",
     "goss_status goss_session_node_report_id(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)",
     "goss_status goss_ml_op_support(const uint8_t *model, size_t model_len, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_enable_text(goss_session *session, const uint8_t *detector, size_t detector_len, const uint8_t *recognizer, size_t recognizer_len, const uint8_t *dictionary, size_t dictionary_len, uint32_t detect_side)",
+    "goss_status goss_session_disable_text(goss_session *session)",
+    "goss_status goss_session_text_count(goss_session *session, uint32_t *out_count, uint64_t *out_refused)",
+    "goss_status goss_session_text_at(goss_session *session, uint32_t index, goss_text_entry *out_entry)",
+    "goss_status goss_session_text_string(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)",
 };
 
 // The minor advances from the surface, never by hand: a new op lengthens
@@ -996,6 +1003,16 @@ pub const Session = struct {
     /// holding its output-to-parameter bindings; built at activation, fed a
     /// window of the microphone ring, read into params each tick.
     audio_workers: std.ArrayListUnmanaged(AudioWorker) = .empty,
+    /// What the frame says, and the pipeline that read it. The store is bounded
+    /// and copies its text, so an entry outlives the frame that produced it.
+    text_pipeline: ?*text_infer.Pipeline = null,
+    text_store: TextStore = .{},
+    /// The whole reading lowered once per tick, so a text.matches trigger is
+    /// case-insensitive without lowering per trigger.
+    text_lowered: [text_lowered_max]u8 = undefined,
+    text_lowered_len: usize = 0,
+    text_digest: u64 = 0,
+    text_changed: bool = false,
     /// A ring of the latest mono microphone samples, written each submit_audio,
     /// so an audio.infer worker reads a window without retaining the whole stream.
     audio_ring: [audio_ring_len]f32 = @splat(0),
@@ -5376,6 +5393,7 @@ pub fn destroySession(session: *Session) void {
     }
     if (session.engine.recording_session == session) _ = finishRecording(session.engine);
     teardownScript(session);
+    disableText(session);
     // Every clip a host opened, closed here whether or not the host closed it: a
     // decoder and its reused decode buffer are the session's to release.
     for (session.clips.items) |*slot| {
@@ -8208,7 +8226,58 @@ pub export fn goss_session_submit_frame_rgba_copy(session: ?*Session, desc: ?*co
     const texture = r.uploadRgba(@intCast(d.width), @intCast(d.height), format, rgba_ptr, stride) catch return .out_of_memory;
     s.current = .{ .desc = d.*, .owns_textures = false, .preview = .{ .bgra = .{ .texture = texture } } };
     s.copied_frames += 1;
+    readText(s, rgba_ptr[0 .. @as(usize, stride) * d.height], d.width, d.height, stride, d.timestamp_us);
     return .ok;
+}
+
+/// Reads what this frame says and folds it into the store. A region whose
+/// rectified pixels have not changed keeps its previous reading rather than
+/// running the recogniser again, so watching a static sign costs the detector
+/// and nothing more.
+fn readText(s: *Session, rgba: []const u8, width: u32, height: u32, stride: u32, timestamp_us: i64) void {
+    const pipeline = s.text_pipeline orelse return;
+    const found = pipeline.detectFrame(rgba, width, height, stride) catch return;
+
+    const previous_digest = s.text_digest;
+    s.text_store.clear();
+    var text_buf: [512]u8 = undefined;
+    var chars: [256]text_core.recognize.Char = undefined;
+    var lowered_len: usize = 0;
+
+    for (0..found) |i| {
+        const region = pipeline.found()[i];
+        var entry: text_core.Entry = .{
+            .text = &.{},
+            .quad = region.quad,
+            .confidence = region.confidence,
+            .origin = .recognized,
+            .track_id = region.track_id,
+            .first_seen_us = timestamp_us,
+            .last_seen_us = timestamp_us,
+        };
+        if (pipeline.read(i, rgba, width, height, stride, &text_buf, &chars)) |reading| {
+            entry.text = reading.text;
+            entry.script = reading.script;
+            entry.direction = reading.direction;
+            // The reading's own confidence is what the characters carried; the
+            // detector's is only how sure it was that there was text at all.
+            entry.confidence = reading.confidence;
+        } else |_| {}
+        _ = s.text_store.add(entry);
+
+        for (entry.text) |ch| {
+            if (lowered_len >= s.text_lowered.len) break;
+            s.text_lowered[lowered_len] = std.ascii.toLower(ch);
+            lowered_len += 1;
+        }
+        if (lowered_len < s.text_lowered.len) {
+            s.text_lowered[lowered_len] = ' ';
+            lowered_len += 1;
+        }
+    }
+    s.text_lowered_len = lowered_len;
+    s.text_digest = s.text_store.digest();
+    s.text_changed = s.text_digest != previous_digest;
 }
 
 /// Opens a clip as a source of frames for this session. The engine decodes it and
@@ -8498,8 +8567,26 @@ pub export fn goss_session_perception_snapshot(session: ?*Session, select: u32, 
     // day one and land in the waves that own them. Writing them empty now is what
     // keeps the format from breaking when they fill.
     if (want.text) {
-        w.beginSection(.text, 1);
-        w.u32v(0);
+        // What the frame says, in the same record as everything else: the
+        // section carried a hardcoded zero until the text rail existed.
+        w.beginSection(.text, 2);
+        const readings = s.text_store.items();
+        w.u32v(@intCast(readings.len));
+        for (readings) |e| {
+            for (e.quad.corners) |corner| {
+                w.f32v(corner.x);
+                w.f32v(corner.y);
+            }
+            w.f32v(e.confidence);
+            w.u32v(@intFromEnum(e.origin));
+            w.u32v(@intFromEnum(e.script));
+            w.u32v(@intFromEnum(e.direction));
+            w.u32v(e.track_id);
+            w.u32v(e.line);
+            w.u32v(e.paragraph);
+            w.u32v(@intCast(e.text.len));
+            w.bytes(e.text);
+        }
         w.endSection();
     }
 
@@ -9932,6 +10019,133 @@ pub export fn goss_session_reset_capture(session: ?*Session) Status {
 /// Names the operators a model needs and this engine does not implement, one
 /// per line. A caller learns exactly what is missing before loading, and a
 /// buffer too short reports the full size rather than a truncated list.
+/// One thing the frame says, flattened for the crossing: where it is, how sure
+/// the engine is, what found it, and which line and paragraph it belongs to. The
+/// string comes through goss_session_text_string, so a caller sizes once.
+pub const TextEntry = extern struct {
+    /// The quadrilateral in normalized frame space, in reading order: top-left,
+    /// top-right, bottom-right, bottom-left.
+    quad: [8]f32,
+    confidence: f32,
+    /// 0 recognized, 1 barcode, 2 qr.
+    origin: u32,
+    script: u32,
+    direction: u32,
+    track_id: u32,
+    line: u32,
+    paragraph: u32,
+    text_len: u32,
+    first_seen_us: i64,
+    last_seen_us: i64,
+};
+
+/// Turns on the text rail with a caller-supplied detector, and a recogniser and
+/// dictionary where the caller has them. A detector alone finds where the text
+/// is, which is what a redaction or a rectified crop needs; the recogniser is
+/// what turns it into a string.
+pub export fn goss_session_enable_text(
+    session: ?*Session,
+    detector: ?[*]const u8,
+    detector_len: usize,
+    recognizer: ?[*]const u8,
+    recognizer_len: usize,
+    dictionary: ?[*]const u8,
+    dictionary_len: usize,
+    detect_side: u32,
+) Status {
+    const s = session orelse return .invalid_argument;
+    const det = detector orelse return .invalid_argument;
+    if (detector_len == 0) return .invalid_argument;
+    if (!ml_infer.supported) return .unsupported;
+
+    disableText(s);
+    const gpa = s.engine.gpa;
+    const pipeline = gpa.create(text_infer.Pipeline) catch return .out_of_memory;
+    // No errdefer: this returns a status, never an error, so one would be dead
+    // code, and the failure path below releases the pipeline itself.
+    pipeline.* = text_infer.Pipeline.init(
+        gpa,
+        det[0..detector_len],
+        if (recognizer) |r| (if (recognizer_len == 0) null else r[0..recognizer_len]) else null,
+        if (dictionary) |d| (if (dictionary_len == 0) null else d[0..dictionary_len]) else null,
+        .{ .detect_side = if (detect_side == 0) 320 else @min(detect_side, 1280) },
+    ) catch |err| {
+        gpa.destroy(pipeline);
+        return switch (err) {
+            error.OutOfMemory => .out_of_memory,
+            else => .invalid_argument,
+        };
+    };
+    s.text_pipeline = pipeline;
+    return .ok;
+}
+
+pub export fn goss_session_disable_text(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    disableText(s);
+    return .ok;
+}
+
+fn disableText(s: *Session) void {
+    if (s.text_pipeline) |pipeline| {
+        pipeline.deinit();
+        s.engine.gpa.destroy(pipeline);
+        s.text_pipeline = null;
+    }
+    s.text_store.clear();
+    s.text_lowered_len = 0;
+    s.text_digest = 0;
+    s.text_changed = false;
+}
+
+/// How many readings the frame holds, and how many the bound turned away, which
+/// is what tells a caller it is losing readings rather than seeing them all.
+pub export fn goss_session_text_count(session: ?*Session, out_count: ?*u32, out_refused: ?*u64) Status {
+    const s = session orelse return .invalid_argument;
+    if (out_count) |p| p.* = @intCast(s.text_store.count);
+    if (out_refused) |p| p.* = s.text_store.refused;
+    return .ok;
+}
+
+pub export fn goss_session_text_at(session: ?*Session, index: u32, out_entry: ?*TextEntry) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_entry orelse return .invalid_argument;
+    const items = s.text_store.items();
+    if (index >= items.len) return .invalid_argument;
+    const e = items[index];
+    out.* = .{
+        .quad = .{
+            e.quad.corners[0].x, e.quad.corners[0].y,
+            e.quad.corners[1].x, e.quad.corners[1].y,
+            e.quad.corners[2].x, e.quad.corners[2].y,
+            e.quad.corners[3].x, e.quad.corners[3].y,
+        },
+        .confidence = e.confidence,
+        .origin = @intFromEnum(e.origin),
+        .script = @intFromEnum(e.script),
+        .direction = @intFromEnum(e.direction),
+        .track_id = e.track_id,
+        .line = e.line,
+        .paragraph = e.paragraph,
+        .text_len = @intCast(e.text.len),
+        .first_seen_us = e.first_seen_us,
+        .last_seen_us = e.last_seen_us,
+    };
+    return .ok;
+}
+
+pub export fn goss_session_text_string(session: ?*Session, index: u32, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const len_out = out_len orelse return .invalid_argument;
+    const items = s.text_store.items();
+    if (index >= items.len) return .invalid_argument;
+    const source = items[index].text;
+    len_out.* = source.len;
+    if (source.len > capacity) return .again;
+    if (out) |p| @memcpy(p[0..source.len], source);
+    return .ok;
+}
+
 pub export fn goss_ml_op_support(model: ?[*]const u8, model_len: usize, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
     const bytes = model orelse return .invalid_argument;
     const len = out_len orelse return .invalid_argument;
@@ -13809,6 +14023,14 @@ const audio_ring_len: usize = audio_analysis.mic_rate;
 /// The most bytes a decoded caption holds.
 const caption_max: usize = 512;
 
+/// What the frame says, bounded. A screen full of small print is the honest
+/// worst case, and a refused entry is counted so a caller learns it is losing
+/// readings rather than guessing.
+const max_text_entries: usize = 128;
+const text_arena_bytes: usize = 8 * 1024;
+const text_lowered_max: usize = text_arena_bytes;
+const TextStore = text_core.Store(max_text_entries, text_arena_bytes);
+
 /// The count of recent diarized caption segments the ring holds for read-back.
 const caption_seg_ring: usize = 16;
 
@@ -13955,9 +14177,12 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
         // previous frame; a reference model conditions on a bundled image,
         // decoded here and sampled by the worker into input 1 (create copies
         // it, so the decode is freed on this return).
+        // The declared input size, which a model exported with symbolic spatial
+        // dims has no answer for on its own.
+        const model_bounds: ml_infer.Bounds = .{ .requested_input_side = @max(ml.input_width, ml.input_height) };
         const worker = blk: {
             if (ml.temporal) {
-                break :blk ml_infer.create(gpa, bytes, .{}, 2, norm, null, 0, 0, true) catch |err| {
+                break :blk ml_infer.create(gpa, bytes, model_bounds, 2, norm, null, 0, 0, true) catch |err| {
                     std.log.info("gosslens: ml.infer model {s} left inert ({t})", .{ ml.model, err });
                     noteMl(session, gi, node.optional, .model_unsupported);
                     continue;
@@ -13980,13 +14205,13 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
                     continue;
                 };
                 defer gpa.free(dec.rgba);
-                break :blk ml_infer.create(gpa, bytes, .{}, 2, norm, dec.rgba, @intCast(dec.width), @intCast(dec.height), false) catch |err| {
+                break :blk ml_infer.create(gpa, bytes, model_bounds, 2, norm, dec.rgba, @intCast(dec.width), @intCast(dec.height), false) catch |err| {
                     std.log.info("gosslens: ml.infer model {s} left inert ({t})", .{ ml.model, err });
                     noteMl(session, gi, node.optional, .model_unsupported);
                     continue;
                 };
             }
-            break :blk ml_infer.create(gpa, bytes, .{}, 2, norm, null, 0, 0, false) catch |err| {
+            break :blk ml_infer.create(gpa, bytes, model_bounds, 2, norm, null, 0, 0, false) catch |err| {
                 std.log.info("gosslens: ml.infer model {s} left inert ({t})", .{ ml.model, err });
                 noteMl(session, gi, node.optional, .model_unsupported);
                 continue;
@@ -17674,6 +17899,9 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
         live_signals.voice_command_text = voice_lc[0..n];
         break;
     }
+    live_signals.text_count = @intCast(s.text_store.count);
+    live_signals.text_lowered = s.text_lowered[0..s.text_lowered_len];
+    live_signals.text_changed = s.text_changed;
     if (s.world_engine_fed) {
         live_signals.world_tracking_state = @floatFromInt(s.world.state.tracking_state);
         // The device's world position is the translation column of the pose;
@@ -19143,4 +19371,19 @@ test "the ar brush projects a world stroke to screen and drops points behind the
     var out2: stroke.Stroke = undefined;
     projectWorldStroke(vp, &ws2, &out2);
     try t.expectEqual(@as(u16, 0), out2.count);
+}
+
+test "the text entry's layout is the one every sdk reads" {
+    // The SDKs decode this struct by byte offset, so the layout is part of the
+    // contract rather than an implementation detail.
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(TextEntry, "quad"));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(TextEntry, "confidence"));
+    try std.testing.expectEqual(@as(usize, 36), @offsetOf(TextEntry, "origin"));
+    try std.testing.expectEqual(@as(usize, 40), @offsetOf(TextEntry, "script"));
+    try std.testing.expectEqual(@as(usize, 44), @offsetOf(TextEntry, "direction"));
+    try std.testing.expectEqual(@as(usize, 48), @offsetOf(TextEntry, "track_id"));
+    try std.testing.expectEqual(@as(usize, 52), @offsetOf(TextEntry, "line"));
+    try std.testing.expectEqual(@as(usize, 56), @offsetOf(TextEntry, "paragraph"));
+    try std.testing.expectEqual(@as(usize, 60), @offsetOf(TextEntry, "text_len"));
+    try std.testing.expectEqual(@as(usize, 80), @sizeOf(TextEntry));
 }

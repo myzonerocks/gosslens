@@ -59,11 +59,14 @@ pub const SignalKind = enum {
     pointer_x,
     pointer_y,
     counter,
+    text_present,
+    text_matches,
+    text_changed,
 };
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
-        .face_present, .hands_present, .tap, .audio_beat, .event, .voice_command, .geo_in_region, .geo_named_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_custom_gesture, .hand_pinch, .body_present, .foot_present, .pet_present, .body_jump, .body_wave, .body_dance, .device_in_volume, .hand_in_region, .touch_double_tap, .touch_long_press, .touch_swipe, .touch_drag => true,
+        .face_present, .hands_present, .tap, .audio_beat, .event, .voice_command, .geo_in_region, .geo_named_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_custom_gesture, .hand_pinch, .body_present, .foot_present, .pet_present, .body_jump, .body_wave, .body_dance, .device_in_volume, .hand_in_region, .touch_double_tap, .touch_long_press, .touch_swipe, .touch_drag, .text_present, .text_matches, .text_changed => true,
         .face_blendshape, .world_tracking_state, .audio_level, .audio_beat_count, .flash_risk, .pet_expression, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt, .bone_angle, .touch_pinch, .touch_rotate, .pointer_x, .pointer_y, .counter => false,
     };
 }
@@ -161,6 +164,11 @@ pub const Signals = struct {
     /// tick from the captioning audio.infer worker; empty with no speech. Only
     /// the recognized text crosses, never the audio.
     voice_command_text: []const u8 = &.{},
+    /// What the frame says this tick: how many regions were read, the whole
+    /// reading lowered for matching, and whether it differs from last tick.
+    text_count: u32 = 0,
+    text_lowered: []const u8 = &.{},
+    text_changed: bool = false,
     /// Whether the tracked device is inside the lens's trigger volume, computed
     /// on-device each tick from the submitted world pose and the manifest's
     /// volume region. False with no world tracking or no volume declared.
@@ -283,6 +291,13 @@ fn readBool(s: Signal, signals: Signals) bool {
         },
         .voice_command => signals.voice_command_text.len > 0 and s.event_name.len > 0 and
             std.mem.indexOf(u8, signals.voice_command_text, s.event_name) != null,
+        .text_present => signals.text_count > 0,
+        // The needle was lowered when the trigger parsed, and the engine feeds a
+        // lowered reading, so watching for a word is case-insensitive the way a
+        // person reading a sign is.
+        .text_matches => s.event_name.len > 0 and signals.text_lowered.len > 0 and
+            std.mem.indexOf(u8, signals.text_lowered, s.event_name) != null,
+        .text_changed => signals.text_changed,
         .geo_in_region => signals.geo_in_region,
         .geo_named_region => {
             for (signals.geo_regions) |name| {
@@ -766,6 +781,19 @@ const Parser = struct {
             const lowered = try self.arena.alloc(u8, phrase.len);
             for (phrase, 0..) |ch, i| lowered[i] = std.ascii.toLower(ch);
             return .{ .kind = .voice_command, .event_name = lowered };
+        }
+        if (std.mem.eql(u8, head, "text") and std.mem.eql(u8, tail, "present")) {
+            return .{ .kind = .text_present };
+        }
+        if (std.mem.eql(u8, head, "text") and std.mem.eql(u8, tail, "changed")) {
+            return .{ .kind = .text_changed };
+        }
+        if (std.mem.eql(u8, head, "text") and std.mem.eql(u8, tail, "matches")) {
+            // Lowered once here so the per-tick match is case-insensitive.
+            const phrase = try self.parseCall();
+            const lowered = try self.arena.alloc(u8, phrase.len);
+            for (phrase, 0..) |ch, i| lowered[i] = std.ascii.toLower(ch);
+            return .{ .kind = .text_matches, .event_name = lowered };
         }
         if (std.mem.eql(u8, head, "camera") and std.mem.eql(u8, tail, "zoom")) {
             return .{ .kind = .camera_zoom };
@@ -1280,4 +1308,27 @@ test "head nod, shake, and tilt read the fed pose gestures" {
     defer tilt.deinit();
     try t.expect(!evaluate(tilt.root, .{})); // upright is not past 0.3
     try t.expect(evaluate(tilt.root, .{ .head_tilt = 0.5 }));
+}
+
+test "text triggers read what the frame says" {
+    var present = try compileOk("text.present");
+    defer present.deinit();
+    var matches = try compileOk("text.matches('exit')");
+    defer matches.deinit();
+    var changed = try compileOk("text.changed");
+    defer changed.deinit();
+
+    try t.expect(!evaluate(present.root, .{}));
+    try t.expect(!evaluate(matches.root, .{}));
+
+    // The engine feeds the reading already lowered, so a sign in capitals
+    // matches a trigger written in lower case.
+    const said: Signals = .{ .text_count = 2, .text_lowered = "exit only", .text_changed = true };
+    try t.expect(evaluate(present.root, said));
+    try t.expect(evaluate(matches.root, said));
+    try t.expect(evaluate(changed.root, said));
+
+    var absent = try compileOk("text.matches('closed')");
+    defer absent.deinit();
+    try t.expect(!evaluate(absent.root, said));
 }

@@ -1,4 +1,4 @@
-abi 0.137
+abi 0.142
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -337,3 +337,8 @@ fn goss_status goss_session_node_report_count(goss_session *session, uint32_t *o
 fn goss_status goss_session_node_report_at(goss_session *session, uint32_t index, goss_node_report *out_report)
 fn goss_status goss_session_node_report_id(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)
 fn goss_status goss_ml_op_support(const uint8_t *model, size_t model_len, uint8_t *out, size_t capacity, size_t *out_len)
+fn goss_status goss_session_enable_text(goss_session *session, const uint8_t *detector, size_t detector_len, const uint8_t *recognizer, size_t recognizer_len, const uint8_t *dictionary, size_t dictionary_len, uint32_t detect_side)
+fn goss_status goss_session_disable_text(goss_session *session)
+fn goss_status goss_session_text_count(goss_session *session, uint32_t *out_count, uint64_t *out_refused)
+fn goss_status goss_session_text_at(goss_session *session, uint32_t index, goss_text_entry *out_entry)
+fn goss_status goss_session_text_string(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)

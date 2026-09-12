@@ -21,6 +21,20 @@ export interface GossMediaCapabilities {
   zeroCopy: boolean;
 }
 
+/// What the frame says at one place in it. The quadrilateral is in normalized
+/// frame space and in reading order, so a coordinate sent back maps to a pixel.
+export interface GossReading {
+  text: string;
+  quad: number[];
+  confidence: number;
+  origin: number;
+  script: number;
+  direction: number;
+  trackId: number;
+  line: number;
+  paragraph: number;
+}
+
 /// One thing an agent draws back into the frame.
 export interface GossAnnotation {
   id: number;
@@ -3206,6 +3220,95 @@ export class GossSession {
       }
     } finally {
       this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    }
+  }
+
+  /// Turns on the text rail. A detector alone finds where the text is, which
+  /// is what a redaction or a rectified crop needs; pass a recogniser and its
+  /// dictionary to get strings back.
+  enableText(detector: Uint8Array, recognizer?: Uint8Array, dictionary?: Uint8Array, detectSide = 320): boolean {
+    const rec = recognizer ?? new Uint8Array(0);
+    const dict = dictionary ?? new Uint8Array(0);
+    const detPtr = this.mod.ccall("goss_alloc", "number", ["number"], [detector.length]) as number;
+    const recPtr = rec.length === 0 ? 0 : (this.mod.ccall("goss_alloc", "number", ["number"], [rec.length]) as number);
+    const dictPtr = dict.length === 0 ? 0 : (this.mod.ccall("goss_alloc", "number", ["number"], [dict.length]) as number);
+    try {
+      this.mod.HEAPU8.set(detector, detPtr);
+      if (recPtr !== 0) this.mod.HEAPU8.set(rec, recPtr);
+      if (dictPtr !== 0) this.mod.HEAPU8.set(dict, dictPtr);
+      return this.mod.ccall(
+        "goss_session_enable_text",
+        "number",
+        ["number", "number", "number", "number", "number", "number", "number", "number"],
+        [this.handle, detPtr, detector.length, recPtr, rec.length, dictPtr, dict.length, detectSide],
+      ) === GOSS_OK;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [detPtr, detector.length]);
+      if (recPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [recPtr, rec.length]);
+      if (dictPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [dictPtr, dict.length]);
+    }
+  }
+
+  disableText(): boolean {
+    return this.mod.ccall("goss_session_disable_text", "number", ["number"], [this.handle]) === GOSS_OK;
+  }
+
+  /// How many readings the frame holds and how many the bound turned away.
+  textCount(): { live: number; refused: number } {
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const refusedPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      if (this.mod.ccall("goss_session_text_count", "number", ["number", "number", "number"], [this.handle, countPtr, refusedPtr]) !== GOSS_OK) {
+        return { live: 0, refused: 0 };
+      }
+      return { live: this.mod.HEAPU32[countPtr >> 2], refused: this.mod.HEAPU32[refusedPtr >> 2] };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [refusedPtr, 8]);
+    }
+  }
+
+  /// Everything the frame says, each reading with its quadrilateral and string.
+  readings(): GossReading[] {
+    const { live } = this.textCount();
+    const entryBytes = 64;
+    const entryPtr = this.mod.ccall("goss_alloc", "number", ["number"], [entryBytes]) as number;
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    const out: GossReading[] = [];
+    try {
+      for (let i = 0; i < live; i += 1) {
+        if (this.mod.ccall("goss_session_text_at", "number", ["number", "number", "number"], [this.handle, i, entryPtr]) !== GOSS_OK) continue;
+        const f32 = (off: number) => this.mod.HEAPF32[(entryPtr + off) >> 2];
+        const u32 = (off: number) => this.mod.HEAPU32[(entryPtr + off) >> 2];
+        this.mod.ccall("goss_session_text_string", "number", ["number", "number", "number", "number", "number"], [this.handle, i, 0, 0, lenPtr]);
+        const needed = this.mod.HEAPU32[lenPtr >> 2];
+        let text = "";
+        if (needed > 0) {
+          const textPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed]) as number;
+          try {
+            if (this.mod.ccall("goss_session_text_string", "number", ["number", "number", "number", "number", "number"], [this.handle, i, textPtr, needed, lenPtr]) === GOSS_OK) {
+              text = new TextDecoder().decode(this.mod.HEAPU8.subarray(textPtr, textPtr + needed));
+            }
+          } finally {
+            this.mod.ccall("goss_free", null, ["number", "number"], [textPtr, needed]);
+          }
+        }
+        out.push({
+          text,
+          quad: [f32(0), f32(4), f32(8), f32(12), f32(16), f32(20), f32(24), f32(28)],
+          confidence: f32(32),
+          origin: u32(36),
+          script: u32(40),
+          direction: u32(44),
+          trackId: u32(48),
+          line: u32(52),
+          paragraph: u32(56),
+        });
+      }
+      return out;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [entryPtr, entryBytes]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 8]);
     }
   }
 

@@ -48,7 +48,7 @@ const Fetch = struct {
     fn licenseAllowed(license: []const u8) bool {
         // Models and corpus imagery may only enter under terms that allow
         // redistribution without conditions we cannot meet in a fetch.
-        for ([_][]const u8{ "Apache-2.0", "Public-domain-US-government" }) |allowed| {
+        for ([_][]const u8{ "Apache-2.0", "MIT", "BSD-3-Clause", "Public-domain-US-government" }) |allowed| {
             if (std.mem.eql(u8, license, allowed)) return true;
         }
         return false;

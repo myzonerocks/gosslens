@@ -28,6 +28,28 @@ pub fn axpy(dst: []f32, src: []const f32, factor: f32) void {
     while (i < n) : (i += 1) dst[i] += factor * src[i];
 }
 
+/// dst += weight * (src - zero), in exact integers. The quantized kernels hold
+/// their codes in float storage but must accumulate in i32: a float accumulator
+/// stops being exact past 2^24 and a real channel count reaches that.
+pub fn axpyInt(dst: []i32, src: []const f32, zero: i32, weight: i32) void {
+    const n = @min(dst.len, src.len);
+    if (lanes == 1) {
+        for (0..n) |i| dst[i] += weight * (@as(i32, @intFromFloat(src[i])) - zero);
+        return;
+    }
+    const I = @Vector(lanes, i32);
+    const zero_v: I = @splat(zero);
+    const weight_v: I = @splat(weight);
+    var i: usize = 0;
+    while (i + lanes <= n) : (i += lanes) {
+        const sv: V = src[i..][0..lanes].*;
+        const iv: I = @intFromFloat(sv);
+        const dv: I = dst[i..][0..lanes].*;
+        dst[i..][0..lanes].* = dv + weight_v * (iv - zero_v);
+    }
+    while (i < n) : (i += 1) dst[i] += weight * (@as(i32, @intFromFloat(src[i])) - zero);
+}
+
 pub fn dot(a: []const f32, b: []const f32) f32 {
     const n = @min(a.len, b.len);
     if (lanes == 1) {
@@ -157,6 +179,12 @@ test "the vector kernels agree with the scalar arithmetic they replace" {
 
     // A length that is not a whole number of lanes is the case a vector kernel
     // gets wrong, so the tail is what the test is really for.
+    var int_dst: [37]i32 = @splat(3);
+    var int_reference: [37]i32 = @splat(3);
+    axpyInt(&int_dst, &a, 2, -5);
+    for (&int_reference, a) |*d, x| d.* += -5 * (@as(i32, @intFromFloat(x)) - 2);
+    try testing.expectEqualSlices(i32, &int_reference, &int_dst);
+
     var dst: [37]f32 = @splat(1);
     var reference: [37]f32 = @splat(1);
     axpy(&dst, &b, 2.5);

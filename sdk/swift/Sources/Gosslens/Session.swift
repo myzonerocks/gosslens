@@ -412,6 +412,65 @@ public final class GossSession: @unchecked Sendable {
         return (raw.prefix(Int(count)).map(GossEvent.init), dropped)
     }
 
+    // MARK: - Text
+
+    /// Turns on the text rail. A detector alone finds where the text is, which
+    /// is what a redaction or a rectified crop needs; pass a recogniser and its
+    /// dictionary to get strings back.
+    public func enableText(detector: [UInt8], recognizer: [UInt8] = [], dictionary: [UInt8] = [], detectSide: UInt32 = 320) throws {
+        try detector.withUnsafeBufferPointer { det in
+            try recognizer.withUnsafeBufferPointer { rec in
+                try dictionary.withUnsafeBufferPointer { dict in
+                    try checked(goss_session_enable_text(
+                        handle,
+                        det.baseAddress, detector.count,
+                        rec.baseAddress, recognizer.count,
+                        dict.baseAddress, dictionary.count,
+                        detectSide
+                    ))
+                }
+            }
+        }
+    }
+
+    public func disableText() throws {
+        try checked(goss_session_disable_text(handle))
+    }
+
+    /// How many readings the frame holds and how many the bound turned away,
+    /// which is what tells a caller it is losing readings rather than seeing
+    /// them all.
+    public func textCount() throws -> (live: UInt32, refused: UInt64) {
+        var live: UInt32 = 0
+        var refused: UInt64 = 0
+        try checked(goss_session_text_count(handle, &live, &refused))
+        return (live, refused)
+    }
+
+    /// Everything the frame says, each reading with its quadrilateral and the
+    /// string itself.
+    public func readings() throws -> [GossReading] {
+        let counts = try textCount()
+        var out: [GossReading] = []
+        out.reserveCapacity(Int(counts.live))
+        for index in 0..<counts.live {
+            var raw = goss_text_entry()
+            try checked(goss_session_text_at(handle, index, &raw))
+            var needed = 0
+            _ = goss_session_text_string(handle, index, nil, 0, &needed)
+            var text = ""
+            if needed > 0 {
+                var bytes = [UInt8](repeating: 0, count: needed)
+                let status = bytes.withUnsafeMutableBufferPointer { buffer in
+                    goss_session_text_string(handle, index, buffer.baseAddress, needed, &needed)
+                }
+                if status == GOSS_OK { text = String(decoding: bytes, as: UTF8.self) }
+            }
+            out.append(GossReading(raw: raw, text: text))
+        }
+        return out
+    }
+
     // MARK: - Annotations
 
     /// Adds or updates one annotation. The same id replaces rather than

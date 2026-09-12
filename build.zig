@@ -64,6 +64,22 @@ pub fn build(b: *std.Build) void {
 
     // The SDKs compile. Three of them did not, each for a different reason, and
     // nothing in any gate would have said so: only running a compiler does.
+    {
+        const probe = b.addExecutable(.{
+            .name = "model-probe",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/model_probe.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+            }),
+        });
+        probe.root_module.addImport("onnx", onnxModule(b, target, .ReleaseFast));
+        const run_probe = b.addRunArtifact(probe);
+        run_probe.setCwd(b.path("."));
+        if (b.args) |args| run_probe.addArgs(args);
+        b.step("model-probe", "Load a real model and print what it needs, costs and keeps").dependOn(&run_probe.step);
+    }
+
     const sdk_check_step = b.step("sdk-check", "Typecheck every SDK where its toolchain exists");
     if (swiftTypecheckCommand(b)) |cmd| {
         sdk_check_step.dependOn(&cmd.step);
@@ -311,6 +327,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("media_recording", recordingModule(b, target, optimize, math_module));
     abi_module.addImport("media", mediaCoreModule(b, target, optimize, math_module));
     abi_module.addImport("perception", perceptionModule(b, target, optimize));
+    abi_module.addImport("text", textModule(b, target, optimize));
     abi_module.addImport("media_video", mediaVideoModule(b, target, optimize, null));
     abi_module.addImport("photo", photoModule(b, target, optimize, null));
     abi_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
@@ -350,7 +367,11 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, pose_core_module, math_module));
     abi_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
     const stub_ml_tensor_host = mlTensorModule(b, target, optimize);
-    abi_module.addImport("ml_infer", mlInferStubModule(b, target, optimize, math_module, stub_ml_tensor_host));
+    {
+        const host_ml_infer = mlInferStubModule(b, target, optimize, math_module, stub_ml_tensor_host);
+        abi_module.addImport("ml_infer", host_ml_infer);
+        abi_module.addImport("text_infer", textInferModule(b, target, optimize, host_ml_infer));
+    }
     abi_module.addImport("diffusion", diffusionStubModule(b, target, optimize, math_module, stub_ml_tensor_host));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
     abi_module.addImport("face106", face106_module);
@@ -444,6 +465,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const media_core_tests = b.addTest(.{ .root_module = mediaCoreModule(b, target, optimize, math_module) });
+    const text_core_tests = b.addTest(.{ .root_module = textModule(b, target, optimize) });
 
     // The media harness: the checks that belong to the contracts rather than to a
     // rendered frame, so they need no window and no gpu. What needs a real
@@ -527,6 +549,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all tests");
     ci_step.dependOn(test_step);
     test_step.dependOn(&b.addRunArtifact(media_core_tests).step);
+    test_step.dependOn(&b.addRunArtifact(text_core_tests).step);
     test_step.dependOn(&b.addRunArtifact(quiet_tests).step);
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
     test_step.dependOn(&b.addRunArtifact(bundle_tests).step);
@@ -946,6 +969,7 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("media_recording", recordingModule(b, target, optimize, math_module));
         abi_tracking_module.addImport("media", mediaCoreModule(b, target, optimize, math_module));
         abi_tracking_module.addImport("perception", perceptionModule(b, target, optimize));
+        abi_tracking_module.addImport("text", textModule(b, target, optimize));
         abi_tracking_module.addImport("media_video", mediaVideoModule(b, target, optimize, null));
         abi_tracking_module.addImport("photo", photoModule(b, target, optimize, null));
         abi_tracking_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
@@ -1224,6 +1248,7 @@ pub fn build(b: *std.Build) void {
         abi_wasm.addImport("media_recording", recordingModule(b, wasm_target, opt_small, math_wasm));
         abi_wasm.addImport("media", mediaCoreModule(b, wasm_target, opt_small, math_wasm));
         abi_wasm.addImport("perception", perceptionModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("text", textModule(b, wasm_target, opt_small));
         abi_wasm.addImport("media_video", mediaVideoModule(b, wasm_target, opt_small, null));
         abi_wasm.addImport("photo", photoModule(b, wasm_target, opt_small, null));
         abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, opt_small));
@@ -1259,7 +1284,11 @@ pub fn build(b: *std.Build) void {
         abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, opt_small, math_wasm));
         const stub_ml_tensor_wasm = mlTensorModule(b, wasm_target, opt_small);
         const sync_chain_wasm = syncMlChain(b, wasm_target, opt_small, tracking_cores_wasm.sampler);
-        abi_wasm.addImport("ml_infer", mlInferSyncModule(b, wasm_target, opt_small, math_wasm, stub_ml_tensor_wasm, tracking_cores_wasm.sampler, sync_chain_wasm));
+        {
+            const wasm_ml_infer = mlInferSyncModule(b, wasm_target, opt_small, math_wasm, stub_ml_tensor_wasm, tracking_cores_wasm.sampler, sync_chain_wasm);
+            abi_wasm.addImport("ml_infer", wasm_ml_infer);
+            abi_wasm.addImport("text_infer", textInferModule(b, wasm_target, opt_small, wasm_ml_infer));
+        }
         abi_wasm.addImport("diffusion", diffusionModule(b, wasm_target, opt_small, sync_chain_wasm.engine, sync_chain_wasm.sample, tracking_cores_wasm.sampler, math_wasm, stub_ml_tensor_wasm, true));
         abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, opt_small, tracking_cores_wasm.face));
         const lens_manifest_wasm = b.createModule(.{
@@ -1449,6 +1478,7 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("media_recording", recordingModule(b, target, optimize, math_module));
         abi_conformance_module.addImport("media", mediaCoreModule(b, target, optimize, math_module));
         abi_conformance_module.addImport("perception", perceptionModule(b, target, optimize));
+        abi_conformance_module.addImport("text", textModule(b, target, optimize));
         abi_conformance_module.addImport("media_video", mediaVideoModule(b, target, optimize, null));
         abi_conformance_module.addImport("photo", photoModule(b, target, optimize, null));
         abi_conformance_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
@@ -1585,13 +1615,18 @@ pub fn build(b: *std.Build) void {
             abi_conformance_module.addImport("tracking", tracking_conformance);
             abi_conformance_module.addImport("segmentation", segmentation_conformance);
             abi_conformance_module.addImport("ml_infer", ml_infer_conformance);
+            abi_conformance_module.addImport("text_infer", textInferModule(b, target, optimize, ml_infer_conformance));
             abi_conformance_module.addImport("diffusion", diffusion_conformance);
             abi_conformance_module.addImport("beauty", beauty_conformance);
         } else {
             abi_conformance_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, pose_core_module, math_module));
             abi_conformance_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
             const stub_ml_tensor_conf = mlTensorModule(b, target, optimize);
-            abi_conformance_module.addImport("ml_infer", mlInferStubModule(b, target, optimize, math_module, stub_ml_tensor_conf));
+            {
+                const conf_stub_ml_infer = mlInferStubModule(b, target, optimize, math_module, stub_ml_tensor_conf);
+                abi_conformance_module.addImport("ml_infer", conf_stub_ml_infer);
+                abi_conformance_module.addImport("text_infer", textInferModule(b, target, optimize, conf_stub_ml_infer));
+            }
             abi_conformance_module.addImport("diffusion", diffusionStubModule(b, target, optimize, math_module, stub_ml_tensor_conf));
             abi_conformance_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
         }
@@ -2042,6 +2077,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
             },
         });
         abi_android.addImport("ml_infer", ml_infer_android);
+        abi_android.addImport("text_infer", textInferModule(b, android_target, optimize, ml_infer_android));
         abi_android.addImport("diffusion", diffusion_android);
         const face106_android = b.createModule(.{
             .root_source_file = b.path("core/tracking/face106.zig"),
@@ -2064,7 +2100,11 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
         abi_android.addImport("tracking", trackingStubModule(b, android_target, optimize, tracking_cores_android.face, tracking_cores_android.hand, tracking_cores_android.pose, math_android));
         abi_android.addImport("segmentation", segmentationStubModule(b, android_target, optimize, math_android));
         const stub_ml_tensor_android = mlTensorModule(b, android_target, optimize);
-        abi_android.addImport("ml_infer", mlInferStubModule(b, android_target, optimize, math_android, stub_ml_tensor_android));
+        {
+            const android_stub_ml_infer = mlInferStubModule(b, android_target, optimize, math_android, stub_ml_tensor_android);
+            abi_android.addImport("ml_infer", android_stub_ml_infer);
+            abi_android.addImport("text_infer", textInferModule(b, android_target, optimize, android_stub_ml_infer));
+        }
         abi_android.addImport("diffusion", diffusionStubModule(b, android_target, optimize, math_android, stub_ml_tensor_android));
         abi_android.addImport("beauty", beautyStubModule(b, android_target, optimize, tracking_cores_android.face));
     }
@@ -2284,6 +2324,37 @@ fn buildQuickjsLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
 /// target and an adapter implements it rather than defining it.
 /// The perception record's format: versioned, self-describing, and pure, so a
 /// consumer can be written against it without a renderer.
+/// The text rail: region geometry, detector post-processing, rectification and
+/// recognition. Memoized like the other core modules, because two modules over
+/// one file collide the moment a compile pulls in both.
+fn textModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-text-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{
+        .root_source_file = b.path("core/text/text.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+/// The text pipeline: the two models plus the geometry between them. It takes
+/// the same memoized ml_engine the byo-ml rail uses, so one compile never pulls
+/// in two modules over the same file.
+/// The text pipeline takes the compile's own ml_infer rather than building a
+/// second module over the engine file, which is the collision this repo has hit
+/// before: two modules over one file collide the moment a compile pulls in both.
+fn textInferModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ml_infer_mod: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/text_infer.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "text", .module = textModule(b, target, optimize) },
+            .{ .name = "ml_infer", .module = ml_infer_mod },
+        },
+    });
+}
+
 fn perceptionModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     const key = b.fmt("goss-perception-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
     if (b.modules.get(key)) |existing| return existing;

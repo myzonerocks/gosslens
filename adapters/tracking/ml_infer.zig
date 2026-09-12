@@ -11,6 +11,13 @@ const core_mod = @import("ml_infer_core");
 
 pub const supported = core_mod.supported;
 pub const Norm = ml_tensor.Norm;
+pub const Bounds = ml_tensor.Bounds;
+
+/// The model rail itself, re-exported so a caller that does its own sampling
+/// (the text pipeline samples rectified crops, not camera squares) drives the
+/// same engine this file wraps. Taking it from here rather than importing
+/// ml_engine again keeps one module over that file per compile.
+pub const Engine = core_mod.Engine;
 pub const CreateError = core_mod.CreateError;
 pub const Core = core_mod.Core;
 pub const max_outputs = core_mod.max_outputs;

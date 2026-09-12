@@ -220,6 +220,16 @@ object Gosslens {
     internal external fun nativeWriteReconstruction(session: Long, buffer: ByteBuffer, count: Int): Int
     internal external fun nativeMlOpSupport(model: ByteBuffer, modelLen: Int, out: ByteBuffer, capacity: Int): Int
 
+    internal external fun nativeEnableText(session: Long, detector: ByteBuffer, detectorLen: Int, recognizer: ByteBuffer?, recognizerLen: Int, dictionary: ByteBuffer?, dictionaryLen: Int, detectSide: Int): Int
+
+    internal external fun nativeDisableText(session: Long): Int
+
+    internal external fun nativeTextCount(session: Long): Long
+
+    internal external fun nativeTextAt(session: Long, index: Int, out: ByteBuffer): Int
+
+    internal external fun nativeTextString(session: Long, index: Int, out: ByteBuffer, capacity: Int): Int
+
     internal external fun nativeEngineReport(engine: Long, out: ByteBuffer): Int
     internal external fun nativeSessionReport(session: Long, out: ByteBuffer): Int
     internal external fun nativeNodeReports(session: Long, out: ByteBuffer, capacityU32: Int): Int
@@ -2707,3 +2717,17 @@ fun mlOpSupport(model: ByteArray): List<String> {
     }
     return emptyList()
 }
+
+/// What the frame says at one place in it. The quadrilateral is in normalized
+/// frame space and in reading order, so a coordinate sent back maps to a pixel.
+data class GossReading(
+    val text: String,
+    val quad: FloatArray,
+    val confidence: Float,
+    val origin: Int,
+    val script: Int,
+    val direction: Int,
+    val trackId: Int,
+    val line: Int,
+    val paragraph: Int,
+)

@@ -9,6 +9,53 @@ const ml_tensor = @import("ml_tensor");
 pub const supported = false;
 
 pub const Norm = ml_tensor.Norm;
+pub const Bounds = ml_tensor.Bounds;
+
+/// No model rail on this target, so an engine cannot be made. A caller learns
+/// that from the error rather than from a worker that never publishes.
+pub const Engine = struct {
+    pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, threads: i32) !Engine {
+        _ = gpa;
+        _ = model_bytes;
+        _ = threads;
+        return error.InvalidModel;
+    }
+    pub fn deinit(self: *Engine) void {
+        _ = self;
+    }
+    pub fn inputNeedsShape(self: *const Engine, index: usize) bool {
+        _ = self;
+        _ = index;
+        return false;
+    }
+    pub fn resizeInput(self: *Engine, index: usize, dims: []const i64) anyerror!void {
+        _ = self;
+        _ = index;
+        _ = dims;
+        return error.Unsupported;
+    }
+    pub fn writeInput(self: *Engine, index: usize, bytes: []const u8) anyerror!void {
+        _ = self;
+        _ = index;
+        _ = bytes;
+        return error.Unsupported;
+    }
+    pub fn invoke(self: *Engine) anyerror!void {
+        _ = self;
+        return error.Unsupported;
+    }
+    pub fn outputFloats(self: *const Engine, index: usize) anyerror![]const f32 {
+        _ = self;
+        _ = index;
+        return error.Unsupported;
+    }
+    pub fn outputDims(self: *const Engine, index: usize, dims: []i32) anyerror![]i32 {
+        _ = self;
+        _ = index;
+        _ = dims;
+        return error.Unsupported;
+    }
+};
 pub const CreateError = error{ Unsupported, InvalidModel, ModelRejected, OutOfMemory };
 
 pub const max_outputs = 8;

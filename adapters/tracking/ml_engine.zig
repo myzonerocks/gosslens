@@ -57,6 +57,29 @@ pub const Engine = struct {
 
     /// Writes one input tensor from raw float32 bytes; the length must match the
     /// tensor's byte size exactly, so a preprocessing mismatch fails loudly.
+    /// Declares a concrete shape for one input. Only the ONNX backend needs
+    /// this: a TFLite flatbuffer carries its own shapes, and a caller asking to
+    /// change one is told so rather than silently ignored.
+    pub fn resizeInput(self: *Engine, index: usize, dims: []const i64) anyerror!void {
+        return switch (self.backend) {
+            .onnx => |*e| e.resizeInput(index, dims),
+            .tflite => error.Unsupported,
+        };
+    }
+
+    /// Whether an input carries no usable shape of its own, which is what a
+    /// symbolic spatial dim looks like once it is read.
+    pub fn inputNeedsShape(self: *const Engine, index: usize) bool {
+        var dims_buf: [8]i32 = undefined;
+        const dims = self.inputDims(index, &dims_buf) catch return false;
+        if (dims.len < 3) return false;
+        var unit: usize = 0;
+        for (dims) |d| {
+            if (d <= 1) unit += 1;
+        }
+        return unit + 1 >= dims.len;
+    }
+
     pub fn writeInput(self: *Engine, index: usize, bytes: []const u8) anyerror!void {
         return switch (self.backend) {
             inline else => |*e| e.writeInput(index, bytes),

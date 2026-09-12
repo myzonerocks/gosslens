@@ -317,6 +317,65 @@ export fn Java_com_gosslens_Gosslens_nativeMlOpSupport(env: *JniEnv, cls: jobjec
     return @intCast(written);
 }
 
+/// The text rail: the models arrive as direct buffers so nothing large is
+/// copied across the crossing, and the readings come back the same way.
+export fn Java_com_gosslens_Gosslens_nativeEnableText(env: *JniEnv, cls: jobject, session: i64, detector: jobject, detector_len: i32, recognizer: jobject, recognizer_len: i32, dictionary: jobject, dictionary_len: i32, detect_side: i32) i32 {
+    _ = cls;
+    if (detector_len <= 0) return @intFromEnum(abi.Status.invalid_argument);
+    const det = getDirectBufferAddress(env, detector) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const rec = if (recognizer_len > 0) getDirectBufferAddress(env, recognizer) else null;
+    const dict = if (dictionary_len > 0) getDirectBufferAddress(env, dictionary) else null;
+    return @intFromEnum(abi.goss_session_enable_text(
+        sessionFromHandle(session),
+        det,
+        @intCast(detector_len),
+        rec,
+        if (recognizer_len > 0) @intCast(recognizer_len) else 0,
+        dict,
+        if (dictionary_len > 0) @intCast(dictionary_len) else 0,
+        @intCast(@max(detect_side, 0)),
+    ));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeDisableText(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_disable_text(sessionFromHandle(session)));
+}
+
+/// Live count in the low word and refused in the high, so one crossing answers
+/// both without a second buffer.
+export fn Java_com_gosslens_Gosslens_nativeTextCount(env: *JniEnv, cls: jobject, session: i64) i64 {
+    _ = env;
+    _ = cls;
+    var live: u32 = 0;
+    var refused: u64 = 0;
+    if (abi.goss_session_text_count(sessionFromHandle(session), &live, &refused) != .ok) return 0;
+    return @bitCast((@as(u64, @intCast(@min(refused, std.math.maxInt(u32)))) << 32) | live);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeTextAt(env: *JniEnv, cls: jobject, session: i64, index: i32, out_buffer: jobject) i32 {
+    _ = cls;
+    if (index < 0) return @intFromEnum(abi.Status.invalid_argument);
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var entry: abi.TextEntry = undefined;
+    const status = abi.goss_session_text_at(sessionFromHandle(session), @intCast(index), &entry);
+    if (status == .ok) @memcpy(out_bytes[0..@sizeOf(abi.TextEntry)], std.mem.asBytes(&entry));
+    return @intFromEnum(status);
+}
+
+/// The reading itself. Returns the byte count, so a short buffer is a known
+/// truncation the caller retries at the reported size.
+export fn Java_com_gosslens_Gosslens_nativeTextString(env: *JniEnv, cls: jobject, session: i64, index: i32, out_buffer: jobject, capacity: i32) i32 {
+    _ = cls;
+    if (index < 0 or capacity < 0) return -1;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return -1;
+    var written: usize = 0;
+    const status = abi.goss_session_text_string(sessionFromHandle(session), @intCast(index), out_bytes, @intCast(capacity), &written);
+    if (status != .ok and status != .again) return -1;
+    return @intCast(written);
+}
+
 export fn Java_com_gosslens_Gosslens_nativeSessionReport(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject) i32 {
     _ = cls;
     const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);

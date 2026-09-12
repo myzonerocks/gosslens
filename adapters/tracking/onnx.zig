@@ -316,24 +316,48 @@ pub const Engine = struct {
             .optimization = stats,
         };
 
-        // One measuring run sizes the buffer every later frame uses. The shapes
-        // it walks are the shapes inference walks, so the plan is the graph's
-        // own, not an estimate.
-        try engine.runNodes(run_arena.allocator(), null);
-        try engine.adoptPlan();
+        // One measuring run sizes the buffer every later frame uses. A model
+        // exported with symbolic spatial dims cannot be measured yet: it has no
+        // shape until a caller declares one, so the plan waits rather than the
+        // load failing. A bound refusal still fails here, because that is a
+        // decision and not a missing fact.
+        engine.measureAndPlan() catch |err| switch (err) {
+            error.TensorShapeMismatch, error.TensorMissing, error.InvokeFailed, error.UnsupportedOp => {},
+            else => |e| return e,
+        };
         return engine;
+    }
+
+    fn measureAndPlan(engine: *Engine) Error!void {
+        try engine.runNodes(engine.run_arena.allocator(), null);
+        try engine.adoptPlan();
     }
 
     /// Allocates the frame buffer from the measuring run's high-water mark and
     /// switches inference onto it, so nothing after this reaches the general
     /// allocator.
     fn adoptPlan(engine: *Engine) Error!void {
-        const needed = @max(engine.run_arena.queryCapacity(), 4096);
-        engine.pool_words = engine.gpa.alloc(u64, needed / 8 + 1) catch return error.OutOfMemory;
+        // The arena's capacity is the sum of everything the graph produced, not
+        // what it held at once. A second pass through a pool of that size, with
+        // the lifetime frees running, reports the peak live figure, and that is
+        // what every frame after this actually needs.
+        const upper_bound = @max(engine.run_arena.queryCapacity(), 4096);
+        engine.pool_words = engine.gpa.alloc(u64, upper_bound / 8 + 1) catch return error.OutOfMemory;
         engine.pool_blocks = engine.gpa.alloc(plan.Pool.Block, engine.nodes.len * 8 + 64) catch return error.OutOfMemory;
         engine.pool = plan.Pool.init(std.mem.sliceAsBytes(engine.pool_words), engine.pool_blocks);
         _ = engine.run_arena.reset(.free_all);
         engine.result_table = .empty;
+
+        if (engine.pool) |*measuring| {
+            engine.runNodes(measuring.allocator(), measuring) catch return;
+            const peak = measuring.high_water + measuring.high_water / 8 + 4096;
+            if (peak < upper_bound) {
+                engine.gpa.free(engine.pool_words);
+                engine.pool_words = engine.gpa.alloc(u64, peak / 8 + 1) catch return error.OutOfMemory;
+                engine.pool = plan.Pool.init(std.mem.sliceAsBytes(engine.pool_words), engine.pool_blocks);
+                engine.result_table = .empty;
+            }
+        }
     }
 
     /// Grows the frame buffer after a data-dependent shape outran the plan. It
@@ -360,12 +384,47 @@ pub const Engine = struct {
         engine.* = undefined;
     }
 
+    /// The one buffer every frame reuses, so a caller can see what a model
+    /// costs in memory before it ships it.
+    pub fn planBytes(engine: *const Engine) usize {
+        return engine.pool_words.len * @sizeOf(u64);
+    }
+
     pub fn inputCount(engine: *const Engine) usize {
         return engine.inputs.len;
     }
 
     pub fn outputCount(engine: *const Engine) usize {
         return engine.output_names.len;
+    }
+
+    /// Declares a concrete shape for one input. A model exported with symbolic
+    /// spatial dims carries no size of its own, and every later frame's plan is
+    /// measured against the shape set here, so this re-measures.
+    pub fn resizeInput(engine: *Engine, index: usize, dims: []const i64) Error!void {
+        if (index >= engine.inputs.len) return error.TensorMissing;
+        const arena = engine.graph_arena.allocator();
+        var count: usize = 1;
+        const owned = arena.alloc(i64, dims.len) catch return error.OutOfMemory;
+        for (owned, dims) |*dst, d| {
+            if (d < 1 or d > max_tensor_elems) return error.TensorShapeMismatch;
+            dst.* = d;
+            count = std.math.mul(usize, count, @intCast(d)) catch return error.TensorShapeMismatch;
+            if (count > max_tensor_elems) return error.TensorShapeMismatch;
+        }
+        const data = arena.alloc(f32, count) catch return error.OutOfMemory;
+        @memset(data, 0);
+        engine.inputs[index] = .{ .name = engine.inputs[index].name, .dims = owned, .data = data };
+
+        // The plan was measured against the old shape, so it is thrown away and
+        // taken again; keeping it would size every frame for the wrong tensor.
+        if (engine.pool_words.len != 0) engine.gpa.free(engine.pool_words);
+        if (engine.pool_blocks.len != 0) engine.gpa.free(engine.pool_blocks);
+        engine.pool_words = &.{};
+        engine.pool_blocks = &.{};
+        engine.pool = null;
+        _ = engine.run_arena.reset(.free_all);
+        try engine.measureAndPlan();
     }
 
     /// Writes one input tensor from raw float32 bytes. The length must match
@@ -379,6 +438,17 @@ pub const Engine = struct {
     }
 
     pub fn invoke(engine: *Engine) Error!void {
+        // A model whose shapes were unknown at load is planned off its first
+        // successful frame, so every frame after the first is still free of
+        // allocation even though the first one could not be measured.
+        if (engine.pool == null) {
+            _ = engine.run_arena.reset(.retain_capacity);
+            try engine.runNodes(engine.run_arena.allocator(), null);
+            const produced = engine.result_table;
+            engine.adoptPlan() catch return;
+            engine.result_table = produced;
+            return;
+        }
         var attempt: u8 = 0;
         while (attempt < 3) : (attempt += 1) {
             if (engine.pool) |*p| p.reset();
@@ -625,6 +695,7 @@ fn parseInitializerTensor(arena: std.mem.Allocator, bytes: []const u8) Error!Ten
     var double_data: []const u8 = &.{};
     var int64_data: std.ArrayList(i64) = .empty;
     var int32_data: std.ArrayList(i64) = .empty;
+    var loose_floats: std.ArrayList(f32) = .empty;
 
     var r: Reader = .{ .buf = bytes };
     while (!r.atEnd()) {
@@ -640,16 +711,27 @@ fn parseInitializerTensor(arena: std.mem.Allocator, bytes: []const u8) Error!Ten
                 const raw_dtype = std.math.cast(i32, try r.readVarint()) orelse return error.ModelRejected;
                 dtype = @enumFromInt(raw_dtype);
             } else try r.skip(tag.wire),
+            // TensorProto field 5 is int32_data and field 6 is string_data. The
+            // reader had them one apart, so every quantized weight written as
+            // int32_data was skipped and the model refused as malformed. A
+            // repeated scalar may also be written one value per tag rather than
+            // packed, and both forms are read here.
             4 => if (tag.wire == .len) {
                 float_data = try r.readLen();
+            } else if (tag.wire == .i32) {
+                loose_floats.append(arena, @bitCast(try r.readFixed32())) catch return error.OutOfMemory;
             } else try r.skip(tag.wire),
-            6 => if (tag.wire == .len) {
+            5 => if (tag.wire == .len) {
                 var pr: Reader = .{ .buf = try r.readLen() };
-                while (!pr.atEnd()) int32_data.append(arena, @intCast(@as(i64, @bitCast(try pr.readVarint())))) catch return error.OutOfMemory;
+                while (!pr.atEnd()) int32_data.append(arena, @as(i32, @truncate(@as(i64, @bitCast(try pr.readVarint()))))) catch return error.OutOfMemory;
+            } else if (tag.wire == .varint) {
+                int32_data.append(arena, @as(i32, @truncate(@as(i64, @bitCast(try r.readVarint()))))) catch return error.OutOfMemory;
             } else try r.skip(tag.wire),
             7 => if (tag.wire == .len) {
                 var pr: Reader = .{ .buf = try r.readLen() };
                 while (!pr.atEnd()) int64_data.append(arena, @bitCast(try pr.readVarint())) catch return error.OutOfMemory;
+            } else if (tag.wire == .varint) {
+                int64_data.append(arena, @bitCast(try r.readVarint())) catch return error.OutOfMemory;
             } else try r.skip(tag.wire),
             9 => if (tag.wire == .len) {
                 raw_data = try r.readLen();
@@ -673,7 +755,9 @@ fn parseInitializerTensor(arena: std.mem.Allocator, bytes: []const u8) Error!Ten
     const data = arena.alloc(f32, count) catch return error.OutOfMemory;
     switch (dtype) {
         .float => {
-            if (float_data.len >= count * 4) {
+            if (loose_floats.items.len >= count) {
+                @memcpy(data, loose_floats.items[0..count]);
+            } else if (float_data.len >= count * 4) {
                 for (0..count) |i| data[i] = @bitCast(std.mem.readInt(u32, float_data[i * 4 ..][0..4], .little));
             } else if (raw_data.len >= count * 4) {
                 for (0..count) |i| data[i] = @bitCast(std.mem.readInt(u32, raw_data[i * 4 ..][0..4], .little));
@@ -924,11 +1008,61 @@ fn dispatch(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMapU
     if (eq(op, "Squeeze")) return squeeze(ra, node, table);
     if (eq(op, "Slice")) return sliceOp(ra, node, table);
     if (eq(op, "Pad")) return pad(ra, node, table);
+    if (eq(op, "Constant")) return constant(ra, node);
+    if (eq(op, "ConstantOfShape")) return constantOfShape(ra, node, table);
     if (eq(op, "Cast") or eq(op, "CastLike")) return cast(ra, node, table);
     if (try ops.dispatch(ra, node, table)) |t| return t;
     if (try detect.dispatch(ra, node, table)) |t| return t;
     if (try quant.dispatch(ra, node, table)) |t| return t;
     return error.UnsupportedOp;
+}
+
+/// A Constant node carries its tensor on an attribute rather than in the
+/// initializer list. Every real export in the proof set has one, and the engine
+/// had no implementation, so each of those models failed to load.
+fn constant(ra: std.mem.Allocator, node: *const Node) Error!Tensor {
+    if (node.attr("value")) |a| {
+        if (a.t) |t| return copyTensor(ra, t);
+    }
+    if (node.attr("value_float")) |a| {
+        var out = try newTensor(ra, ra.dupe(i64, &[_]i64{}) catch return error.OutOfMemory);
+        out.data[0] = a.f;
+        return out;
+    }
+    if (node.attr("value_int")) |a| {
+        var out = try newTensor(ra, ra.dupe(i64, &[_]i64{}) catch return error.OutOfMemory);
+        out.dtype = .i64;
+        out.data[0] = @floatFromInt(a.i);
+        return out;
+    }
+    if (node.attr("value_floats")) |a| {
+        const out = try newTensor(ra, ra.dupe(i64, &[_]i64{@intCast(a.floats.len)}) catch return error.OutOfMemory);
+        @memcpy(out.data, a.floats);
+        return out;
+    }
+    if (node.attr("value_ints")) |a| {
+        var out = try newTensor(ra, ra.dupe(i64, &[_]i64{@intCast(a.ints.len)}) catch return error.OutOfMemory);
+        out.dtype = .i64;
+        for (out.data, a.ints) |*d, v| d.* = @floatFromInt(v);
+        return out;
+    }
+    return error.UnsupportedOp;
+}
+
+fn constantOfShape(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMapUnmanaged(Tensor)) Error!Tensor {
+    const shape_t = try in(table, node, 0);
+    const dims = ra.alloc(i64, shape_t.data.len) catch return error.OutOfMemory;
+    for (dims, 0..) |*d, i| d.* = @max(intAt(shape_t, i), 0);
+    var out = try newTensor(ra, dims);
+    var fill: f32 = 0;
+    if (node.attr("value")) |a| {
+        if (a.t) |t| {
+            if (t.data.len != 0) fill = t.data[0];
+            out.dtype = t.dtype;
+        }
+    }
+    @memset(out.data, fill);
+    return out;
 }
 
 /// Cast truncates into the target's range rather than copying, because a graph
@@ -1112,14 +1246,94 @@ pub fn matmul2d(ra: std.mem.Allocator, a: []const f32, b: []const f32, m: usize,
     return out;
 }
 
+/// ONNX MatMul in full: the trailing two axes multiply, every axis before them
+/// is a batch axis that broadcasts, and a 1-D operand is promoted for the
+/// multiply and demoted after. Rank two alone was enough for a feed-forward net
+/// and is enough for no transformer at all, where every attention matmul is
+/// batched over heads.
 pub fn matmul(ra: std.mem.Allocator, a: Tensor, b: Tensor) Error!Tensor {
-    if (a.dims.len != 2 or b.dims.len != 2) return error.TensorShapeMismatch;
-    const m: usize = @intCast(a.dims[0]);
-    const k: usize = @intCast(a.dims[1]);
-    if (@as(usize, @intCast(b.dims[0])) != k) return error.TensorShapeMismatch;
-    const n: usize = @intCast(b.dims[1]);
-    const data = try matmul2d(ra, a.data, b.data, m, k, n);
-    const out: Tensor = .{ .dims = ra.dupe(i64, &.{ @intCast(m), @intCast(n) }) catch return error.OutOfMemory, .data = data };
+    if (a.dims.len == 0 or b.dims.len == 0) return error.TensorShapeMismatch;
+
+    var a_dims_buf: [9]i64 = undefined;
+    var b_dims_buf: [9]i64 = undefined;
+    const a_promoted = a.dims.len == 1;
+    const b_promoted = b.dims.len == 1;
+    var a_dims: []i64 = a_dims_buf[0 .. a.dims.len + @intFromBool(a_promoted)];
+    var b_dims: []i64 = b_dims_buf[0 .. b.dims.len + @intFromBool(b_promoted)];
+    if (a_dims.len > 8 or b_dims.len > 8) return error.TensorShapeMismatch;
+    if (a_promoted) {
+        a_dims[0] = 1;
+        a_dims[1] = @max(a.dims[0], 1);
+    } else for (a_dims, a.dims) |*d, s| {
+        d.* = @max(s, 1);
+    }
+    if (b_promoted) {
+        b_dims[0] = @max(b.dims[0], 1);
+        b_dims[1] = 1;
+    } else for (b_dims, b.dims) |*d, s| {
+        d.* = @max(s, 1);
+    }
+
+    const m: usize = @intCast(a_dims[a_dims.len - 2]);
+    const k: usize = @intCast(a_dims[a_dims.len - 1]);
+    if (@as(usize, @intCast(b_dims[b_dims.len - 2])) != k) return error.TensorShapeMismatch;
+    const n: usize = @intCast(b_dims[b_dims.len - 1]);
+
+    const batch_rank = @max(a_dims.len, b_dims.len) - 2;
+    var batch_shape_buf: [8]i64 = undefined;
+    const batch_shape = batch_shape_buf[0..batch_rank];
+    var batch_count: usize = 1;
+    for (0..batch_rank) |i| {
+        const ad = dimFromRight(a_dims[0 .. a_dims.len - 2], batch_rank - 1 - i);
+        const bd = dimFromRight(b_dims[0 .. b_dims.len - 2], batch_rank - 1 - i);
+        if (ad != bd and ad != 1 and bd != 1) return error.TensorShapeMismatch;
+        batch_shape[i] = @max(ad, bd);
+        batch_count = std.math.mul(usize, batch_count, @intCast(batch_shape[i])) catch return error.TensorShapeMismatch;
+    }
+
+    var out_shape_buf: [9]i64 = undefined;
+    var out_rank: usize = 0;
+    for (batch_shape) |d| {
+        out_shape_buf[out_rank] = d;
+        out_rank += 1;
+    }
+    if (!a_promoted) {
+        out_shape_buf[out_rank] = @intCast(m);
+        out_rank += 1;
+    }
+    if (!b_promoted) {
+        out_shape_buf[out_rank] = @intCast(n);
+        out_rank += 1;
+    }
+    const out_shape = ra.dupe(i64, out_shape_buf[0..out_rank]) catch return error.OutOfMemory;
+    const out = try newTensor(ra, out_shape);
+
+    // Strides over the batch axes alone, zeroed where an operand broadcasts, so
+    // a weight shared across every head is read in place rather than copied.
+    var a_batch_strides: [8]usize = @splat(0);
+    var b_batch_strides: [8]usize = @splat(0);
+    fillBroadcastStrides(a_dims[0 .. a_dims.len - 2], batch_rank, batch_shape, a_batch_strides[0..batch_rank]);
+    fillBroadcastStrides(b_dims[0 .. b_dims.len - 2], batch_rank, batch_shape, b_batch_strides[0..batch_rank]);
+
+    var idx: [8]usize = @splat(0);
+    for (0..batch_count) |bi| {
+        var a_batch: usize = 0;
+        var b_batch: usize = 0;
+        for (0..batch_rank) |d| {
+            a_batch += idx[d] * a_batch_strides[d];
+            b_batch += idx[d] * b_batch_strides[d];
+        }
+        const a_slice = a.data[a_batch * m * k ..][0 .. m * k];
+        const b_slice = b.data[b_batch * k * n ..][0 .. k * n];
+        const o_slice = out.data[bi * m * n ..][0 .. m * n];
+        @memset(o_slice, 0);
+        for (0..m) |row| {
+            for (0..k) |p| {
+                simd.axpy(o_slice[row * n ..][0..n], b_slice[p * n ..][0..n], a_slice[row * k + p]);
+            }
+        }
+        if (batch_rank != 0) incrementIndex(idx[0..batch_rank], batch_shape);
+    }
     return out;
 }
 
@@ -1218,29 +1432,48 @@ pub fn conv(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMapU
     const out = try newTensor(ra, &.{ @intCast(n), @intCast(m), @intCast(oh), @intCast(ow) });
     const mpg = m / group; // output channels per group
 
+    // One weight at a time across a whole output row. With unit stride and
+    // dilation the input row is contiguous and the row is one vectorized
+    // multiply-add, which is the difference between a reference that runs and
+    // one nobody can wait for.
+    const unit_x = sw == 1 and dw == 1;
     for (0..n) |ni| {
         for (0..group) |g| {
             for (0..mpg) |mi| {
                 const oc = g * mpg + mi;
-                const bias_v: f32 = if (bias) |bt| bt.data[oc] else 0;
-                for (0..oh) |oy| {
-                    for (0..ow) |ox| {
-                        var acc: f32 = bias_v;
-                        for (0..cpg) |ci| {
-                            const ic = g * cpg + ci;
-                            for (0..kh) |ky| {
+                const plane = out.data[((ni * m + oc) * oh) * ow ..][0 .. oh * ow];
+                @memset(plane, if (bias) |bt| bt.data[oc] else 0);
+                for (0..cpg) |ci| {
+                    const ic = g * cpg + ci;
+                    const in_plane = x.data[((ni * c + ic) * h) * wd ..][0 .. h * wd];
+                    for (0..kh) |ky| {
+                        for (0..kw) |kx| {
+                            const wv = w.data[((oc * cpg + ci) * kh + ky) * kw + kx];
+                            if (wv == 0) continue;
+                            for (0..oh) |oy| {
                                 const iy = @as(i64, @intCast(oy * sh + ky * dh)) - pt;
                                 if (iy < 0 or iy >= @as(i64, @intCast(h))) continue;
-                                for (0..kw) |kx| {
+                                const in_row = in_plane[@as(usize, @intCast(iy)) * wd ..][0..wd];
+                                const out_row = plane[oy * ow ..][0..ow];
+                                if (unit_x) {
+                                    // The output columns whose input column is
+                                    // inside the row, so the pad test leaves the
+                                    // inner loop entirely.
+                                    const shift = @as(i64, @intCast(kx * dw)) - pl;
+                                    const first: usize = @intCast(@max(0, -shift));
+                                    const last: usize = @intCast(@max(0, @min(@as(i64, @intCast(ow)), @as(i64, @intCast(wd)) - shift)));
+                                    if (last <= first) continue;
+                                    const src_start: usize = @intCast(@as(i64, @intCast(first)) + shift);
+                                    simd.axpy(out_row[first..last], in_row[src_start..][0 .. last - first], wv);
+                                    continue;
+                                }
+                                for (0..ow) |ox| {
                                     const ix = @as(i64, @intCast(ox * sw + kx * dw)) - pl;
                                     if (ix < 0 or ix >= @as(i64, @intCast(wd))) continue;
-                                    const xv = x.data[((ni * c + ic) * h + @as(usize, @intCast(iy))) * wd + @as(usize, @intCast(ix))];
-                                    const wv = w.data[((oc * cpg + ci) * kh + ky) * kw + kx];
-                                    acc += xv * wv;
+                                    out_row[ox] += in_row[@as(usize, @intCast(ix))] * wv;
                                 }
                             }
                         }
-                        out.data[((ni * m + oc) * oh + oy) * ow + ox] = acc;
                     }
                 }
             }
@@ -1526,9 +1759,15 @@ pub fn softmax(ra: std.mem.Allocator, x: Tensor, axis_in: i64) Error!Tensor {
 /// Reads one element of an integer-carrying tensor (a starts/ends/axes/shape
 /// input, stored as f32 like every graph tensor) as an i64, with a non-finite
 /// or out-of-range value from an untrusted model clamped to zero.
+/// Reads an integer-carrying element, saturating at the extremes rather than
+/// collapsing to zero. INT64_MAX is the "to the end" sentinel every exporter
+/// writes into a Slice, and folding it to zero made every slice-to-end in every
+/// real model return an empty tensor, silently.
 pub fn intAt(t: Tensor, i: usize) i64 {
     const v = t.data[i];
-    if (!(v >= -9.0e15 and v <= 9.0e15)) return 0;
+    if (std.math.isNan(v)) return 0;
+    if (v > 9.0e15) return std.math.maxInt(i64);
+    if (v < -9.0e15) return std.math.minInt(i64);
     return @intFromFloat(v);
 }
 

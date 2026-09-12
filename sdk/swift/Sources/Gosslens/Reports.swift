@@ -353,3 +353,32 @@ public func gossMlOpSupport(_ model: [UInt8]) -> [String] {
     }
     return []
 }
+
+/// What the frame says at one place in it. The quadrilateral is in normalized
+/// frame space and in reading order, so a coordinate sent back maps to a pixel.
+public struct GossReading: Sendable {
+    public let text: String
+    public let quad: [Float]
+    public let confidence: Float
+    public let origin: UInt32
+    public let script: UInt32
+    public let direction: UInt32
+    public let trackId: UInt32
+    public let line: UInt32
+    public let paragraph: UInt32
+
+    init(raw: goss_text_entry, text: String) {
+        self.text = text
+        self.quad = [
+            raw.quad.0, raw.quad.1, raw.quad.2, raw.quad.3,
+            raw.quad.4, raw.quad.5, raw.quad.6, raw.quad.7,
+        ]
+        self.confidence = raw.confidence
+        self.origin = raw.origin
+        self.script = raw.script
+        self.direction = raw.direction
+        self.trackId = raw.track_id
+        self.line = raw.line
+        self.paragraph = raw.paragraph
+    }
+}

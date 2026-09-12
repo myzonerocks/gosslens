@@ -5,6 +5,11 @@
 
 const std = @import("std");
 const ml_engine = @import("ml_engine");
+
+/// The model rail itself, re-exported so a caller doing its own sampling drives
+/// the same engine this file wraps rather than importing ml_engine again, which
+/// would put two modules over one file in the same compile.
+pub const Engine = ml_engine.Engine;
 const ml_sample = @import("ml_sample");
 const sampler = @import("sampler");
 const ml_tensor = @import("ml_tensor");
@@ -142,6 +147,12 @@ pub const Core = struct {
         if (in_count < 1 or in_count > 2) return error.InvalidModel;
         if (out_count == 0 or out_count > max_outputs) return error.InvalidModel;
 
+        // A model with symbolic spatial dims declares no size of its own. The
+        // manifest's input_width is what says which size to run it at, and it
+        // was parsed and thrown away until now.
+        if (bounds.requested_input_side > 0 and engine.inputNeedsShape(0)) {
+            engine.resizeInput(0, &[_]i64{ 1, 3, bounds.requested_input_side, bounds.requested_input_side }) catch return error.InvalidModel;
+        }
         var in_dims_buf: [8]i32 = undefined;
         const in_dims = engine.inputDims(0, &in_dims_buf) catch return error.InvalidModel;
         const in_sq = ml_sample.detectSquareRgb(in_dims) orelse return error.InvalidModel;

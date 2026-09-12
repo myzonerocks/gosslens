@@ -81,8 +81,32 @@ fn writeSection(w: *Out, section: snapshot.Section) void {
             w.raw(",\"frames_submitted\":");
             w.unum(readU64(section.payload, 32));
         },
-        .faces, .bodies, .hands, .text => {
+        .faces, .bodies, .hands => {
             w.field("count", readU32(section.payload, 0));
+        },
+        .text => {
+            w.field("count", readU32(section.payload, 0));
+            // The strings themselves, because a reading that stays in the
+            // binary record is a reading an agent cannot act on.
+            w.raw(",\"readings\":[");
+            var at: usize = 4;
+            var i: usize = 0;
+            const count = readU32(section.payload, 0);
+            while (i < count) : (i += 1) {
+                if (at + text_entry_header > section.payload.len) break;
+                const len = readU32(section.payload, at + text_entry_header - 4);
+                if (at + text_entry_header + len > section.payload.len) break;
+                if (i != 0) w.raw(",");
+                w.raw("{\"text\":");
+                w.string(section.payload[at + text_entry_header ..][0..len]);
+                w.raw(",\"confidence\":");
+                w.fnum(readF32(section.payload, at + 32));
+                w.field("origin", readU32(section.payload, at + 36));
+                w.field("track_id", readU32(section.payload, at + 48));
+                w.raw("}");
+                at += text_entry_header + len;
+            }
+            w.raw("]");
         },
         .audio => {
             w.raw(",\"level\":");
@@ -116,6 +140,10 @@ fn writeSection(w: *Out, section: snapshot.Section) void {
     }
     w.raw("}");
 }
+
+/// Eight quad floats, then confidence, origin, script, direction, track id,
+/// line, paragraph and the string's length: the fixed part of one reading.
+const text_entry_header: usize = 8 * 4 + 4 + 6 * 4 + 4;
 
 fn tagName(tag: snapshot.Tag) []const u8 {
     return switch (tag) {
@@ -169,6 +197,29 @@ const Out = struct {
         if (n < s.len) o.overflowed = true;
         o.at += n;
         o.needed += s.len;
+    }
+
+    /// A JSON string with the control characters and the two structural ones
+    /// escaped. A sign that reads `"SALE"` is a sign, not a parse error, and a
+    /// reading is untrusted input from whatever the camera saw.
+    fn string(o: *Out, text: []const u8) void {
+        o.raw("\"");
+        for (text) |ch| {
+            switch (ch) {
+                '"' => o.raw("\\\""),
+                '\\' => o.raw("\\\\"),
+                '\n' => o.raw("\\n"),
+                '\r' => o.raw("\\r"),
+                '\t' => o.raw("\\t"),
+                0...8, 11, 12, 14...31 => {
+                    var buf: [6]u8 = undefined;
+                    const hex = std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{ch}) catch return;
+                    o.raw(hex);
+                },
+                else => o.raw(&[_]u8{ch}),
+            }
+        }
+        o.raw("\"");
     }
 
     fn field(o: *Out, name: []const u8, v: u32) void {
@@ -278,4 +329,17 @@ test "a malformed record is refused rather than half-projected" {
     var bad = [_]u8{ 'X', 'X', 'X', 'X', 0, 0, 0, 0 };
     var json: [64]u8 = undefined;
     try t.expectError(error.Malformed, write(&bad, &json));
+}
+
+test "a reading with a quote in it stays valid json" {
+    var out: Out = .{ .buf = &.{} };
+    out.string("SALE \"50%\" off\nnow");
+    // Nothing is written to a zero-length buffer, but the size is counted, so
+    // the escapes are what makes the count larger than the input.
+    try std.testing.expect(out.needed > "SALE \"50%\" off\nnow".len + 2);
+
+    var room: [64]u8 = undefined;
+    var sized: Out = .{ .buf = &room };
+    sized.string("A\"B\\C\nD");
+    try std.testing.expectEqualStrings("\"A\\\"B\\\\C\\nD\"", room[0..sized.at]);
 }

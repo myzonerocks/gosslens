@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 137u
+#define GOSS_ABI_MINOR 142u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -862,6 +862,33 @@ goss_status goss_session_submit_source_hardware_buffer(goss_session *session, co
 /* Names the operators a model needs and this build does not implement, one per
    line. GOSS_AGAIN with out_len set means the buffer was too short. */
 goss_status goss_ml_op_support(const uint8_t *model, size_t model_len, uint8_t *out, size_t capacity, size_t *out_len);
+
+/* One thing the frame says: where it is, how sure the engine is, what found it,
+   and which line and paragraph it belongs to. The string comes through
+   goss_session_text_string, so a caller sizes once. */
+typedef struct goss_text_entry {
+    float quad[8];
+    float confidence;
+    uint32_t origin;
+    uint32_t script;
+    uint32_t direction;
+    uint32_t track_id;
+    uint32_t line;
+    uint32_t paragraph;
+    uint32_t text_len;
+    int64_t first_seen_us;
+    int64_t last_seen_us;
+} goss_text_entry;
+
+/* Turns on the text rail with a caller-supplied detector, and a recogniser and
+   dictionary where the caller has them. A detector alone finds where the text
+   is; the recogniser is what turns it into a string. */
+goss_status goss_session_enable_text(goss_session *session, const uint8_t *detector, size_t detector_len, const uint8_t *recognizer, size_t recognizer_len, const uint8_t *dictionary, size_t dictionary_len, uint32_t detect_side);
+goss_status goss_session_disable_text(goss_session *session);
+goss_status goss_session_text_count(goss_session *session, uint32_t *out_count, uint64_t *out_refused);
+goss_status goss_session_text_at(goss_session *session, uint32_t index, goss_text_entry *out_entry);
+/* GOSS_AGAIN with out_len set means the buffer was too short. */
+goss_status goss_session_text_string(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len);
 
 goss_status goss_engine_read_report(goss_engine *engine, goss_engine_report *out_report);
 
