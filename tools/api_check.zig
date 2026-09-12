@@ -31,6 +31,9 @@ const no_ts_wrapper = [_]Exception{
     .{ .op = "goss_engine_recording_start", .why = "the browser records through MediaRecorder off the canvas stream; the engine encoder is native-only" },
     .{ .op = "goss_engine_recording_stop", .why = "paired with recording_start" },
     .{ .op = "goss_engine_recording_set_realtime", .why = "paired with recording_start" },
+    .{ .op = "goss_engine_recording_pause", .why = "paired with recording_start; a page pauses its own MediaRecorder" },
+    .{ .op = "goss_engine_recording_resume", .why = "paired with recording_start" },
+    .{ .op = "goss_engine_recording_read_report", .why = "paired with recording_start; the page owns its recorder's state" },
     .{ .op = "goss_engine_capture_live_frame", .why = "the page reads the composited canvas directly" },
     .{ .op = "goss_engine_render_to_live_texture", .why = "no external-texture path on the web target" },
     .{ .op = "goss_engine_request_screenshot", .why = "the page owns file output; the SDK exports a PNG off the canvas" },
@@ -57,6 +60,7 @@ const mirrored_enums = [_][]const u8{
     "GOSS_NODE_STATE_",
     "GOSS_DEGRADE_",
     "GOSS_THERMAL_",
+    "GOSS_INTERRUPTION_",
 };
 
 /// Every `Java_com_gosslens_Gosslens_<name>` in the JNI file, names only. A

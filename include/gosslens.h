@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 115u
+#define GOSS_ABI_MINOR 119u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -351,6 +351,38 @@ goss_status goss_engine_recording_start(goss_engine *engine, goss_session *sessi
 /* Stops the engine's recording, flushing frames still in flight and
  * finalizing the container. */
 goss_status goss_engine_recording_stop(goss_engine *engine);
+
+/* What interrupted a recording, as the host saw it. A declared break is a gap the
+ * output accounts for, rather than drift the engine is blamed for. */
+typedef enum goss_interruption {
+    GOSS_INTERRUPTION_PAUSE = 0,
+    GOSS_INTERRUPTION_CAMERA_LOST = 1,
+    GOSS_INTERRUPTION_AUDIO_ROUTE = 2,
+    GOSS_INTERRUPTION_BACKGROUNDED = 3,
+    GOSS_INTERRUPTION_THERMAL = 4,
+} goss_interruption;
+
+typedef struct goss_recording_report {
+    int64_t duration_us;    /* output length, with the paused spans removed */
+    uint32_t clips;         /* pause and resume pairs produce these, from one */
+    uint32_t interruptions; /* declared breaks of every kind */
+    int64_t drift_us;       /* largest gap that was not a declared break */
+    uint64_t frames;
+    uint64_t dropped;
+    uint32_t paused;
+} goss_recording_report;
+
+/* Graph thread. Holds the recording clock. Frames submitted while paused are not
+ * written and the output has no gap, so a pause and resume pair is a clip
+ * boundary rather than a hole the rest of the file drifts behind. */
+goss_status goss_engine_recording_pause(goss_engine *engine);
+goss_status goss_engine_recording_resume(goss_engine *engine);
+
+/* Graph thread. A break the host saw rather than one the engine can detect. */
+goss_status goss_session_report_interruption(goss_session *session, goss_interruption kind);
+
+/* Any thread. What the recording has done so far. */
+goss_status goss_engine_recording_read_report(goss_engine *engine, goss_recording_report *out_report);
 
 /* Tells the next recording whether a viewfinder is watching it. True is the live camera and
  * the default; an offline lane rendering a clip faster than real time passes false, and the

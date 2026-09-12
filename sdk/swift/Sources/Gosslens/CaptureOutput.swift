@@ -159,6 +159,25 @@ extension GossEngine {
         try checked(goss_engine_recording_stop(handle))
     }
 
+    /// Holds the recording clock. Frames submitted while paused are not written
+    /// and the output has no gap, so a pause and resume pair is a clip boundary
+    /// rather than a hole the rest of the file drifts behind.
+    public func pauseRecording() throws {
+        try checked(goss_engine_recording_pause(handle))
+    }
+
+    public func resumeRecording() throws {
+        try checked(goss_engine_recording_resume(handle))
+    }
+
+    /// What the recording has done: the duration with pauses removed, the clips,
+    /// the declared breaks, the measured drift, and the frame and drop counts.
+    public func recordingReport() throws -> GossRecordingReport {
+        var raw = goss_recording_report()
+        try checked(goss_engine_recording_read_report(handle, &raw))
+        return GossRecordingReport(raw)
+    }
+
     /// Feeds interleaved f32 PCM into the session: the engine's level
     /// and beat analysis drives audio triggers, and an active recording
     /// muxes it as the audio track.

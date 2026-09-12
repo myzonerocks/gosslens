@@ -8162,6 +8162,9 @@ fn writeDiffusionLens(spec: DiffusionLensSpec) !void {
     const target_node = if (spec.target_mesh)
         "{\"id\":\"canvas\",\"type\":\"mesh.face\",\"inputs\":{\"frame\":\"camera\"},\"params\":{}}"
     else if (spec.target_material)
+        // Optional on purpose: this fixture writes its manifest by hand and ships
+        // no compiled shader for the pass, which a packaged lens would carry. The
+        // generative node drives the material, so the lens draws without it.
         "{\"id\":\"canvas\",\"type\":\"shader.pass\",\"optional\":true,\"inputs\":{\"frame\":\"camera\"},\"params\":{},\"material\":{\"output\":3,\"nodes\":[{\"kind\":\"uv\"},{\"kind\":\"texture\",\"name\":\"generated\"},{\"kind\":\"sample\",\"inputs\":[1,0]},{\"kind\":\"output\",\"inputs\":[2]}]}}"
     else
         try std.fmt.allocPrint(page, "{{\"id\":\"canvas\",\"type\":\"sprite.2d\",\"optional\":true,\"inputs\":{{\"frame\":\"camera\"}},\"params\":{{}}, \"sprite\":{{\"x\":0.0,\"y\":0.0,\"w\":1.0,\"h\":1.0{s}}}}}", .{mask_field});
@@ -12540,6 +12543,116 @@ fn paintSweepFrame(rgba: []u8, w: u32, h: u32, i: u32, n: u32) void {
             rgba[at + 3] = 255;
         }
     }
+}
+
+/// A recording that pauses and resumes is one continuous file, not one with a hole
+/// the length of the pause. The report is what lets a host see it: the duration
+/// excludes the paused span, the clip count follows the pause, and a declared
+/// interruption is not counted as drift the engine caused.
+fn provePauseLeavesNoGap(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const path = "/tmp/goss-pause-proof.mp4";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    defer std.Io.Dir.cwd().deleteFile(harness_io, path) catch {}; // failure ignored: a leftover fixture the next run overwrites
+    const activated = abi.goss_session_activate_lens_from_directory(session, ".lens-packages/shader-tint", ".lens-packages/shader-tint".len);
+    if (activated != .ok) {
+        std.debug.print("conformance: FAIL the pause proof could not activate shader-tint: {t}\n", .{activated});
+        return false;
+    }
+    const started = abi.goss_engine_recording_start(engine, session, path.ptr, path.len, null);
+    if (started != .ok) {
+        std.debug.print("conformance: FAIL the pause proof could not start recording: {t}\n", .{started});
+        return false;
+    }
+
+    const w: u32 = 400;
+    const h: u32 = 300;
+    const rgba = try gpa.alloc(u8, @as(usize, w) * h * 4);
+    defer gpa.free(rgba);
+    const before: u32 = 20;
+    const after: u32 = 20;
+    // Ten seconds of wall clock pass while paused, which is the gap a file without
+    // a held clock would carry for the rest of its length.
+    const pause_us: i64 = 10_000_000;
+
+    var i: u32 = 0;
+    while (i < before) : (i += 1) {
+        if (!try submitSweep(gpa, engine, session, rgba, w, h, i, before + after, @as(i64, i + 1) * 33_333)) return false;
+    }
+    const pause_status = abi.goss_engine_recording_pause(engine);
+    if (pause_status != .ok) {
+        std.debug.print("conformance: FAIL the pause proof could not pause: {t}\n", .{pause_status});
+        return false;
+    }
+    var paused_report: abi.RecordingReport = undefined;
+    if (abi.goss_engine_recording_read_report(engine, &paused_report) != .ok) {
+        std.debug.print("conformance: FAIL the pause proof could not read the paused report\n", .{});
+        return false;
+    }
+    if (paused_report.paused == 0 or paused_report.clips != 2) {
+        std.debug.print("conformance: FAIL a paused recording reports paused {d} clips {d}, wanted 1 and 2\n", .{ paused_report.paused, paused_report.clips });
+        return false;
+    }
+    const duration_at_pause = paused_report.duration_us;
+
+    const resume_status = abi.goss_engine_recording_resume(engine);
+    if (resume_status != .ok) {
+        std.debug.print("conformance: FAIL the pause proof could not resume: {t}\n", .{resume_status});
+        return false;
+    }
+    i = 0;
+    while (i < after) : (i += 1) {
+        const stamp = pause_us + @as(i64, before + i + 1) * 33_333;
+        if (!try submitSweep(gpa, engine, session, rgba, w, h, before + i, before + after, stamp)) return false;
+    }
+    const report_status = abi.goss_session_report_interruption(session, 1);
+    if (report_status != .ok) {
+        std.debug.print("conformance: FAIL the pause proof could not report an interruption: {t}\n", .{report_status});
+        return false;
+    }
+
+    var report: abi.RecordingReport = undefined;
+    if (abi.goss_engine_recording_read_report(engine, &report) != .ok) {
+        std.debug.print("conformance: FAIL the pause proof could not read the final report\n", .{});
+        return false;
+    }
+    const stop_status = abi.goss_engine_recording_stop(engine);
+    if (stop_status != .ok) {
+        std.debug.print("conformance: FAIL the pause proof could not stop the recording: {t}\n", .{stop_status});
+        return false;
+    }
+
+    // The output grew by the frames after the pause, not by the pause itself.
+    const grew = report.duration_us - duration_at_pause;
+    if (grew >= pause_us) {
+        std.debug.print("conformance: FAIL the output grew {d}us across a {d}us pause, so the clock was not held\n", .{ grew, pause_us });
+        return false;
+    }
+    if (report.drift_us >= pause_us) {
+        std.debug.print("conformance: FAIL the pause was counted as {d}us of drift\n", .{report.drift_us});
+        return false;
+    }
+    if (report.interruptions != 2 or report.paused != 0) {
+        std.debug.print("conformance: FAIL the report says {d} interruptions and paused {d}, wanted 2 and 0\n", .{ report.interruptions, report.paused });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a pause and resume leaves no gap: {d}us of output across a {d}us pause, {d} clips, {d}us of measured drift, and a declared break is not counted as drift\n", .{ report.duration_us, pause_us, report.clips, report.drift_us });
+    return true;
+}
+
+/// One sweeping frame into the recording rail, the submit the fixture encoder and
+/// the pause proof share.
+fn submitSweep(gpa: std.mem.Allocator, engine: *abi.Engine, session: *abi.Session, rgba: []u8, w: u32, h: u32, index: u32, total: u32, stamp_us: i64) !bool {
+    paintSweepFrame(rgba, w, h, index, total);
+    const planes = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = rgba }, .width = w, .height = h });
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = stamp_us };
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return false;
+    _ = abi.goss_engine_render_frame(engine, session);
+    c.glfwPollEvents();
+    return true;
 }
 
 /// Encodes a short deterministic clip through the recording rail so the
@@ -22872,6 +22985,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try provePoolServesScratchTargets(gpa, engine)) return 1;
     if (!try proveOptionalNodeDeclaresBestEffort(gpa, engine)) return 1;
     watchHold("optional node declares best effort");
+    if (!try provePauseLeavesNoGap(gpa, engine)) return 1;
+    watchHold("pause leaves no gap");
     watchHold("pool serves scratch targets");
     return 0;
 }

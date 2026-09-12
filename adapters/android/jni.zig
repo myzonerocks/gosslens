@@ -1173,6 +1173,33 @@ export fn Java_com_gosslens_Gosslens_nativeRecordingStop(env: *JniEnv, cls: jobj
     return @intFromEnum(abi.goss_engine_recording_stop(engineFromHandle(engine)));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeRecordingPause(env: *JniEnv, cls: jobject, engine: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_engine_recording_pause(engineFromHandle(engine)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeRecordingResume(env: *JniEnv, cls: jobject, engine: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_engine_recording_resume(engineFromHandle(engine)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeReportInterruption(env: *JniEnv, cls: jobject, session: i64, kind: i32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_report_interruption(sessionFromHandle(session), kind));
+}
+
+/// The recording report as a raw struct in a direct buffer, the same one
+/// crossing the engine and session reports take.
+export fn Java_com_gosslens_Gosslens_nativeRecordingReport(env: *JniEnv, cls: jobject, engine: i64, out_buffer: jobject) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out: *align(1) abi.RecordingReport = @ptrCast(out_bytes);
+    return @intFromEnum(abi.goss_engine_recording_read_report(engineFromHandle(engine), out));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeEnableBeauty(env: *JniEnv, cls: jobject, session: i64, path_buffer: jobject, path_len: i32) i32 {
     _ = cls;
     _ = path_len;

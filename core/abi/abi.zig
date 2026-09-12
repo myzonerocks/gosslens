@@ -154,6 +154,10 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_recording_start(goss_engine *engine, goss_session *session, const uint8_t *path, size_t path_len, const goss_recording_config *config)",
     "goss_status goss_engine_recording_set_realtime(goss_engine *engine, bool realtime)",
     "goss_status goss_engine_recording_stop(goss_engine *engine)",
+    "goss_status goss_engine_recording_pause(goss_engine *engine)",
+    "goss_status goss_engine_recording_resume(goss_engine *engine)",
+    "goss_status goss_session_report_interruption(goss_session *session, goss_interruption kind)",
+    "goss_status goss_engine_recording_read_report(goss_engine *engine, goss_recording_report *out_report)",
     "goss_status goss_session_submit_audio(goss_session *session, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t timestamp_us)",
     "goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light)",
     "goss_status goss_session_submit_world_mesh(goss_session *session, const float *vertices, size_t vertex_count, const uint32_t *indices, size_t index_count)",
@@ -328,6 +332,35 @@ pub const abi_minor: u16 = abi_minor_floor + @as(u16, @intCast(abi_functions.len
 // not export. A panic prints the message and traps; freestanding wasm has
 // nowhere to print, so it traps directly.
 pub const panic = if (builtin.os.tag == .freestanding) std.debug.no_panic else std.debug.simple_panic;
+
+/// What interrupted a recording, as a host reports it. The same set
+/// core/media/container.zig declares, on the frozen surface.
+pub const Interruption = enum(u32) {
+    pause = 0,
+    camera_lost = 1,
+    audio_route = 2,
+    backgrounded = 3,
+    thermal = 4,
+};
+
+/// What one recording has done. Read it after a stop, or during, to see the
+/// clips a pause and resume produced and the drift the output actually carries.
+pub const RecordingReport = extern struct {
+    /// Output duration with the paused spans removed, in microseconds.
+    duration_us: i64,
+    /// Clips the pause and resume pairs produced, counting from one.
+    clips: u32,
+    /// Declared breaks of every kind.
+    interruptions: u32,
+    /// The largest gap between consecutive frames that was not a declared break,
+    /// which is the measured drift rather than a tolerance someone chose.
+    drift_us: i64,
+    /// Frames handed to the encoder, and frames the encoder was not ready for.
+    frames: u64,
+    dropped: u64,
+    /// Whether the recording is paused right now.
+    paused: u32,
+};
 
 pub const Status = enum(c_int) {
     ok = 0,
@@ -521,6 +554,18 @@ pub const Engine = struct {
     recording_last_timestamp: i64 = std.math.minInt(i64),
     recording_warmups: u32 = 0,
     recording_dropped: u32 = 0,
+    /// The recording's own clock. Capture stamps go in and output stamps come
+    /// out with the paused spans removed, so a pause leaves no gap in the file
+    /// and the rest of the recording does not drift by the length of the pause.
+    recording_clock: media.Clock = .{},
+    /// Clips the pause and resume pairs produced, counting from one, and the
+    /// declared breaks of every kind.
+    recording_clips: u32 = 1,
+    recording_interruptions: u32 = 0,
+    /// The last CAPTURE stamp a frame carried, where pause, resume and a declared
+    /// break are placed. recording_last_timestamp is the last OUTPUT stamp
+    /// written, and the two differ by every pause taken so far.
+    recording_capture_last_us: i64 = 0,
     /// Window-binding backends only: the encoder surface the composite
     /// re-presents into, separate from the sampleable frame target.
     recording_window_target: ?render.Renderer.OffscreenTarget = null,
@@ -5707,8 +5752,15 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         pollLandmarkMattes(s);
         if (e.recording != null and e.recording_session == s and !s.capture_requested) {
             if (s.current) |current| {
-                recording_frame = prepareRecordingFrame(e, r);
-                recording_timestamp = current.desc.timestamp_us;
+                // The clock is the recording's timeline, not the camera's: it maps a
+                // capture stamp to an output stamp with the paused spans removed, so
+                // a pause leaves no gap and nothing after it drifts by its length. A
+                // frame arriving while paused has no place in the output.
+                e.recording_capture_last_us = current.desc.timestamp_us;
+                if (e.recording_clock.map(current.desc.timestamp_us)) |out_us| {
+                    recording_frame = prepareRecordingFrame(e, r);
+                    recording_timestamp = out_us;
+                } else |_| {}
             }
         }
         if (s.physics_world) |world| {
@@ -6364,6 +6416,76 @@ pub export fn goss_engine_recording_start(engine: ?*Engine, session: ?*Session, 
     e.recording_session = s;
     e.recording_warmups = 0;
     e.recording_dropped = 0;
+    e.recording_clock = .{};
+    e.recording_clips = 1;
+    e.recording_interruptions = 0;
+    e.recording_capture_last_us = 0;
+    return .ok;
+}
+
+/// Holds the recording clock where it is. Frames submitted while paused are not
+/// written, and the output has no gap: the paused span is subtracted from every
+/// later stamp, which is what makes a multi-clip recording one continuous file.
+pub export fn goss_engine_recording_pause(engine: ?*Engine) Status {
+    const e = engine orelse return .invalid_argument;
+    if (e.recording == null) return .invalid_argument;
+    if (e.recording_clock.isPaused()) return .invalid_argument;
+    // Before the first frame there is no origin to hold. The pause still takes,
+    // with the origin set to this instant, so the first frame after the resume is
+    // the origin and the output still starts at zero.
+    const at = e.recording_capture_last_us;
+    e.recording_clock.pause(at) catch {
+        e.recording_clock.origin_us = at;
+        e.recording_clock.paused_at_us = at;
+    };
+    e.recording_clips += 1;
+    e.recording_interruptions += 1;
+    return .ok;
+}
+
+/// Starts the clock again from the stamp the next frame carries.
+pub export fn goss_engine_recording_resume(engine: ?*Engine) Status {
+    const e = engine orelse return .invalid_argument;
+    if (e.recording == null) return .invalid_argument;
+    e.recording_clock.resume_(e.recording_capture_last_us) catch return .invalid_argument;
+    return .ok;
+}
+
+/// A break the host saw: the camera went away, the audio route changed, the app
+/// was backgrounded, thermal pressure stopped the encoder. Declared so the gap it
+/// leaves is the break rather than drift the engine is blamed for.
+pub export fn goss_session_report_interruption(session: ?*Session, kind: c_int) Status {
+    const s = session orelse return .invalid_argument;
+    const e = s.engine;
+    const which: media.Discontinuity = switch (kind) {
+        0 => .pause,
+        1 => .camera_lost,
+        2 => .audio_route,
+        3 => .backgrounded,
+        4 => .thermal,
+        else => return .invalid_argument,
+    };
+    if (e.recording == null) return .invalid_argument;
+    e.recording_clock.note(which, e.recording_last_timestamp);
+    e.recording_interruptions += 1;
+    if (which == .pause) e.recording_clips += 1;
+    return .ok;
+}
+
+/// What the recording has done: the duration with pauses removed, the clips,
+/// the declared breaks, the drift it actually carries, and the frame counts.
+pub export fn goss_engine_recording_read_report(engine: ?*Engine, out_report: ?*RecordingReport) Status {
+    const e = engine orelse return .invalid_argument;
+    const out = out_report orelse return .invalid_argument;
+    out.* = .{
+        .duration_us = e.recording_clock.durationUs(),
+        .clips = e.recording_clips,
+        .interruptions = e.recording_interruptions,
+        .drift_us = e.recording_clock.driftUs(),
+        .frames = e.recording_warmups,
+        .dropped = e.recording_dropped,
+        .paused = if (e.recording_clock.isPaused()) 1 else 0,
+    };
     return .ok;
 }
 
@@ -11488,17 +11610,10 @@ fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: 
         // A degrade whatever the lens declared, the same call as the worker
         // budget: no profile is this build's situation, not a defect in the lens,
         // and a headless build has none at all.
-        for (passes) |pass| {
-            if (pass.material) continue;
-            noteNode(session, pass.graph_index, .degraded, .capability_unavailable);
-        }
+        for (passes) |pass| noteNode(session, pass.graph_index, .degraded, .capability_unavailable);
         return;
     };
     for (passes) |pass| {
-        // A pass with an inline material graph has no compiled binary in the
-        // bundle: its program is built from the graph at splice time, so a missing
-        // file is the normal case and not a missing asset.
-        if (pass.material) continue;
         var bin_buf: [512]u8 = undefined;
         const bin_name = std.fmt.bufPrint(&bin_buf, "{s}.{s}.bin", .{ pass.shader_stem, tag }) catch {
             noteResourceFailure(session, pass.graph_index, pass.optional, .asset_too_large);

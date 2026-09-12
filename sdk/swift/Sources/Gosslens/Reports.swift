@@ -95,3 +95,39 @@ extension GossSession {
         return GossSessionReport(raw)
     }
 }
+
+/// What one recording has done. driftUs is measured, not a tolerance someone
+/// chose: the largest gap between consecutive frames that was not a break the
+/// host declared.
+public struct GossRecordingReport: Sendable {
+    public var durationUs: Int64
+    public var clips: UInt32
+    public var interruptions: UInt32
+    public var driftUs: Int64
+    public var frames: UInt64
+    public var dropped: UInt64
+    public var paused: Bool
+
+    init(_ raw: goss_recording_report) {
+        durationUs = raw.duration_us
+        clips = raw.clips
+        interruptions = raw.interruptions
+        driftUs = raw.drift_us
+        frames = raw.frames
+        dropped = raw.dropped
+        paused = raw.paused != 0
+    }
+}
+
+/// What interrupted a recording, as the host saw it.
+public enum GossInterruption: UInt32, Sendable {
+    case pause = 0, cameraLost = 1, audioRoute = 2, backgrounded = 3, thermal = 4
+}
+
+extension GossSession {
+    /// A break the engine cannot detect: the camera went away, the audio route
+    /// changed, the app was backgrounded, thermal pressure stopped the encoder.
+    public func reportInterruption(_ kind: GossInterruption) throws {
+        try checked(goss_session_report_interruption(handle, goss_interruption(rawValue: kind.rawValue)))
+    }
+}

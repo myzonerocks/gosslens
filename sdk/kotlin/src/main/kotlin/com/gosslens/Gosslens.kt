@@ -18,6 +18,22 @@ enum class Thermal(val raw: Int) {
     }
 }
 
+/** What interrupted a recording, as the host saw it. */
+enum class Interruption(val raw: Int) {
+    PAUSE(0), CAMERA_LOST(1), AUDIO_ROUTE(2), BACKGROUNDED(3), THERMAL(4);
+}
+
+/** What one recording has done. */
+data class RecordingReport(
+    val durationUs: Long,
+    val clips: Int,
+    val interruptions: Int,
+    val driftUs: Long,
+    val frames: Long,
+    val dropped: Long,
+    val paused: Boolean,
+)
+
 /** The rungs of the degradation ladder, top to bottom. */
 enum class DegradeLevel(val raw: Int) {
     FULL(0), REDUCED_ML_CADENCE(1), SEGMENTATION_OFF(2), BEAUTY_SIMPLIFIED(3), PASSTHROUGH(4);
@@ -86,6 +102,10 @@ object Gosslens {
     internal external fun nativeCaptureStill(engine: Long, session: Long, width: Int, height: Int, supersample: Int, format: Int, quality: Int, colorSpace: Int, bitDepth: Int, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
     internal external fun nativeRecordingStart(engine: Long, session: Long, pathBuffer: ByteBuffer, pathLen: Int, width: Int, height: Int, bitrate: Int, codec: Int, realtime: Int): Int
     internal external fun nativeRecordingStop(engine: Long): Int
+    internal external fun nativeRecordingPause(engine: Long): Int
+    internal external fun nativeRecordingResume(engine: Long): Int
+    internal external fun nativeReportInterruption(session: Long, kind: Int): Int
+    internal external fun nativeRecordingReport(engine: Long, out: ByteBuffer): Int
     internal external fun nativeSubmitWorld(session: Long, stateBuffer: ByteBuffer, planesBuffer: ByteBuffer, planeCount: Int, anchorsBuffer: ByteBuffer, anchorCount: Int, lightBuffer: ByteBuffer): Int
     internal external fun nativeCaptureView(session: Long, guidanceBuffer: ByteBuffer): Int
     internal external fun nativeResetCapture(session: Long): Int
@@ -786,6 +806,24 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     /** Stops the recording, flushing in-flight frames and finalizing
      * the file. */
     fun stopRecording(): Boolean = Gosslens.nativeRecordingStop(handle) == 0
+
+    /**
+     * Holds the recording clock. Frames submitted while paused are not written and
+     * the output has no gap, so a pause and resume pair is a clip boundary.
+     */
+    fun pauseRecording(): Boolean = Gosslens.nativeRecordingPause(handle) == 0
+
+    fun resumeRecording(): Boolean = Gosslens.nativeRecordingResume(handle) == 0
+
+    /** What the recording has done, or null when there is none. */
+    fun recordingReport(): RecordingReport? {
+        // Two i64, two u32, one i64, two u64, one u32, in declaration order.
+        val buf = ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeRecordingReport(handle, buf) != 0) return null
+        val q = buf.asLongBuffer()
+        val w = buf.duplicate().order(ByteOrder.nativeOrder()).asIntBuffer()
+        return RecordingReport(q.get(0), w.get(2), w.get(3), q.get(2), q.get(3), q.get(4), w.get(10) != 0)
+    }
 
     /** Feeds interleaved f32 PCM into the session: the engine's level
      * and beat analysis drives audio triggers, and an active recording

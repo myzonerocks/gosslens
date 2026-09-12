@@ -8,6 +8,15 @@
 
 export const GOSS_OK = 0;
 
+/// What interrupted a recording, as the page saw it.
+export const enum GossInterruption {
+  Pause = 0,
+  CameraLost = 1,
+  AudioRoute = 2,
+  Backgrounded = 3,
+  Thermal = 4,
+}
+
 export const enum GossDegradeLevel {
   Full = 0,
   ReducedMlCadence = 1,
@@ -3009,6 +3018,13 @@ export class GossSession {
       [this.handle, ptr, gaussians.length / 14],
     );
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+  }
+
+  /// A break the page saw and the engine cannot: the camera track ended, the
+  /// tab was hidden. Declared so the gap it leaves is the break rather than
+  /// drift counted against the engine.
+  reportInterruption(kind: GossInterruption): boolean {
+    return this.mod.ccall("goss_session_report_interruption", "number", ["number", "number"], [this.handle, kind]) === GOSS_OK;
   }
 
   /// This session's counters: frames in and out, the rung and how often it
