@@ -4479,7 +4479,7 @@ fn proveScope(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
                 break :blk abi.goss_session_annotate(session, &desc, null, 0);
             },
             12 => abi.goss_session_activate_lens_from_directory(session, "zig-out/onnx-zoo-lens", "zig-out/onnx-zoo-lens".len),
-            14 => abi.goss_session_enable_face_tracking(session, null, 0),
+            14 => abi.goss_session_enable_face_tracking(session, null, 0, 0),
             else => unreachable,
         };
         if (status != .out_of_scope) {
@@ -4544,7 +4544,7 @@ fn proveSpatialRail(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // A floor, a table half a metre above it, and a wall: the room a placement
     // question is actually asked about.
     const flat: [16]f32 = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
-    var floor_pose = flat;
+    const floor_pose = flat;
     var table_pose = flat;
     table_pose[13] = 0.75;
     var wall_pose = flat;
