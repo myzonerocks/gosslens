@@ -1,9 +1,17 @@
 name: leak-lane
 
 # The scheduled native-heap watcher. The zig debug allocator gates zig
-# allocations; this lane runs the identical headless lifecycle scenario
-# under the platform malloc leak checker, so a leak on the C or C++
-# heap a vendored engine allocates on fails the lane with a stack.
+# allocations; this runs the lifecycle scenario under the platform leak checker,
+# so a leak on the C or C++ heap fails the lane with a stack.
+
+# Malloc hardening rides along for the class the leak checker misses: scribbled
+# frees make a read after free return garbage, and guard pages turn an overflow
+# into a fault.
+
+# The second job adds the address sanitizer, which redzones and quarantines
+# every vendor block. It links rather than injects, because it has to own malloc
+# before the inference stack allocates in its static initialisers;
+# harness/asan_stub.c carries why that goes through a stub.
 
 on:
   schedule:
@@ -30,8 +38,38 @@ jobs:
         run: zig build fetch-models
       - name: build the scenario
         run: zig build leak-scenario
-      - name: run under the malloc leak checker
+      - name: run under the malloc leak checker and guard malloc
         run: |
           set -euo pipefail
           export MallocStackLogging=1
+          export MallocScribble=1
+          export MallocPreScribble=1
+          export MallocGuardEdges=1
           leaks --atExit -- ./zig-out/bin/gosslens-leak-scenario
+
+  sanitizer:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: |
+          tools/toolchain-sync
+          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+      - name: vendor sync
+        run: zig build vendor-sync
+      - name: fetch models
+        run: zig build fetch-models
+      - name: build the scenario against the sanitizer
+        run: zig build leak-scenario -Dasan=true
+      - name: prove the sanitizer is actually live
+        run: |
+          set -euo pipefail
+          # A lane that reports nothing because the sanitizer never loaded looks
+          # exactly like a clean run, so check the load command is there before
+          # trusting the run below.
+          otool -L ./zig-out/bin/gosslens-leak-scenario | grep -q libclang_rt.asan_osx_dynamic.dylib
+      - name: run under the address sanitizer
+        run: |
+          set -euo pipefail
+          ASAN_OPTIONS=detect_leaks=0:print_stats=0 ./zig-out/bin/gosslens-leak-scenario

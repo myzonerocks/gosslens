@@ -36,6 +36,7 @@
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/RegisterTypes.h>
 
+#include <mutex>
 #include <atomic>
 #include <cmath>
 #include <cstdarg>
@@ -149,6 +150,11 @@ struct World {
   }
 };
 
+// Worlds alive now, and the lock the one-time global setup below needs. Two
+// engines on two threads creating a first world would otherwise both see a null
+// Factory and both install it, and the counter would tear. The ABI confines a
+// session to its graph thread; nothing confines two engines to one.
+std::mutex g_world_lock;
 int world_count = 0;
 bool g_hair_registered = false;
 
@@ -240,6 +246,7 @@ void add_constraint(World* world, JPH::Constraint* constraint, JPH::BodyID a, JP
 }  // namespace
 
 extern "C" void* goss_physics_world_create(float gravity_y) {
+  std::lock_guard<std::mutex> guard(g_world_lock);
   if (world_count == 0 && JPH::Factory::sInstance == nullptr) {
     JPH::Allocate = joltAllocate;
     JPH::Free = joltFree;
@@ -263,6 +270,7 @@ extern "C" void* goss_physics_world_create(float gravity_y) {
 extern "C" void goss_physics_world_destroy(void* handle) {
   auto* world = static_cast<World*>(handle);
   if (world == nullptr) return;
+  std::lock_guard<std::mutex> guard(g_world_lock);
   delete world;
   world_count -= 1;
   if (world_count == 0) {

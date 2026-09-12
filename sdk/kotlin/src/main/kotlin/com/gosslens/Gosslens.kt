@@ -10,6 +10,23 @@ import java.nio.ByteOrder
 // to one and carry no logic; GossSession and GossEngine below are the idiomatic
 // wrappers the app consumes.
 object Gosslens {
+    /**
+     * The device's thermal status mapped onto the engine's four states.
+     * Devices below API 29 report none, which reads as nominal.
+     */
+    @JvmStatic
+    fun platformThermal(context: android.content.Context): Int {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return 0
+        val power = context.getSystemService(android.os.PowerManager::class.java) ?: return 0
+        return when (power.currentThermalStatus) {
+            android.os.PowerManager.THERMAL_STATUS_NONE -> 0
+            android.os.PowerManager.THERMAL_STATUS_LIGHT -> 1
+            android.os.PowerManager.THERMAL_STATUS_MODERATE -> 1
+            android.os.PowerManager.THERMAL_STATUS_SEVERE -> 2
+            else -> 3
+        }
+    }
+
     init {
         System.loadLibrary("gosslens")
     }
@@ -47,6 +64,8 @@ object Gosslens {
     internal external fun nativeChainReport(session: Long, outBuffer: ByteBuffer): Int
     internal external fun nativeReadReconstruction(session: Long, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
     internal external fun nativeWriteReconstruction(session: Long, buffer: ByteBuffer, count: Int): Int
+    internal external fun nativeNodeReports(session: Long, out: ByteBuffer, capacityU32: Int): Int
+    internal external fun nativeNodeReportId(session: Long, index: Int, out: ByteBuffer, capacity: Int, outLen: ByteBuffer): Int
     internal external fun nativeSessionCreate(engine: Long, frameBudgetUs: Int): Long
     internal external fun nativeSessionDestroy(session: Long)
     internal external fun nativeSubmitFrameCopy(
@@ -1106,6 +1125,14 @@ class GossSession private constructor(
     fun reportFrame(frameTimeUs: Int, thermal: Int): Int =
         Gosslens.nativeReportFrame(handle, frameTimeUs, thermal)
 
+    /**
+     * Reports one finished frame with the device's thermal status read from
+     * the given context, the call a frame loop wants. The engine can measure
+     * a frame period on its own but has no way to reach the thermal API.
+     */
+    fun reportFrame(frameTimeUs: Int, context: android.content.Context): Int =
+        reportFrame(frameTimeUs, platformThermal(context))
+
     fun degradeLevel(): Int = Gosslens.nativeDegradeLevel(handle)
 
     fun enableFaceTracking(taskBundle: ByteBuffer, threads: Int): Boolean =
@@ -1284,6 +1311,64 @@ class GossSession private constructor(
         val buf = ByteBuffer.allocateDirect(gaussians.size * 4).order(ByteOrder.nativeOrder())
         buf.asFloatBuffer().put(gaussians)
         return Gosslens.nativeWriteReconstruction(handle, buf, gaussians.size / 14) == 0
+    }
+
+    /** What a lens node is doing, as against what its manifest asked for. */
+    enum class NodeState { READY, DEGRADED, FAILED }
+
+    /** Why a node is not ready. */
+    enum class NodeReason {
+        NONE, OUT_OF_MEMORY, ASSET_MISSING, ASSET_MALFORMED, ASSET_TOO_LARGE,
+        SHADER_MISSING, SHADER_LINK_FAILED, MODEL_REJECTED, MODEL_UNSUPPORTED,
+        CAPABILITY_UNAVAILABLE,
+    }
+
+    /** One lens node that is not doing what its manifest asked. */
+    data class NodeReport(val id: String, val nodeIndex: Int, val state: NodeState, val reason: NodeReason)
+
+    /**
+     * Every node of the active lens that is not ready, beside how many
+     * diagnostics could not be recorded. An empty list with a non-zero lost
+     * count is a lens that degraded unrecordably, not a lens that is fine.
+     */
+    fun nodeReports(): Pair<List<NodeReport>, Int> {
+        // Two header words plus three per node, read in one crossing.
+        val room = 2 + 3 * 64
+        val buf = ByteBuffer.allocateDirect(room * 4).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeNodeReports(handle, buf, room) != 0) return Pair(emptyList(), 0)
+        val words = buf.asIntBuffer()
+        val count = words.get(0)
+        val lost = words.get(1)
+        val kept = minOf(count, 64)
+        val idBuf = ByteBuffer.allocateDirect(256)
+        val lenBuf = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        val out = ArrayList<NodeReport>(kept)
+        for (at in 0 until kept) {
+            val nodeIndex = words.get(2 + at * 3)
+            val state = words.get(3 + at * 3)
+            val reason = words.get(4 + at * 3)
+            var id = ""
+            idBuf.clear()
+            lenBuf.clear()
+            if (Gosslens.nativeNodeReportId(handle, at, idBuf, idBuf.capacity(), lenBuf) == 0) {
+                val len = lenBuf.asIntBuffer().get(0)
+                if (len in 1..idBuf.capacity()) {
+                    val bytes = ByteArray(len)
+                    idBuf.position(0)
+                    idBuf.get(bytes, 0, len)
+                    id = String(bytes, Charsets.UTF_8)
+                }
+            }
+            out.add(
+                NodeReport(
+                    id,
+                    nodeIndex,
+                    NodeState.entries.getOrElse(state) { NodeState.FAILED },
+                    NodeReason.entries.getOrElse(reason) { NodeReason.NONE },
+                ),
+            )
+        }
+        return Pair(out, lost)
     }
 
     data class ChainReport(val ready: Int, val total: Int, val beauty: Boolean)

@@ -18,6 +18,7 @@ pub const ResourceDesc = pool.ResourceDesc;
 pub const ResultSlot = analysis.ResultSlot;
 pub const DegradeLevel = degrade.Level;
 pub const DegradeController = degrade.Controller;
+pub const DegradePlan = degrade.Plan;
 
 test {
     _ = topology;

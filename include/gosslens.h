@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 109u
+#define GOSS_ABI_MINOR 112u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -78,6 +78,11 @@ typedef struct goss_session goss_session;
 
 /* How the pipeline is currently degraded. Levels only trade effect quality;
  * capture and preview never stop. */
+/* What the engine is currently doing, not a label it reports. FULL runs
+ * every analysis every frame; REDUCED_ML_CADENCE every other frame, reusing
+ * the last result between; SEGMENTATION_OFF stops feeding the segmenter, so
+ * mask channels take their zero-mask behaviour; BEAUTY_SIMPLIFIED keeps
+ * smoothing and tone; PASSTHROUGH draws the camera straight through. */
 typedef enum goss_degrade_level {
     GOSS_DEGRADE_FULL = 0,
     GOSS_DEGRADE_REDUCED_ML_CADENCE = 1,
@@ -382,6 +387,36 @@ typedef struct goss_world_light {
 
 /* Guided-capture progress returned by goss_session_capture_view. Layout: 24
  * bytes. */
+/* What a lens node is doing, as against what its manifest asked for. */
+typedef enum goss_node_state {
+    GOSS_NODE_READY = 0,     /* the author got what they wrote */
+    GOSS_NODE_DEGRADED = 1,  /* the node draws, without something it named */
+    GOSS_NODE_FAILED = 2,    /* the node draws nothing */
+} goss_node_state;
+
+/* Why a node is not ready. A host can retry a missing asset and can only
+ * apologise for an unsupported model, so the set is fixed and branchable. */
+typedef enum goss_node_reason {
+    GOSS_NODE_REASON_NONE = 0,
+    GOSS_NODE_REASON_OUT_OF_MEMORY = 1,
+    GOSS_NODE_REASON_ASSET_MISSING = 2,
+    GOSS_NODE_REASON_ASSET_MALFORMED = 3,
+    GOSS_NODE_REASON_ASSET_TOO_LARGE = 4,
+    GOSS_NODE_REASON_SHADER_MISSING = 5,
+    GOSS_NODE_REASON_SHADER_LINK_FAILED = 6,
+    GOSS_NODE_REASON_MODEL_REJECTED = 7,
+    GOSS_NODE_REASON_MODEL_UNSUPPORTED = 8,
+    GOSS_NODE_REASON_CAPABILITY_UNAVAILABLE = 9,
+} goss_node_reason;
+
+/* One node's diagnostic. node_index is the node's index in the session graph,
+ * and the key goss_session_node_report_id resolves to a manifest id. */
+typedef struct goss_node_report {
+    uint32_t node_index;
+    uint32_t state;  /* goss_node_state */
+    uint32_t reason; /* goss_node_reason */
+} goss_node_report;
+
 typedef struct goss_capture_guidance {
     uint32_t covered;     /* target viewpoints covered so far */
     uint32_t total;       /* total target viewpoints in the scan */
@@ -531,7 +566,10 @@ goss_status goss_session_submit_hardware_buffer(goss_session *session, const gos
 
 /* Graph thread. Reports one finished frame: measured whole-pipeline time
  * plus current thermal pressure. Returns the degradation level in effect
- * for the next frame. */
+ * for the next frame. This is the only input that walks the ladder, and the
+ * level changes what the engine does rather than only what it reports: each
+ * rung lengthens the analysis strides, and the bottom rung stops the lens and
+ * beauty chains. Capture and recording keep full frame rate at every rung. */
 goss_degrade_level goss_session_report_frame(goss_session *session, uint32_t frame_time_us, goss_thermal thermal);
 
 /* Graph thread. The level currently in effect. */
@@ -735,6 +773,22 @@ goss_status goss_session_read_reconstruction(goss_session *session, float *out, 
  * a moment captured on one client opens on another. count is gaussians, not
  * floats. */
 goss_status goss_session_write_reconstruction(goss_session *session, const float *gaussians, uint32_t count);
+
+/* Graph thread. How many nodes of the active lens are not doing what the
+ * manifest asked, and how many diagnostics could not be recorded at all. A zero
+ * count beside a non-zero lost count means the lens degraded in ways the session
+ * could not write down, which is not the same as a lens that is fine. Either out
+ * pointer may be null. */
+goss_status goss_session_node_report_count(goss_session *session, uint32_t *out_count, uint32_t *out_lost);
+
+/* Graph thread. One node's diagnostic by position in the report list (not by
+ * node index). GOSS_INVALID_ARGUMENT past the end. */
+goss_status goss_session_node_report_at(goss_session *session, uint32_t index, goss_node_report *out_report);
+
+/* Graph thread. The manifest id of the node a report names, so a host can say
+ * which node rather than which index. A null out reports the length to size for;
+ * GOSS_AGAIN when the active lens no longer carries that node. */
+goss_status goss_session_node_report_id(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len);
 
 /* Submits one exposure of an HDR bracket, fed only to bracket-source
  * temporal.fuse nodes (the live camera feeds the rest); the fusion publishes

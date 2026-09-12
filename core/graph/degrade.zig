@@ -26,6 +26,46 @@ pub const Level = enum(u8) {
     }
 };
 
+/// What each rung actually stops. A stride of N runs that analysis on one
+/// frame in N and reuses the last published result in between; zero stops it.
+/// The camera path is untouched at every rung, so the preview keeps drawing
+/// and a recording keeps every frame while the work stacked on top thins out.
+pub const Plan = struct {
+    face_stride: u8,
+    hand_stride: u8,
+    pose_stride: u8,
+    segmentation_stride: u8,
+    ml_stride: u8,
+    beauty: Beauty,
+    effects: Effects,
+
+    /// full runs the whole beauty chain, core keeps smoothing and tone and
+    /// drops makeup, lashes, reshape and retouch, off bypasses the bridge
+    /// without tearing it down so recovery is a flag rather than a re-init.
+    pub const Beauty = enum { full, core, off };
+    /// off skips the lens chain walk and draws the camera straight through.
+    pub const Effects = enum { full, off };
+
+    /// True when an analysis on this stride runs on the given frame.
+    pub fn runs(stride: u8, frame_index: u64) bool {
+        if (stride == 0) return false;
+        return frame_index % stride == 0;
+    }
+};
+
+/// The plan a rung carries. Strides lengthen before anything switches off, and
+/// the segmentation mask is the first whole capability to go because its
+/// degrade (a zero mask) is already a defined, tested behaviour.
+pub fn planFor(level: Level) Plan {
+    return switch (level) {
+        .full => .{ .face_stride = 1, .hand_stride = 1, .pose_stride = 1, .segmentation_stride = 1, .ml_stride = 1, .beauty = .full, .effects = .full },
+        .reduced_ml_cadence => .{ .face_stride = 2, .hand_stride = 2, .pose_stride = 2, .segmentation_stride = 2, .ml_stride = 2, .beauty = .full, .effects = .full },
+        .segmentation_off => .{ .face_stride = 2, .hand_stride = 2, .pose_stride = 2, .segmentation_stride = 0, .ml_stride = 3, .beauty = .full, .effects = .full },
+        .beauty_simplified => .{ .face_stride = 3, .hand_stride = 3, .pose_stride = 3, .segmentation_stride = 0, .ml_stride = 4, .beauty = .core, .effects = .full },
+        .passthrough => .{ .face_stride = 0, .hand_stride = 0, .pose_stride = 0, .segmentation_stride = 0, .ml_stride = 0, .beauty = .off, .effects = .off },
+    };
+}
+
 pub const ThermalState = enum(u8) { nominal, fair, serious, critical };
 
 pub const Inputs = struct {
@@ -201,4 +241,33 @@ test "the ladder walks all the way down and stops" {
     _ = stepMany(&c, slow, 100);
     try t.expectEqual(Level.passthrough, c.level);
     try t.expect(stepMany(&c, slow, 100) == null);
+}
+
+test "the plan thins analysis before it stops any of it" {
+    const full = planFor(.full);
+    try t.expectEqual(@as(u8, 1), full.face_stride);
+    try t.expectEqual(Plan.Beauty.full, full.beauty);
+    try t.expectEqual(Plan.Effects.full, full.effects);
+
+    const reduced = planFor(.reduced_ml_cadence);
+    try t.expect(reduced.face_stride > full.face_stride);
+    try t.expect(reduced.segmentation_stride > 0);
+
+    try t.expectEqual(@as(u8, 0), planFor(.segmentation_off).segmentation_stride);
+    try t.expectEqual(Plan.Beauty.core, planFor(.beauty_simplified).beauty);
+
+    const bottom = planFor(.passthrough);
+    try t.expectEqual(Plan.Beauty.off, bottom.beauty);
+    try t.expectEqual(Plan.Effects.off, bottom.effects);
+    try t.expectEqual(@as(u8, 0), bottom.face_stride);
+}
+
+test "a stride runs one frame in n and a zero stride never runs" {
+    try t.expect(Plan.runs(1, 0));
+    try t.expect(Plan.runs(1, 7));
+    try t.expect(Plan.runs(2, 0));
+    try t.expect(!Plan.runs(2, 1));
+    try t.expect(Plan.runs(2, 2));
+    try t.expect(!Plan.runs(0, 0));
+    try t.expect(!Plan.runs(0, 9));
 }

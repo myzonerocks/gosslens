@@ -99,7 +99,8 @@ pub const Renderer = struct {
             _ = self;
         }
 
-        pub fn uploadCopy(self: *PersistentTexture, width: u16, height: u16, format: u32, data: [*]const u8, stride: u32) TextureHandle {
+        pub fn uploadCopy(self: *PersistentTexture, r: *Renderer, width: u16, height: u16, format: u32, data: [*]const u8, stride: u32) TextureHandle {
+            _ = r;
             _ = width;
             _ = height;
             _ = format;
@@ -159,7 +160,8 @@ pub const Renderer = struct {
         width: u16 = 0,
         height: u16 = 0,
 
-        pub fn upload(self: *DynamicMask, width: u16, height: u16, mask: []const u8) TextureHandle {
+        pub fn upload(self: *DynamicMask, r: *Renderer, width: u16, height: u16, mask: []const u8) TextureHandle {
+            _ = r;
             _ = mask;
             self.width = width;
             self.height = height;
@@ -182,7 +184,8 @@ pub const Renderer = struct {
         return .{};
     }
 
-    pub fn updateDynamicBgraTexture(handle: TextureHandle, width: u16, height: u16, bgra: []const u8) void {
+    pub fn updateDynamicBgraTexture(r: *Renderer, handle: TextureHandle, width: u16, height: u16, bgra: []const u8) void {
+        _ = r;
         _ = handle;
         _ = width;
         _ = height;
@@ -1089,7 +1092,8 @@ pub const Renderer = struct {
         _ = positions;
     }
 
-    pub fn updateParticleMeshFaded(mesh: ParticleMesh, faded: []const f32) void {
+    pub fn updateParticleMeshFaded(r: *Renderer, mesh: ParticleMesh, faded: []const f32) void {
+        _ = r;
         _ = mesh;
         _ = faded;
     }

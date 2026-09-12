@@ -289,6 +289,46 @@ export fn Java_com_gosslens_Gosslens_nativeWriteReconstruction(env: *JniEnv, cls
     return @intFromEnum(abi.goss_session_write_reconstruction(sessionFromHandle(session), @ptrCast(@alignCast(bytes)), @intCast(count)));
 }
 
+/// The node diagnostics, flattened into one direct buffer so Kotlin reads the
+/// whole report in one crossing rather than three per node: count and lost
+/// first, then three u32 per node (graph index, state, reason).
+export fn Java_com_gosslens_Gosslens_nativeNodeReports(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject, capacity_u32: i32) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    if (capacity_u32 < 2) return @intFromEnum(abi.Status.invalid_argument);
+    const out: [*]align(1) u32 = @ptrCast(out_bytes);
+    var count: u32 = 0;
+    var lost: u32 = 0;
+    const status = abi.goss_session_node_report_count(sessionFromHandle(session), &count, &lost);
+    if (status != .ok) return @intFromEnum(status);
+    out[0] = count;
+    out[1] = lost;
+    const room = (@as(u32, @intCast(capacity_u32)) - 2) / 3;
+    const writing = @min(count, room);
+    var at: u32 = 0;
+    while (at < writing) : (at += 1) {
+        var report: abi.NodeReport = undefined;
+        if (abi.goss_session_node_report_at(sessionFromHandle(session), at, &report) != .ok) break;
+        out[2 + at * 3] = report.node_index;
+        out[3 + at * 3] = report.state;
+        out[4 + at * 3] = report.reason;
+    }
+    return @intFromEnum(abi.Status.ok);
+}
+
+/// One node's manifest id as bytes, so Kotlin can name the node a report means.
+export fn Java_com_gosslens_Gosslens_nativeNodeReportId(env: *JniEnv, cls: jobject, session: i64, index: i32, out_buffer: jobject, capacity: i32, len_buffer: jobject) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const len_bytes = getDirectBufferAddress(env, len_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    if (index < 0 or capacity < 0) return @intFromEnum(abi.Status.invalid_argument);
+    var written: usize = 0;
+    const status = abi.goss_session_node_report_id(sessionFromHandle(session), @intCast(index), @ptrCast(out_bytes), @intCast(capacity), &written);
+    const out_len: *align(1) u32 = @ptrCast(len_bytes);
+    out_len.* = @intCast(written);
+    return @intFromEnum(status);
+}
+
 export fn Java_com_gosslens_Gosslens_nativeBeatMap(env: *JniEnv, cls: jobject, engine: i64, samples_buffer: jobject, frame_count: i32, sample_rate: i32, channels: i32, out_buffer: jobject, capacity: i32, count_buffer: jobject) i32 {
     _ = cls;
     const samples = getDirectBufferAddress(env, samples_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);

@@ -132,7 +132,7 @@ pub const abi_major: u16 = 0;
 // The frozen ABI surface lives here so the version and the dump tool read
 // one list. A new export adds a line to abi_functions, its header decl, and
 // its body - nothing else.
-pub const abi_surface_types = .{ FrameDesc, Landmarks, EngineConfig, SessionConfig, RendererDesc, FramePlanes, FaceResult, HandResult, PoseResult, LensSignals, CameraControls, RecordingPolicy, CaptureUiIntent, CaptionSegment, CaptureGuidance };
+pub const abi_surface_types = .{ FrameDesc, Landmarks, EngineConfig, SessionConfig, RendererDesc, FramePlanes, FaceResult, HandResult, PoseResult, LensSignals, CameraControls, RecordingPolicy, CaptureUiIntent, CaptionSegment, CaptureGuidance, NodeReport };
 
 pub const abi_functions = [_][]const u8{
     "uint32_t goss_abi_version(void)",
@@ -306,6 +306,9 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_chain_report(goss_session *session, uint32_t *out_ready, uint32_t *out_total, uint32_t *out_beauty)",
     "goss_status goss_session_read_reconstruction(goss_session *session, float *out, uint32_t capacity, uint32_t *out_count)",
     "goss_status goss_session_write_reconstruction(goss_session *session, const float *gaussians, uint32_t count)",
+    "goss_status goss_session_node_report_count(goss_session *session, uint32_t *out_count, uint32_t *out_lost)",
+    "goss_status goss_session_node_report_at(goss_session *session, uint32_t index, goss_node_report *out_report)",
+    "goss_status goss_session_node_report_id(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)",
 };
 
 // The minor advances from the surface, never by hand: a new op lengthens
@@ -715,6 +718,24 @@ pub const Session = struct {
 
     engine: *Engine,
     controller: graph.DegradeController,
+    /// The rung latched at the end of the last render, so every stage of one
+    /// host tick (analysis, beauty, chain) reads the same level and a frame is
+    /// never half degraded.
+    frame_level: graph.DegradeLevel = .full,
+    /// Rendered frames so far, the counter the plan's strides divide.
+    frame_index: u64 = 0,
+    /// Frames actually handed to an analysis worker, counted per modality, so
+    /// a rung's stride is measurable rather than asserted.
+    analysis_submits: AnalysisCounts = .{},
+    /// Per-node diagnostics for the active lens: which nodes are not doing what
+    /// the manifest asked, and why. Cleared when a lens is activated or dropped.
+    node_reports: std.ArrayListUnmanaged(NodeReport) = .empty,
+    /// Diagnostics that could not even be recorded, so a caller can tell an
+    /// empty report from an unmeasured one.
+    node_reports_lost: u32 = 0,
+    /// The beauty tier last pushed into the native chain, so the six amounts
+    /// are rewritten when the rung changes and not on every frame.
+    beauty_tier_pushed: graph.DegradePlan.Beauty = .full,
     current: ?CurrentFrame = null,
     /// Zero-copy camera ingress rebinds these every submit rather than
     /// creating a fresh bgfx handle per frame - see
@@ -1984,6 +2005,37 @@ fn chainHasOccluder(s: *const Session) bool {
 /// running this frame: an active lens with beauty nodes, or any direct
 /// nonzero setBeauty amount - the same two sources webBeautyActive
 /// already honors, so a slider works with no lens active on native too.
+/// The amount an effect actually gets at the current rung. The core tier
+/// keeps smoothing and tone, the cheapest half of the chain, and zeroes
+/// reshape and makeup; off zeroes everything without tearing the bridge down,
+/// so coming back up is a rewrite of six floats rather than a re-init.
+fn tieredBeautyAmount(tier: graph.DegradePlan.Beauty, slot: usize, amount: f32) f32 {
+    return switch (tier) {
+        .full => amount,
+        .core => if (slot == @intFromEnum(beauty.Effect.smooth) or slot == @intFromEnum(beauty.Effect.whiten)) amount else 0.0,
+        .off => 0.0,
+    };
+}
+
+/// Rewrites the six host-set amounts through the current rung's tier. Called
+/// when the rung moves; a lens reapplies its own effects on its next tick, so
+/// this does not need to know about them.
+fn pushBeautyAmounts(s: *Session) void {
+    const chain = s.beauty_chain orelse return;
+    const tier = graph.degrade.planFor(s.frame_level).beauty;
+    for (s.beauty_amounts, 0..) |amount, slot| {
+        beauty.set(chain, @enumFromInt(@as(i32, @intCast(slot))), tieredBeautyAmount(tier, slot, amount));
+    }
+    s.beauty_tier_pushed = tier;
+}
+
+/// The web chain reads its amounts straight out of the session every frame,
+/// so the tier is applied at the read instead of at a push.
+fn webBeautyAmount(s: *const Session, slot: runtime.EffectSlot) f32 {
+    const at = @intFromEnum(slot);
+    return tieredBeautyAmount(graph.degrade.planFor(s.frame_level).beauty, at, s.web_beauty_amounts[at]);
+}
+
 fn beautyActive(s: *const Session) bool {
     if (s.beauty_chain == null) return false;
     if (s.active_lens) |lens| {
@@ -2022,6 +2074,7 @@ fn beautyActive(s: *const Session) bool {
 /// state, same as blend.pass's mask.
 fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, width: u16, height: u16, rotation: u32, mirror: bool, input_texture: render.TextureHandle) render.TextureHandle {
     const chain = s.beauty_chain.?;
+    if (graph.degrade.planFor(s.frame_level).beauty != s.beauty_tier_pushed) pushBeautyAmounts(s);
 
     // Android's GLES fallback has no route from the composited buffer
     // back into bgfx (the Metal-view bridge is apple-only, the
@@ -2121,12 +2174,12 @@ fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, w
 /// aren't wired (a mesh draw, not a full-screen pass like these two).
 fn webBeautyActive(s: *const Session) bool {
     if (!is_web) return false;
-    const smooth = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.smooth)];
-    const whiten = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.whiten)];
-    const thin_face = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.thin_face)];
-    const big_eye = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.big_eye)];
-    const lipstick = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.lipstick)];
-    const blush = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.blush)];
+    const smooth = webBeautyAmount(s, .smooth);
+    const whiten = webBeautyAmount(s, .whiten);
+    const thin_face = webBeautyAmount(s, .thin_face);
+    const big_eye = webBeautyAmount(s, .big_eye);
+    const lipstick = webBeautyAmount(s, .lipstick);
+    const blush = webBeautyAmount(s, .blush);
     const luts_loaded = for (s.web_beauty_lut_textures) |slot| {
         if (slot == null) break false;
     } else true;
@@ -2191,8 +2244,8 @@ fn applyWebBeautyChain(r: *render.Renderer, s: *Session, next_view_id: *u8, widt
         break :blk true;
     };
 
-    const thin_face = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.thin_face)];
-    const big_eye = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.big_eye)];
+    const thin_face = webBeautyAmount(s, .thin_face);
+    const big_eye = webBeautyAmount(s, .big_eye);
     if (has_face and (thin_face > 0.0 or big_eye > 0.0)) {
         const view_id = next_view_id.*;
         next_view_id.* += 1;
@@ -2202,8 +2255,8 @@ fn applyWebBeautyChain(r: *render.Renderer, s: *Session, next_view_id: *u8, widt
         current = s.web_beauty_reshape_target.?.texture;
     }
 
-    const smooth = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.smooth)];
-    const whiten_requested = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.whiten)];
+    const smooth = webBeautyAmount(s, .smooth);
+    const whiten_requested = webBeautyAmount(s, .whiten);
     const luts_loaded = for (s.web_beauty_lut_textures) |slot| {
         if (slot == null) break false;
     } else true;
@@ -2248,8 +2301,8 @@ fn applyWebBeautyChain(r: *render.Renderer, s: *Session, next_view_id: *u8, widt
         current = s.web_beauty_blur_h_target.?.texture;
     }
 
-    const lipstick = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.lipstick)];
-    const blush = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.blush)];
+    const lipstick = webBeautyAmount(s, .lipstick);
+    const blush = webBeautyAmount(s, .blush);
     const lipstick_ready = lipstick > 0.0 and s.web_beauty_lipstick_texture != null;
     const blush_ready = blush > 0.0 and s.web_beauty_blush_texture != null;
     if (has_face and (lipstick_ready or blush_ready)) {
@@ -2853,8 +2906,20 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         if (ready) ready_count += 1;
     }
     s.chain_ready = @intCast(ready_count);
-    const beauty_active = anyBeautyActive(s);
+    // The rung this frame runs at. At passthrough the chain is skipped and the
+    // camera draws straight through; a rung above it keeps every effect and
+    // only thins the beauty chain. Capture and recording read whatever this
+    // produces, so they keep their full frame rate at every rung.
+    const plan = graph.degrade.planFor(s.frame_level);
+    const beauty_active = plan.beauty != .off and anyBeautyActive(s);
     s.chain_beauty = beauty_active;
+    // At the bottom rung nothing in the chain draws. The readiness reported
+    // above stays truthful; the count the render decisions use goes to zero so
+    // the layout, brush, capture and recording work below still runs over the
+    // plain picture and every frame still reaches the file.
+    const chain_order = if (plan.effects == .off) s.chain_order[0..0] else s.chain_order;
+    if (plan.effects == .off) ready_count = 0;
+
     const capture_out_width: u16 = if (s.capture_requested and s.capture_res_width != 0) s.capture_res_width else @intCast(r.width);
     const capture_out_height: u16 = if (s.capture_requested and s.capture_res_height != 0) s.capture_res_height else @intCast(r.height);
     if (s.capture_requested) try ensureCaptureTarget(e, capture_out_width, capture_out_height);
@@ -2916,7 +2981,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     // of it here at chain start before any content draws over it. Only a lens
     // carrying an occluder node pays for the copy, so nothing else shifts.
     if (chainHasOccluder(s)) {
-        ensureOccluderFrame(s, width, height) catch {};
+        ensureOccluderFrame(s, width, height) catch noteChainKind(s, .occluder, .failed, .out_of_memory);
         if (s.occluder_frame_target) |oft| {
             const seed_view = next_view_id;
             next_view_id += 1;
@@ -2930,7 +2995,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     // before any pass edits the chain - an object-move lens inpaints the subject
     // out of place yet still cuts it from this copy to draw at a new rect.
     if (s.sprite_cutouts.count() > 0) {
-        ensureCutoutSource(s, width, height) catch {};
+        ensureCutoutSource(s, width, height) catch noteChainKind(s, .sprite, .degraded, .out_of_memory);
         if (s.cutout_source_target) |cst| {
             const seed_view = next_view_id;
             next_view_id += 1;
@@ -2949,7 +3014,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
 
     var drawn: usize = 0;
     var next_slot: usize = 1;
-    for (s.chain_order) |entry| {
+    for (chain_order) |entry| {
         // Skip a node a hide/swap_subgraph action hid, matching the ready-count
         // pass above so drawn stays in step with ready_count for is_final.
         if (s.active_lens) |*lens| {
@@ -3708,7 +3773,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 // hair_matte channel the passes below sample. No coarse hair
                 // clears the channel, so a hair pass keyed to it fades out.
                 if (s.segmentation_class_textures[manifest.hair_channel]) |coarse| {
-                    ensureHairMatteTarget(s, width, height) catch {};
+                    ensureHairMatteTarget(s, width, height) catch noteNode(s, entry.graph_index, .failed, .out_of_memory);
                     if (s.hair_matte_target) |hmt| {
                         const refine_view = next_view_id;
                         next_view_id += 1;
@@ -3984,7 +4049,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     const gpos = if (sw.reconstruction) s.recon_gaussians.items else sw.positions;
                     if (frameStage(s, sw.count * 6 * 12)) |verts| {
                         writeSplatGaussians(gpos, sw.count, sw.order, verts);
-                        render.Renderer.updateParticleMeshFaded(mesh, verts);
+                        r.updateParticleMeshFaded(mesh, verts);
                     }
                     switch (sw.placement) {
                         .overlay => r.submitSplats(blit_view, mesh_view, input_texture, mesh, aspect_ratio, null),
@@ -3998,7 +4063,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                             // Draw the cloud into a dedicated scene target, then
                             // composite the frame's subject over it by the subject
                             // mask, so the splats sit behind as a 3D backdrop.
-                            ensureSplatScene(s, @intCast(rect_w), @intCast(rect_h)) catch {};
+                            ensureSplatScene(s, @intCast(rect_w), @intCast(rect_h)) catch noteNode(s, entry.graph_index, .failed, .out_of_memory);
                             const scene_target = s.splat_scene_target orelse {
                                 r.submitSplats(blit_view, mesh_view, input_texture, mesh, aspect_ratio, null);
                                 break :background;
@@ -4026,7 +4091,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     // as a 3D cloud over the passed-through frame.
                     if (frameStage(s, sw.count * 6 * 12)) |verts| {
                         writeSplatBillboards(sw.positions, sw.count, sw.colored, verts);
-                        render.Renderer.updateParticleMeshFaded(mesh, verts);
+                        r.updateParticleMeshFaded(mesh, verts);
                     }
                     const particle_params: [4]f32 = .{ sw.point / @as(f32, @floatFromInt(rect_w)), sw.point / @as(f32, @floatFromInt(rect_h)), 1.0, 0.0 };
                     const particle_fx: [4]f32 = .{ 1, 1, 0, 0 };
@@ -4476,11 +4541,11 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                             if (has_trail) {
                                 if (frameStage(s, sys.trailVertexCount() * 12)) |verts| {
                                     sys.writeTrailBillboards(verts);
-                                    render.Renderer.updateParticleMeshFaded(particle_mesh, verts);
+                                    r.updateParticleMeshFaded(particle_mesh, verts);
                                 }
                             } else if (frameStage(s, count * 6 * 12)) |verts| {
                                 sys.writeBillboards(verts);
-                                render.Renderer.updateParticleMeshFaded(particle_mesh, verts);
+                                r.updateParticleMeshFaded(particle_mesh, verts);
                             }
                         } else {
                             if (frameStage(s, count * 3)) |verts| {
@@ -5134,6 +5199,7 @@ pub fn destroySession(session: *Session) void {
     if (session.inpaint_prev_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.inpaint_coherent_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.hair_matte_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    session.node_reports.deinit(session.engine.gpa);
     session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
     session.mesh_face_textures.deinit(session.engine.gpa);
@@ -5608,6 +5674,14 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         e.recording.?.abortFrame(frame);
     }
     _ = r.frame();
+    if (session) |s| {
+        // Latch for the next tick: analysis, beauty and the chain all read one
+        // level for a whole host frame rather than shifting under each other.
+        // The level itself only ever moves in report_frame, so a frame renders
+        // at exactly one rung and the rung cannot shift mid-frame.
+        s.frame_level = s.controller.level;
+        s.frame_index +%= 1;
+    }
     return .ok;
 }
 
@@ -6858,10 +6932,9 @@ pub export fn goss_session_submit_source_frame_rgba_copy(session: ?*Session, nam
     if (!validDims(d.width, d.height)) return .invalid_argument;
     if (d.pixel_format != pixel_format_bgra8 and d.pixel_format != pixel_format_rgba8) return .invalid_argument;
     const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
-    _ = r;
     const idx = findSource(s, nm[0..name_len]) orelse return .again;
     const format: u32 = if (d.pixel_format == pixel_format_bgra8) render.c.BGFX_TEXTURE_FORMAT_BGRA8 else render.c.BGFX_TEXTURE_FORMAT_RGBA8;
-    _ = s.source_tex[idx].uploadCopy(@intCast(d.width), @intCast(d.height), format, rgba_ptr, stride);
+    _ = s.source_tex[idx].uploadCopy(r, @intCast(d.width), @intCast(d.height), format, rgba_ptr, stride);
     s.source_dims[idx] = .{ @intCast(d.width), @intCast(d.height) };
     s.source_has_frame[idx] = true;
     if (s.source_segmenter[idx]) |seg| feedSourceSegmenter(s, seg, d, rgba_ptr, stride);
@@ -7697,6 +7770,86 @@ pub export fn goss_session_submit_hardware_buffer(session: ?*Session, desc: ?*co
     return .ok;
 }
 
+/// What a lens node is actually doing, as against what its manifest asked for.
+/// ready means the author got what they wrote; degraded means the node draws but
+/// without something it named; failed means it draws nothing.
+pub const NodeState = enum(u32) { ready = 0, degraded = 1, failed = 2 };
+
+/// Why a node is not ready. One fixed set, because a caller has to be able to
+/// branch on it: a host can retry a missing asset, and can only apologise for an
+/// unsupported model.
+pub const NodeReason = enum(u32) {
+    none = 0,
+    out_of_memory = 1,
+    asset_missing = 2,
+    asset_malformed = 3,
+    asset_too_large = 4,
+    shader_missing = 5,
+    shader_link_failed = 6,
+    model_rejected = 7,
+    model_unsupported = 8,
+    capability_unavailable = 9,
+};
+
+/// One node's diagnostic, POD across the ABI.
+pub const NodeReport = extern struct {
+    /// The node's index in the session graph, and the key node_report_id reads.
+    node_index: u32,
+    state: u32,
+    reason: u32,
+};
+
+/// Records that a node is not doing what its manifest asked. Every best-effort
+/// path in activation calls this instead of swallowing its error, so a host
+/// learns which node degraded and why. The worst state a node reaches wins, so
+/// one node reports once.
+fn noteNode(s: *Session, graph_index: graph.NodeIndex, state: NodeState, reason: NodeReason) void {
+    const index: u32 = graph_index;
+    for (s.node_reports.items) |*existing| {
+        if (existing.node_index != index) continue;
+        if (@intFromEnum(state) > existing.state) {
+            existing.state = @intFromEnum(state);
+            existing.reason = @intFromEnum(reason);
+        }
+        return;
+    }
+    s.node_reports.append(s.engine.gpa, .{
+        .node_index = index,
+        .state = @intFromEnum(state),
+        .reason = @intFromEnum(reason),
+    }) catch {
+        // Even the diagnostic could not be stored. Counting that is the
+        // difference between a report that is clean and one that is incomplete.
+        s.node_reports_lost +|= 1;
+    };
+}
+
+/// The reason an allocation failure maps to, used by the parameter stores whose
+/// only way to fail is running out of memory.
+fn noteOom(s: *Session, graph_index: graph.NodeIndex) void {
+    noteNode(s, graph_index, .degraded, .out_of_memory);
+}
+
+/// Records the same diagnostic against every chain node of one kind, for a
+/// resource the whole kind shares: when the occluder's frame copy cannot be
+/// made, every occluder node in the lens is the thing that stops working, and
+/// naming them is more use to a host than naming the buffer.
+fn noteChainKind(s: *Session, kind: runtime.PassKind, state: NodeState, reason: NodeReason) void {
+    for (s.chain_order) |entry| {
+        if (entry.kind == kind) noteNode(s, entry.graph_index, state, reason);
+    }
+}
+
+/// One count per analysis modality, the measurable side of the degradation
+/// plan: a rung that halves a stride halves the count over the same frames.
+pub const AnalysisCounts = struct {
+    face: u64 = 0,
+    hand: u64 = 0,
+    pose: u64 = 0,
+    segmentation: u64 = 0,
+    ml: u64 = 0,
+};
+
 pub export fn goss_session_report_frame(session: ?*Session, frame_time_us: u32, thermal: c_int) c_int {
     const s = session orelse return 0;
     _ = s.controller.step(.{ .frame_time_us = frame_time_us, .thermal = thermalFromC(thermal) });
@@ -7904,38 +8057,58 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
     };
     const range: math.color.Range = if (d.color_range == 1) .full else .video;
     const conversion = math.color.yuvToRgb(standard, range);
-    if (s.face_tracking) |worker| {
-        tracking.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    // The rung the last render latched decides how much analysis this frame
+    // carries. A worker skipped here keeps publishing its last result, so the
+    // render reads a slightly older landmark set instead of stalling on one.
+    const plan = graph.degrade.planFor(s.frame_level);
+    const at = s.frame_index;
+    if (graph.DegradePlan.runs(plan.face_stride, at)) {
+        if (s.face_tracking) |worker| {
+            s.analysis_submits.face += 1;
+            tracking.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+        }
     }
-    if (s.hand_tracking) |worker| {
-        tracking.hand_worker.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    if (graph.DegradePlan.runs(plan.hand_stride, at)) {
+        if (s.hand_tracking) |worker| {
+            s.analysis_submits.hand += 1;
+            tracking.hand_worker.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+        }
     }
-    if (s.pose_tracking) |worker| {
-        tracking.pose_worker.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    if (graph.DegradePlan.runs(plan.pose_stride, at)) {
+        if (s.pose_tracking) |worker| {
+            s.analysis_submits.pose += 1;
+            tracking.pose_worker.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+        }
     }
-    if (s.segmentation_worker) |worker| {
-        segmentation.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    if (graph.DegradePlan.runs(plan.segmentation_stride, at)) {
+        if (s.segmentation_worker) |worker| {
+            s.analysis_submits.segmentation += 1;
+            segmentation.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+        }
+        if (s.scene_worker) |worker| {
+            segmentation.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+        }
     }
-    if (s.scene_worker) |worker| {
-        segmentation.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
-    }
-    for (s.ml_workers.items) |mw| {
-        ml_infer.submitNv12(mw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
-    }
-    for (s.temporal_workers.items) |tw| {
-        // A bracket-source fusion is fed only by the frame-bracket op; the live
-        // camera feeds the rest, one distinct frame per submit into the ring.
-        if (tw.is_bracket) continue;
-        ml_infer.temporalSubmitNv12(tw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
-    }
-    for (s.diffusion_workers.items) |dw| {
-        diffusion.submitNv12(dw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
-    }
-    for (s.splat_workers.items) |sw| {
-        // A selfie avatar's model runs once off a submitted still, not the live
-        // camera, so the per-frame feed skips it.
-        if (sw.selfie) continue;
-        if (sw.worker) |w| ml_infer.submitNv12(w, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    if (graph.DegradePlan.runs(plan.ml_stride, at)) {
+        for (s.ml_workers.items) |mw| {
+            s.analysis_submits.ml += 1;
+            ml_infer.submitNv12(mw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+        }
+        for (s.temporal_workers.items) |tw| {
+            // A bracket-source fusion is fed only by the frame-bracket op; the live
+            // camera feeds the rest, one distinct frame per submit into the ring.
+            if (tw.is_bracket) continue;
+            ml_infer.temporalSubmitNv12(tw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+        }
+        for (s.diffusion_workers.items) |dw| {
+            diffusion.submitNv12(dw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+        }
+        for (s.splat_workers.items) |sw| {
+            // A selfie avatar's model runs once off a submitted still, not the live
+            // camera, so the per-frame feed skips it.
+            if (sw.selfie) continue;
+            if (sw.worker) |w| ml_infer.submitNv12(w, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+        }
     }
     return .ok;
 }
@@ -8151,9 +8324,9 @@ pub fn firstSpriteEffectiveRect(session: *Session) ?[4]f32 {
 /// are class textures.
 pub fn injectMaskChannel(session: *Session, channel: usize, mask: *const [segmentation.mask_len]f32) void {
     if (channel == 0) {
-        session.segmentation_texture = uploadMaskFromF32(&session.seg_tex, mask);
+        session.segmentation_texture = uploadMaskFromF32(sessionRenderer(session) orelse return, &session.seg_tex, mask);
     } else if (channel < manifest.mask_channels.len) {
-        session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
+        session.segmentation_class_textures[channel] = uploadMaskFromF32(sessionRenderer(session) orelse return, &session.class_tex[channel], mask);
     }
 }
 
@@ -8526,6 +8699,42 @@ pub export fn goss_session_reset_capture(session: ?*Session) Status {
 /// What the last drawn frame did with the active lens: the stages ready to draw, the stages it
 /// has, and whether the beauty bridge ran. Zero ready over a non-zero total is a lens the engine
 /// activated and is drawing nothing of.
+/// How many nodes of the active lens are not doing what the manifest asked, and
+/// how many diagnostics could not be recorded at all. A zero count with a
+/// non-zero lost count means the lens degraded in ways this session could not
+/// even write down, which is a different thing from a lens that is fine.
+pub export fn goss_session_node_report_count(session: ?*Session, out_count: ?*u32, out_lost: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (out_count) |p| p.* = @intCast(s.node_reports.items.len);
+    if (out_lost) |p| p.* = s.node_reports_lost;
+    return .ok;
+}
+
+/// One node's diagnostic: its graph index, what it is doing, and why. Reads in
+/// any order; the index is a position in the report list, not a node index.
+pub export fn goss_session_node_report_at(session: ?*Session, index: u32, out_report: ?*NodeReport) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_report orelse return .invalid_argument;
+    if (index >= s.node_reports.items.len) return .invalid_argument;
+    out.* = s.node_reports.items[index];
+    return .ok;
+}
+
+/// The manifest id of the node a report names, so a host can say which node
+/// rather than which index. Again when the lens no longer carries that node.
+pub export fn goss_session_node_report_id(session: ?*Session, index: u32, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    if (index >= s.node_reports.items.len) return .invalid_argument;
+    const lens = if (s.active_lens) |*l| l else return .again;
+    const graph_index: graph.NodeIndex = @intCast(s.node_reports.items[index].node_index);
+    const id = lens.nodeIdAt(graph_index) orelse return .again;
+    if (out_len) |p| p.* = id.len;
+    const buffer = out orelse return .ok;
+    if (capacity < id.len) return .invalid_argument;
+    @memcpy(buffer[0..id.len], id);
+    return .ok;
+}
+
 pub export fn goss_session_chain_report(session: ?*Session, out_ready: ?*u32, out_total: ?*u32, out_beauty: ?*u32) Status {
     const s = session orelse return .invalid_argument;
     if (out_ready) |p| p.* = s.chain_ready;
@@ -8979,7 +9188,7 @@ fn updateDepthTexture(s: *Session, gpa: std.mem.Allocator) void {
     }
     // A dynamic R8 texture updated in place, so a per-frame depth submit
     // never destroys and recreates a GPU texture; recreated on a size change.
-    s.depth_texture = s.depth_tex.upload(@intCast(s.depth_width), @intCast(s.depth_height), bytes);
+    s.depth_texture = s.depth_tex.upload(sessionRenderer(s) orelse return, @intCast(s.depth_width), @intCast(s.depth_height), bytes);
 }
 
 /// The depth (metres) at a normalized frame coordinate, nearest sample,
@@ -9169,8 +9378,10 @@ pub export fn goss_session_set_beauty(session: ?*Session, effect: i32, value: f3
         return .ok;
     }
     const chain = s.beauty_chain orelse return .again;
-    beauty.set(chain, @enumFromInt(effect), value);
-    s.beauty_amounts[@intCast(effect)] = std.math.clamp(value, 0.0, 1.0);
+    const clamped = std.math.clamp(value, 0.0, 1.0);
+    s.beauty_amounts[@intCast(effect)] = clamped;
+    const tier = graph.degrade.planFor(s.frame_level).beauty;
+    beauty.set(chain, @enumFromInt(effect), tieredBeautyAmount(tier, @intCast(effect), clamped));
     return .ok;
 }
 
@@ -9259,7 +9470,7 @@ pub export fn goss_session_set_segmentation_mask(session: ?*Session, mask: ?[*]c
     if (mask_len == 0) return .ok;
     if (mask_len != segmentation.mask_len) return .invalid_argument;
     const m = mask orelse return .invalid_argument;
-    s.segmentation_texture = uploadMaskFromF32(&s.seg_tex, @ptrCast(m));
+    s.segmentation_texture = uploadMaskFromF32(sessionRenderer(s) orelse return, &s.seg_tex, @ptrCast(m));
     return .ok;
 }
 
@@ -9287,7 +9498,7 @@ pub export fn goss_session_set_segmentation_class_mask(session: ?*Session, chann
     if (mask_len == 0) return .ok;
     if (mask_len != segmentation.mask_len) return .invalid_argument;
     const m = mask orelse return .invalid_argument;
-    s.segmentation_class_textures[channel] = uploadMaskFromF32(&s.class_tex[channel], @ptrCast(m));
+    s.segmentation_class_textures[channel] = uploadMaskFromF32(sessionRenderer(s) orelse return, &s.class_tex[channel], @ptrCast(m));
     return .ok;
 }
 
@@ -9333,7 +9544,13 @@ fn applyLensEffects(session: *Session, effects: []const runtime.AppliedEffect) v
         return;
     }
     const chain = session.beauty_chain orelse return;
-    for (effects) |applied| beauty.set(chain, @enumFromInt(@intFromEnum(applied.effect)), applied.value);
+    // A lens owns its own effect values and reapplies them every tick, so
+    // they pass through the tier here and never join the host's stored six.
+    const tier = graph.degrade.planFor(session.frame_level).beauty;
+    for (effects) |applied| {
+        const slot = @intFromEnum(applied.effect);
+        beauty.set(chain, @enumFromInt(@as(i32, @intCast(slot))), tieredBeautyAmount(tier, slot, applied.value));
+    }
 }
 
 fn destroyShaderPrograms(session: *Session) void {
@@ -9370,12 +9587,19 @@ fn destroySegmentationStores(session: *Session) void {
 /// texture outright since bgfx's static textures are immutable; nothing
 /// consumes segmentation_texture yet (background-swap compositing is
 /// future work), so this only ever does the upload.
-fn uploadMaskFromF32(store: *render.Renderer.DynamicMask, mask: *const [segmentation.mask_len]f32) render.TextureHandle {
+/// The session's renderer, or null before one is initialised. A mask upload
+/// needs it for the staging the texture's bytes go through; with no renderer
+/// there is no texture to upload into either.
+fn sessionRenderer(s: *Session) ?*render.Renderer {
+    return if (s.engine.renderer) |*r| r else null;
+}
+
+fn uploadMaskFromF32(r: *render.Renderer, store: *render.Renderer.DynamicMask, mask: *const [segmentation.mask_len]f32) render.TextureHandle {
     var bytes: [segmentation.mask_len]u8 = undefined;
     for (mask, 0..) |value, i| {
         bytes[i] = @intFromFloat(std.math.clamp(value, 0.0, 1.0) * 255.0);
     }
-    return store.upload(segmentation.mask_side, segmentation.mask_side, &bytes);
+    return store.upload(r, segmentation.mask_side, segmentation.mask_side, &bytes);
 }
 
 /// Which model output class feeds a named mask channel. selfie_multiclass
@@ -9413,7 +9637,7 @@ fn pollSourceSegmentation(session: *Session) void {
     for (0..session.source_count) |i| {
         const seg = session.source_segmenter[i] orelse continue;
         if (!segmentation.readMask(seg, mask)) continue;
-        _ = uploadMaskFromF32(&session.source_seg_mask[i], mask);
+        _ = uploadMaskFromF32(sessionRenderer(session) orelse return, &session.source_seg_mask[i], mask);
     }
 }
 
@@ -9424,7 +9648,7 @@ fn pollSegmentationMask(session: *Session) void {
     fuseDepthIntoMask(session, mask);
 
     clearSegmentationTextures(session);
-    session.segmentation_texture = uploadMaskFromF32(&session.seg_tex, mask);
+    session.segmentation_texture = uploadMaskFromF32(sessionRenderer(session) orelse return, &session.seg_tex, mask);
 
     // A harmonize.pass measures its region statistics from the CPU mask, so keep
     // a copy when one is active.
@@ -9442,7 +9666,7 @@ fn pollSegmentationMask(session: *Session) void {
         if (!maskChannelNeeded(session, @intCast(channel))) continue;
         const source = classChannelSource(class_count, channel) orelse continue;
         if (!segmentation.readClassMask(worker, source, mask)) continue;
-        session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
+        session.segmentation_class_textures[channel] = uploadMaskFromF32(sessionRenderer(session) orelse return, &session.class_tex[channel], mask);
     }
 }
 
@@ -9456,7 +9680,7 @@ fn pollSceneSegmentation(session: *Session) void {
         if (!maskChannelNeeded(session, channel)) continue;
         const source = sceneChannelSource(channel) orelse continue;
         if (!segmentation.readClassMask(worker, source, mask)) continue;
-        session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
+        session.segmentation_class_textures[channel] = uploadMaskFromF32(sessionRenderer(session) orelse return, &session.class_tex[channel], mask);
     }
 }
 
@@ -9643,7 +9867,7 @@ fn pollScleraMatte(session: *Session, channel: u8) void {
     }
     for (mask, iris) |*m, i| m.* *= (1.0 - i);
     clearClassTexture(session, channel);
-    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
+    session.segmentation_class_textures[channel] = uploadMaskFromF32(sessionRenderer(session) orelse return, &session.class_tex[channel], mask);
 }
 
 /// Builds the upper lash-line band matte from both eyes' upper lid arcs: each
@@ -9660,7 +9884,7 @@ fn pollLashLineMatte(session: *Session, channel: u8) void {
     fillPolygon(face.lashLineBand(&points, &face.left_eye_loop, &band), mask);
     fillPolygon(face.lashLineBand(&points, &face.right_eye_loop, &band), mask);
     clearClassTexture(session, channel);
-    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
+    session.segmentation_class_textures[channel] = uploadMaskFromF32(sessionRenderer(session) orelse return, &session.class_tex[channel], mask);
 }
 
 /// Builds a contour or highlight matte from clustered face landmarks: each
@@ -9679,7 +9903,7 @@ fn pollFaceHullMatte(session: *Session, channel: u8, regions: []const []const u1
         fillLandmarkHull(cluster[0..region.len], mask);
     }
     clearClassTexture(session, channel);
-    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
+    session.segmentation_class_textures[channel] = uploadMaskFromF32(sessionRenderer(session) orelse return, &session.class_tex[channel], mask);
 }
 
 /// Builds a face-part matte channel from one or more landmark loops, unioned,
@@ -9698,7 +9922,7 @@ fn pollFacePartMatte(session: *Session, channel: u8, loops: []const []const u16)
         fillPolygon(ring[0..loop.len], mask);
     }
     clearClassTexture(session, channel);
-    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
+    session.segmentation_class_textures[channel] = uploadMaskFromF32(sessionRenderer(session) orelse return, &session.class_tex[channel], mask);
 }
 
 fn pollHeadMatte(session: *Session) void {
@@ -9710,7 +9934,7 @@ fn pollHeadMatte(session: *Session) void {
     @memset(mask, 0);
     fillLandmarkHull(points[0..], mask);
     clearClassTexture(session, head);
-    session.segmentation_class_textures[head] = uploadMaskFromF32(&session.class_tex[head], mask);
+    session.segmentation_class_textures[head] = uploadMaskFromF32(sessionRenderer(session) orelse return, &session.class_tex[head], mask);
 }
 
 fn pollHandMatte(session: *Session) void {
@@ -9735,7 +9959,7 @@ fn pollHandMatte(session: *Session) void {
         any = true;
     }
     clearClassTexture(session, chan);
-    if (any) session.segmentation_class_textures[chan] = uploadMaskFromF32(&session.class_tex[chan], mask);
+    if (any) session.segmentation_class_textures[chan] = uploadMaskFromF32(sessionRenderer(session) orelse return, &session.class_tex[chan], mask);
 }
 
 /// When the host submits depth and no in-engine segmenter runs, the depth
@@ -9758,7 +9982,7 @@ fn pollDepthOcclusion(session: *Session) void {
         }
     }
     clearSegmentationTextures(session);
-    session.segmentation_texture = uploadMaskFromF32(&session.seg_tex, mask);
+    session.segmentation_texture = uploadMaskFromF32(sessionRenderer(session) orelse return, &session.seg_tex, mask);
 }
 
 fn destroyLutState(session: *Session) void {
@@ -10064,6 +10288,12 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     destroyChainOrder(session);
     teardownScript(session);
     destroySounds(session);
+    // Swapping one lens for another releases the outgoing lens's capability
+    // targets too, not only an explicit deactivate: browsing lenses is the
+    // common case and the one that accumulated them.
+    releaseLensTargets(session);
+    session.node_reports.clearRetainingCapacity();
+    session.node_reports_lost = 0;
     if (session.active_lens) |*old| old.deinit(&session.lens_graph);
     session.active_lens = new_lens;
     applyLensLayout(session);
@@ -10805,8 +11035,24 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     // No bundle directory: the same resource pass the directory path runs, with an empty
     // bundle so every reader falls to the host-staged copies. A node whose asset was never
     // staged stays inert, which is the capability degrade, not a failed activation.
-    createLensResources(s, gpa, "") catch {};
+    // The pass used to swallow its error and still answer ok, so a lens whose
+    // shaders, textures and models all failed to load looked activated. It is
+    // recorded against the lens now, and read back through the node reports.
+    createLensResources(s, gpa, "") catch |err| noteLensResourceFailure(s, err);
     return .ok;
+}
+
+/// Records a whole-pass resource failure when createLensResources gives up part
+/// way through. Individual loaders already record their own node, so this is the
+/// case where the pass itself could not continue: every chain node is suspect,
+/// and saying so is better than answering ok with no explanation.
+fn noteLensResourceFailure(s: *Session, err: anyerror) void {
+    const reason: NodeReason = switch (err) {
+        error.OutOfMemory => .out_of_memory,
+        else => .asset_malformed,
+    };
+    for (s.chain_order) |entry| noteNode(s, entry.graph_index, .degraded, reason);
+    if (s.chain_order.len == 0) s.node_reports_lost +|= 1;
 }
 
 /// Loads whatever compiled bytecode a spliced shader.pass node names
@@ -10843,7 +11089,7 @@ fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: 
             continue;
         };
         if (pass.mask_channel) |channel| {
-            session.shader_masks.put(gpa, pass.graph_index, channel) catch {};
+            session.shader_masks.put(gpa, pass.graph_index, channel) catch noteOom(session, pass.graph_index);
         }
     }
 }
@@ -10856,8 +11102,8 @@ fn createGradeParams(session: *Session, gpa: std.mem.Allocator) !void {
     const grades = try lens.gradePassNodes(gpa, &session.lens_graph);
     defer gpa.free(grades);
     for (grades) |g| {
-        session.grade_params.put(gpa, g.graph_index, g.grade) catch {};
-        if (g.mask_channel) |channel| session.grade_masks.put(gpa, g.graph_index, channel) catch {};
+        session.grade_params.put(gpa, g.graph_index, g.grade) catch noteOom(session, g.graph_index);
+        if (g.mask_channel) |channel| session.grade_masks.put(gpa, g.graph_index, channel) catch noteOom(session, g.graph_index);
     }
 }
 
@@ -10868,7 +11114,7 @@ fn createDehazeParams(session: *Session, gpa: std.mem.Allocator) !void {
     const nodes = try lens.dehazePassNodes(gpa, &session.lens_graph);
     defer gpa.free(nodes);
     for (nodes) |n| {
-        session.dehaze_params.put(gpa, n.graph_index, n.strength) catch {};
+        session.dehaze_params.put(gpa, n.graph_index, n.strength) catch noteOom(session, n.graph_index);
     }
 }
 
@@ -10879,7 +11125,7 @@ fn createRelightParams(session: *Session, gpa: std.mem.Allocator) !void {
     const nodes = try lens.relightPassNodes(gpa, &session.lens_graph);
     defer gpa.free(nodes);
     for (nodes) |n| {
-        session.relight_params.put(gpa, n.graph_index, n.params) catch {};
+        session.relight_params.put(gpa, n.graph_index, n.params) catch noteOom(session, n.graph_index);
     }
 }
 
@@ -10890,7 +11136,7 @@ fn createGlareParams(session: *Session, gpa: std.mem.Allocator) !void {
     const nodes = try lens.glarePassNodes(gpa, &session.lens_graph);
     defer gpa.free(nodes);
     for (nodes) |n| {
-        session.glare_params.put(gpa, n.graph_index, .{ n.strength, n.threshold }) catch {};
+        session.glare_params.put(gpa, n.graph_index, .{ n.strength, n.threshold }) catch noteOom(session, n.graph_index);
     }
 }
 
@@ -10901,7 +11147,7 @@ fn createVignetteParams(session: *Session, gpa: std.mem.Allocator) !void {
     const nodes = try lens.vignettePassNodes(gpa, &session.lens_graph);
     defer gpa.free(nodes);
     for (nodes) |n| {
-        session.vignette_params.put(gpa, n.graph_index, .{ n.strength, n.radius }) catch {};
+        session.vignette_params.put(gpa, n.graph_index, .{ n.strength, n.radius }) catch noteOom(session, n.graph_index);
     }
 }
 
@@ -10912,7 +11158,7 @@ fn createLowLightParams(session: *Session, gpa: std.mem.Allocator) !void {
     const nodes = try lens.lowlightPassNodes(gpa, &session.lens_graph);
     defer gpa.free(nodes);
     for (nodes) |n| {
-        session.lowlight_params.put(gpa, n.graph_index, .{ n.strength, n.denoise }) catch {};
+        session.lowlight_params.put(gpa, n.graph_index, .{ n.strength, n.denoise }) catch noteOom(session, n.graph_index);
     }
 }
 
@@ -10923,7 +11169,7 @@ fn createUndistortParams(session: *Session, gpa: std.mem.Allocator) !void {
     const nodes = try lens.undistortPassNodes(gpa, &session.lens_graph);
     defer gpa.free(nodes);
     for (nodes) |n| {
-        session.undistort_params.put(gpa, n.graph_index, n.strength) catch {};
+        session.undistort_params.put(gpa, n.graph_index, n.strength) catch noteOom(session, n.graph_index);
     }
 }
 
@@ -10934,7 +11180,7 @@ fn createAwbParams(session: *Session, gpa: std.mem.Allocator) !void {
     const nodes = try lens.awbPassNodes(gpa, &session.lens_graph);
     defer gpa.free(nodes);
     for (nodes) |n| {
-        session.awb_params.put(gpa, n.graph_index, n.strength) catch {};
+        session.awb_params.put(gpa, n.graph_index, n.strength) catch noteOom(session, n.graph_index);
     }
 }
 
@@ -10945,7 +11191,7 @@ fn createStabilizeParams(session: *Session, gpa: std.mem.Allocator) !void {
     const nodes = try lens.stabilizePassNodes(gpa, &session.lens_graph);
     defer gpa.free(nodes);
     for (nodes) |n| {
-        session.stabilize_params.put(gpa, n.graph_index, n.strength) catch {};
+        session.stabilize_params.put(gpa, n.graph_index, n.strength) catch noteOom(session, n.graph_index);
     }
 }
 
@@ -10956,7 +11202,7 @@ fn createZoomParams(session: *Session, gpa: std.mem.Allocator) !void {
     const nodes = try lens.zoomPassNodes(gpa, &session.lens_graph);
     defer gpa.free(nodes);
     for (nodes) |n| {
-        session.zoom_params.put(gpa, n.graph_index, .{ n.factor, n.cx, n.cy }) catch {};
+        session.zoom_params.put(gpa, n.graph_index, .{ n.factor, n.cx, n.cy }) catch noteOom(session, n.graph_index);
     }
 }
 
@@ -10967,7 +11213,7 @@ fn createDereflectParams(session: *Session, gpa: std.mem.Allocator) !void {
     const nodes = try lens.dereflectPassNodes(gpa, &session.lens_graph);
     defer gpa.free(nodes);
     for (nodes) |n| {
-        session.dereflect_params.put(gpa, n.graph_index, n.strength) catch {};
+        session.dereflect_params.put(gpa, n.graph_index, n.strength) catch noteOom(session, n.graph_index);
     }
 }
 
@@ -10981,7 +11227,7 @@ fn createHarmonizeParams(session: *Session, gpa: std.mem.Allocator) !void {
     if (nodes.len == 0) return;
     for (nodes) |n| {
         const dir: f32 = @floatFromInt(n.direction);
-        session.harmonize_params.put(gpa, n.graph_index, .{ n.strength, dir }) catch {};
+        session.harmonize_params.put(gpa, n.graph_index, .{ n.strength, dir }) catch noteOom(session, n.graph_index);
     }
     session.wants_person_mask = true;
     if (session.person_mask.len != segmentation.mask_len) {
@@ -10996,7 +11242,7 @@ fn createInpaintParams(session: *Session, gpa: std.mem.Allocator) !void {
     const nodes = try lens.inpaintPassNodes(gpa, &session.lens_graph);
     defer gpa.free(nodes);
     for (nodes) |n| {
-        session.inpaint_params.put(gpa, n.graph_index, .{ .channel = n.mask_channel, .radius = n.radius, .coherence = n.coherence }) catch {};
+        session.inpaint_params.put(gpa, n.graph_index, .{ .channel = n.mask_channel, .radius = n.radius, .coherence = n.coherence }) catch noteOom(session, n.graph_index);
     }
 }
 
@@ -11007,7 +11253,7 @@ fn createRollingParams(session: *Session, gpa: std.mem.Allocator) !void {
     const nodes = try lens.rollingPassNodes(gpa, &session.lens_graph);
     defer gpa.free(nodes);
     for (nodes) |n| {
-        session.rolling_params.put(gpa, n.graph_index, .{ n.strength, n.readout }) catch {};
+        session.rolling_params.put(gpa, n.graph_index, .{ n.strength, n.readout }) catch noteOom(session, n.graph_index);
     }
 }
 
@@ -11018,7 +11264,7 @@ fn createParallaxParams(session: *Session, gpa: std.mem.Allocator) !void {
     const nodes = try lens.parallaxPassNodes(gpa, &session.lens_graph);
     defer gpa.free(nodes);
     for (nodes) |n| {
-        session.parallax_params.put(gpa, n.graph_index, .{ n.amount, n.focus, @floatFromInt(n.fill) }) catch {};
+        session.parallax_params.put(gpa, n.graph_index, .{ n.amount, n.focus, @floatFromInt(n.fill) }) catch noteOom(session, n.graph_index);
     }
 }
 
@@ -11030,7 +11276,7 @@ fn createLashParams(session: *Session, gpa: std.mem.Allocator) !void {
     const lashes = try lens.lashNodes(gpa, &session.lens_graph);
     defer gpa.free(lashes);
     for (lashes) |ln| {
-        session.lash_params.put(gpa, ln.graph_index, .{ ln.color[0], ln.color[1], ln.color[2], ln.color[3], ln.length, ln.curl }) catch {};
+        session.lash_params.put(gpa, ln.graph_index, .{ ln.color[0], ln.color[1], ln.color[2], ln.color[3], ln.length, ln.curl }) catch noteOom(session, ln.graph_index);
     }
 }
 
@@ -11041,7 +11287,7 @@ fn createDofParams(session: *Session, gpa: std.mem.Allocator) !void {
     const dofs = try lens.dofPassNodes(gpa, &session.lens_graph);
     defer gpa.free(dofs);
     for (dofs) |d| {
-        session.dof_params.put(gpa, d.graph_index, .{ d.focus, d.strength }) catch {};
+        session.dof_params.put(gpa, d.graph_index, .{ d.focus, d.strength }) catch noteOom(session, d.graph_index);
     }
 }
 
@@ -11052,7 +11298,7 @@ fn createFogParams(session: *Session, gpa: std.mem.Allocator) !void {
     const fogs = try lens.fogPassNodes(gpa, &session.lens_graph);
     defer gpa.free(fogs);
     for (fogs) |f| {
-        session.fog_params.put(gpa, f.graph_index, .{ f.color[0], f.color[1], f.color[2], f.density }) catch {};
+        session.fog_params.put(gpa, f.graph_index, .{ f.color[0], f.color[1], f.color[2], f.density }) catch noteOom(session, f.graph_index);
     }
 }
 
@@ -11063,8 +11309,8 @@ fn createOutlineParams(session: *Session, gpa: std.mem.Allocator) !void {
     const outlines = try lens.outlinePassNodes(gpa, &session.lens_graph);
     defer gpa.free(outlines);
     for (outlines) |o| {
-        session.outline_params.put(gpa, o.graph_index, .{ o.color[0], o.color[1], o.color[2], o.threshold }) catch {};
-        if (o.mask_channel) |channel| session.outline_masks.put(gpa, o.graph_index, channel) catch {};
+        session.outline_params.put(gpa, o.graph_index, .{ o.color[0], o.color[1], o.color[2], o.threshold }) catch noteOom(session, o.graph_index);
+        if (o.mask_channel) |channel| session.outline_masks.put(gpa, o.graph_index, channel) catch noteOom(session, o.graph_index);
     }
 }
 
@@ -11075,8 +11321,8 @@ fn createOccluderParams(session: *Session, gpa: std.mem.Allocator) !void {
     const occluders = try lens.occluderPassNodes(gpa, &session.lens_graph);
     defer gpa.free(occluders);
     for (occluders) |o| {
-        session.occluder_params.put(gpa, o.graph_index, o.params) catch {};
-        session.occluder_masks.put(gpa, o.graph_index, o.mask_channel) catch {};
+        session.occluder_params.put(gpa, o.graph_index, o.params) catch noteOom(session, o.graph_index);
+        session.occluder_masks.put(gpa, o.graph_index, o.mask_channel) catch noteOom(session, o.graph_index);
     }
 }
 
@@ -11087,8 +11333,8 @@ fn createCutoutParams(session: *Session, gpa: std.mem.Allocator) !void {
     const cutouts = try lens.cutoutPassNodes(gpa, &session.lens_graph);
     defer gpa.free(cutouts);
     for (cutouts) |cp| {
-        session.cutout_params.put(gpa, cp.graph_index, cp.params) catch {};
-        session.cutout_masks.put(gpa, cp.graph_index, cp.mask_channel) catch {};
+        session.cutout_params.put(gpa, cp.graph_index, cp.params) catch noteOom(session, cp.graph_index);
+        session.cutout_masks.put(gpa, cp.graph_index, cp.mask_channel) catch noteOom(session, cp.graph_index);
     }
 }
 
@@ -11099,11 +11345,11 @@ fn createTintParams(session: *Session, gpa: std.mem.Allocator) !void {
     const tints = try lens.tintPassNodes(gpa, &session.lens_graph);
     defer gpa.free(tints);
     for (tints) |tp| {
-        session.tint_params.put(gpa, tp.graph_index, .{ tp.color[0], tp.color[1], tp.color[2], tp.opacity }) catch {};
-        if (tp.mask_channel) |channel| session.tint_masks.put(gpa, tp.graph_index, channel) catch {};
-        if (tp.from_reference) session.tint_reference.put(gpa, tp.graph_index, {}) catch {};
-        if (tp.blend != 0) session.tint_modes.put(gpa, tp.graph_index, tp.blend) catch {};
-        if (tp.finish != 0) session.tint_finishes.put(gpa, tp.graph_index, tp.finish) catch {};
+        session.tint_params.put(gpa, tp.graph_index, .{ tp.color[0], tp.color[1], tp.color[2], tp.opacity }) catch noteOom(session, tp.graph_index);
+        if (tp.mask_channel) |channel| session.tint_masks.put(gpa, tp.graph_index, channel) catch noteOom(session, tp.graph_index);
+        if (tp.from_reference) session.tint_reference.put(gpa, tp.graph_index, {}) catch noteOom(session, tp.graph_index);
+        if (tp.blend != 0) session.tint_modes.put(gpa, tp.graph_index, tp.blend) catch noteOom(session, tp.graph_index);
+        if (tp.finish != 0) session.tint_finishes.put(gpa, tp.graph_index, tp.finish) catch noteOom(session, tp.graph_index);
     }
 }
 
@@ -11114,8 +11360,8 @@ fn createSmoothParams(session: *Session, gpa: std.mem.Allocator) !void {
     const smooths = try lens.smoothPassNodes(gpa, &session.lens_graph);
     defer gpa.free(smooths);
     for (smooths) |sp| {
-        session.smooth_params.put(gpa, sp.graph_index, sp.amount) catch {};
-        if (sp.mask_channel) |channel| session.smooth_masks.put(gpa, sp.graph_index, channel) catch {};
+        session.smooth_params.put(gpa, sp.graph_index, sp.amount) catch noteOom(session, sp.graph_index);
+        if (sp.mask_channel) |channel| session.smooth_masks.put(gpa, sp.graph_index, channel) catch noteOom(session, sp.graph_index);
     }
 }
 
@@ -11126,8 +11372,8 @@ fn createRetouchParams(session: *Session, gpa: std.mem.Allocator) !void {
     const retouches = try lens.retouchPassNodes(gpa, &session.lens_graph);
     defer gpa.free(retouches);
     for (retouches) |rp| {
-        session.retouch_params.put(gpa, rp.graph_index, rp.params) catch {};
-        if (rp.mask_channel) |channel| session.retouch_masks.put(gpa, rp.graph_index, channel) catch {};
+        session.retouch_params.put(gpa, rp.graph_index, rp.params) catch noteOom(session, rp.graph_index);
+        if (rp.mask_channel) |channel| session.retouch_masks.put(gpa, rp.graph_index, channel) catch noteOom(session, rp.graph_index);
     }
 }
 
@@ -11139,8 +11385,8 @@ fn createMatteParams(session: *Session, gpa: std.mem.Allocator) !void {
     const mattes = try lens.matteRefinePassNodes(gpa, &session.lens_graph);
     defer gpa.free(mattes);
     for (mattes) |mp| {
-        session.matte_params.put(gpa, mp.graph_index, mp.params) catch {};
-        if (mp.mask_channel) |channel| session.matte_masks.put(gpa, mp.graph_index, channel) catch {};
+        session.matte_params.put(gpa, mp.graph_index, mp.params) catch noteOom(session, mp.graph_index);
+        if (mp.mask_channel) |channel| session.matte_masks.put(gpa, mp.graph_index, channel) catch noteOom(session, mp.graph_index);
     }
 }
 
@@ -11152,7 +11398,7 @@ fn createHairMatteParams(session: *Session, gpa: std.mem.Allocator) !void {
     const sources = try lens.hairMattePassNodes(gpa, &session.lens_graph);
     defer gpa.free(sources);
     for (sources) |hp| {
-        session.hair_matte_params.put(gpa, hp.graph_index, hp.params) catch {};
+        session.hair_matte_params.put(gpa, hp.graph_index, hp.params) catch noteOom(session, hp.graph_index);
     }
 }
 
@@ -11163,7 +11409,7 @@ fn createStylizeParams(session: *Session, gpa: std.mem.Allocator) !void {
     const stylizes = try lens.stylizePassNodes(gpa, &session.lens_graph);
     defer gpa.free(stylizes);
     for (stylizes) |yp| {
-        session.stylize_params.put(gpa, yp.graph_index, yp.params) catch {};
+        session.stylize_params.put(gpa, yp.graph_index, yp.params) catch noteOom(session, yp.graph_index);
     }
 }
 
@@ -11174,7 +11420,7 @@ fn createEdgeParams(session: *Session, gpa: std.mem.Allocator) !void {
     const edges = try lens.edgePassNodes(gpa, &session.lens_graph);
     defer gpa.free(edges);
     for (edges) |ep| {
-        session.edge_params.put(gpa, ep.graph_index, ep.params) catch {};
+        session.edge_params.put(gpa, ep.graph_index, ep.params) catch noteOom(session, ep.graph_index);
     }
 }
 
@@ -11185,8 +11431,8 @@ fn createWarpParams(session: *Session, gpa: std.mem.Allocator) !void {
     const warps = try lens.warpPassNodes(gpa, &session.lens_graph);
     defer gpa.free(warps);
     for (warps) |wp| {
-        session.warp_params.put(gpa, wp.graph_index, wp.params) catch {};
-        if (wp.mask_channel) |channel| session.warp_masks.put(gpa, wp.graph_index, channel) catch {};
+        session.warp_params.put(gpa, wp.graph_index, wp.params) catch noteOom(session, wp.graph_index);
+        if (wp.mask_channel) |channel| session.warp_masks.put(gpa, wp.graph_index, channel) catch noteOom(session, wp.graph_index);
     }
 }
 
@@ -11198,7 +11444,7 @@ fn createReshapeParams(session: *Session, gpa: std.mem.Allocator) !void {
     const reshapes = try lens.reshapePassNodes(gpa, &session.lens_graph);
     defer gpa.free(reshapes);
     for (reshapes) |rp| {
-        session.reshape_params.put(gpa, rp.graph_index, rp.params) catch {};
+        session.reshape_params.put(gpa, rp.graph_index, rp.params) catch noteOom(session, rp.graph_index);
     }
 }
 
@@ -11209,7 +11455,7 @@ fn createBodyReshapeParams(session: *Session, gpa: std.mem.Allocator) !void {
     const bodies = try lens.bodyReshapePassNodes(gpa, &session.lens_graph);
     defer gpa.free(bodies);
     for (bodies) |bp| {
-        session.body_reshape_params.put(gpa, bp.graph_index, bp.params) catch {};
+        session.body_reshape_params.put(gpa, bp.graph_index, bp.params) catch noteOom(session, bp.graph_index);
     }
 }
 
@@ -11220,7 +11466,7 @@ fn createTrailParams(session: *Session, gpa: std.mem.Allocator) !void {
     const trails = try lens.trailPassNodes(gpa, &session.lens_graph);
     defer gpa.free(trails);
     for (trails) |tr| {
-        session.trail_params.put(gpa, tr.graph_index, tr.amount) catch {};
+        session.trail_params.put(gpa, tr.graph_index, tr.amount) catch noteOom(session, tr.graph_index);
     }
 }
 
@@ -11231,7 +11477,7 @@ fn createSsrParams(session: *Session, gpa: std.mem.Allocator) !void {
     const ssrs = try lens.ssrPassNodes(gpa, &session.lens_graph);
     defer gpa.free(ssrs);
     for (ssrs) |sr| {
-        session.ssr_params.put(gpa, sr.graph_index, .{ sr.strength, sr.plane }) catch {};
+        session.ssr_params.put(gpa, sr.graph_index, .{ sr.strength, sr.plane }) catch noteOom(session, sr.graph_index);
     }
 }
 
@@ -11242,7 +11488,7 @@ fn createEnvParams(session: *Session, gpa: std.mem.Allocator) !void {
     const envs = try lens.envPassNodes(gpa, &session.lens_graph);
     defer gpa.free(envs);
     for (envs) |ev| {
-        session.env_params.put(gpa, ev.graph_index, .{ ev.top[0], ev.top[1], ev.top[2], ev.bottom[0], ev.bottom[1], ev.bottom[2], ev.intensity }) catch {};
+        session.env_params.put(gpa, ev.graph_index, .{ ev.top[0], ev.top[1], ev.top[2], ev.bottom[0], ev.bottom[1], ev.bottom[2], ev.intensity }) catch noteOom(session, ev.graph_index);
     }
 }
 
@@ -11253,7 +11499,7 @@ fn createBloomParams(session: *Session, gpa: std.mem.Allocator) !void {
     const blooms = try lens.bloomPassNodes(gpa, &session.lens_graph);
     defer gpa.free(blooms);
     for (blooms) |b| {
-        session.bloom_params.put(gpa, b.graph_index, b.bloom) catch {};
+        session.bloom_params.put(gpa, b.graph_index, b.bloom) catch noteOom(session, b.graph_index);
     }
 }
 
@@ -11695,25 +11941,25 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
     const sprites = try lens.spriteNodes(gpa, &session.lens_graph);
     defer gpa.free(sprites);
     for (sprites) |sprite| {
-        session.sprite_rects.put(gpa, sprite.graph_index, .{ sprite.rect[0], sprite.rect[1], sprite.rect[2], sprite.rect[3], sprite.opacity }) catch {};
-        if (sprite.rotation != 0) session.sprite_rotations.put(gpa, sprite.graph_index, sprite.rotation) catch {};
-        if (sprite.rotation_param.len > 0) session.sprite_rotation_params.put(gpa, sprite.graph_index, sprite.rotation_param) catch {};
-        if (sprite.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, sprite.graph_index, sprite.opacity_param) catch {};
+        session.sprite_rects.put(gpa, sprite.graph_index, .{ sprite.rect[0], sprite.rect[1], sprite.rect[2], sprite.rect[3], sprite.opacity }) catch noteOom(session, sprite.graph_index);
+        if (sprite.rotation != 0) session.sprite_rotations.put(gpa, sprite.graph_index, sprite.rotation) catch noteOom(session, sprite.graph_index);
+        if (sprite.rotation_param.len > 0) session.sprite_rotation_params.put(gpa, sprite.graph_index, sprite.rotation_param) catch noteOom(session, sprite.graph_index);
+        if (sprite.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, sprite.graph_index, sprite.opacity_param) catch noteOom(session, sprite.graph_index);
         if (sprite.x_param.len > 0 or sprite.y_param.len > 0 or sprite.w_param.len > 0 or sprite.h_param.len > 0) {
-            session.sprite_placement_params.put(gpa, sprite.graph_index, .{ sprite.x_param, sprite.y_param, sprite.w_param, sprite.h_param }) catch {};
+            session.sprite_placement_params.put(gpa, sprite.graph_index, .{ sprite.x_param, sprite.y_param, sprite.w_param, sprite.h_param }) catch noteOom(session, sprite.graph_index);
         }
-        if (sprite.interaction.any()) session.sprite_interactions.put(gpa, sprite.graph_index, .{ .cfg = sprite.interaction, .base = sprite.rect }) catch {};
-        if (sprite.anchor_face >= 0) session.sprite_anchor_faces.put(gpa, sprite.graph_index, @intCast(sprite.anchor_face)) catch {};
+        if (sprite.interaction.any()) session.sprite_interactions.put(gpa, sprite.graph_index, .{ .cfg = sprite.interaction, .base = sprite.rect }) catch noteOom(session, sprite.graph_index);
+        if (sprite.anchor_face >= 0) session.sprite_anchor_faces.put(gpa, sprite.graph_index, @intCast(sprite.anchor_face)) catch noteOom(session, sprite.graph_index);
         // A cutout sprite has no bundled image: it lifts the live subject (or the
         // whole frame) each frame, so it registers and skips the image-load paths.
         if (sprite.cutout_channel >= 0 or sprite.cutout_whole) {
             const channel: u8 = if (sprite.cutout_channel >= 0) @intCast(sprite.cutout_channel) else 0;
-            session.sprite_cutouts.put(gpa, sprite.graph_index, .{ .channel = channel, .softness = sprite.cutout_softness, .whole = sprite.cutout_whole }) catch {};
+            session.sprite_cutouts.put(gpa, sprite.graph_index, .{ .channel = channel, .softness = sprite.cutout_softness, .whole = sprite.cutout_whole }) catch noteOom(session, sprite.graph_index);
             continue;
         }
         if (sprite.mask_channel) |channel| {
-            session.sprite_masks.put(gpa, sprite.graph_index, .{ .channel = channel, .over = sprite.mask_over, .strength = sprite.mask_strength }) catch {};
-            if (sprite.mask_strength_param.len > 0) session.sprite_mask_strength_params.put(gpa, sprite.graph_index, sprite.mask_strength_param) catch {};
+            session.sprite_masks.put(gpa, sprite.graph_index, .{ .channel = channel, .over = sprite.mask_over, .strength = sprite.mask_strength }) catch noteOom(session, sprite.graph_index);
+            if (sprite.mask_strength_param.len > 0) session.sprite_mask_strength_params.put(gpa, sprite.graph_index, sprite.mask_strength_param) catch noteOom(session, sprite.graph_index);
         }
         if (!bundleNameOk(sprite.image_stem)) continue;
         // An animated GIF upgrades the node to a video texture; a node with no
@@ -11742,7 +11988,7 @@ fn createVideoLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     const videos = try lens.videoNodes(gpa, &session.lens_graph);
     defer gpa.free(videos);
     for (videos) |v| {
-        session.sprite_rects.put(gpa, v.graph_index, .{ v.rect[0], v.rect[1], v.rect[2], v.rect[3], v.opacity }) catch {};
+        session.sprite_rects.put(gpa, v.graph_index, .{ v.rect[0], v.rect[1], v.rect[2], v.rect[3], v.opacity }) catch noteOom(session, v.graph_index);
         if (!bundleNameOk(v.source)) continue;
         const path = videoPathFor(session, gpa, bundle_path, v.source) orelse continue;
         defer gpa.free(path);
@@ -11766,7 +12012,7 @@ fn createVideoLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             continue;
         }
         const tex = render.Renderer.createDynamicBgraTexture(@intCast(decoder.width), @intCast(decoder.height));
-        render.Renderer.updateDynamicBgraTexture(tex, @intCast(decoder.width), @intCast(decoder.height), rgba);
+        render.Renderer.updateDynamicBgraTexture(sessionRenderer(session) orelse return, tex, @intCast(decoder.width), @intCast(decoder.height), rgba);
         session.video_textures.put(gpa, v.graph_index, .{
             .decoder = decoder,
             .texture = tex,
@@ -11800,7 +12046,7 @@ fn advanceVideo(s: *Session, vid: *VideoPlayback) void {
     while (vid.advanced < target and budget > 0) : (budget -= 1) {
         switch (vid.decoder.read(vid.rgba)) {
             .frame => {
-                render.Renderer.updateDynamicBgraTexture(vid.texture, @intCast(vid.width), @intCast(vid.height), vid.rgba);
+                render.Renderer.updateDynamicBgraTexture(sessionRenderer(s) orelse return, vid.texture, @intCast(vid.width), @intCast(vid.height), vid.rgba);
                 vid.advanced += 1;
             },
             .end => {
@@ -11972,9 +12218,9 @@ fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
                     render.Renderer.destroyModelMesh(mesh);
                     continue;
                 };
-                session.sprite_rects.put(gpa, txt.graph_index, .{ txt.rect[0], txt.rect[1], txt.rect[2], txt.rect[3], txt.opacity }) catch {};
-                if (txt.rotation != 0) session.sprite_rotations.put(gpa, txt.graph_index, txt.rotation) catch {};
-                if (txt.rotation_param.len > 0) session.sprite_rotation_params.put(gpa, txt.graph_index, txt.rotation_param) catch {};
+                session.sprite_rects.put(gpa, txt.graph_index, .{ txt.rect[0], txt.rect[1], txt.rect[2], txt.rect[3], txt.opacity }) catch noteOom(session, txt.graph_index);
+                if (txt.rotation != 0) session.sprite_rotations.put(gpa, txt.graph_index, txt.rotation) catch noteOom(session, txt.graph_index);
+                if (txt.rotation_param.len > 0) session.sprite_rotation_params.put(gpa, txt.graph_index, txt.rotation_param) catch noteOom(session, txt.graph_index);
             } else |_| {}
             continue;
         }
@@ -11993,11 +12239,11 @@ fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
             r.destroyTexture(texture);
             continue;
         };
-        session.sprite_rects.put(gpa, txt.graph_index, .{ txt.rect[0], txt.rect[1], txt.rect[2], txt.rect[3], txt.opacity }) catch {};
-        if (txt.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, txt.graph_index, txt.opacity_param) catch {};
-        if (txt.rotation != 0) session.sprite_rotations.put(gpa, txt.graph_index, txt.rotation) catch {};
-        if (txt.rotation_param.len > 0) session.sprite_rotation_params.put(gpa, txt.graph_index, txt.rotation_param) catch {};
-        if (txt.anchor_face >= 0) session.sprite_anchor_faces.put(gpa, txt.graph_index, @intCast(txt.anchor_face)) catch {};
+        session.sprite_rects.put(gpa, txt.graph_index, .{ txt.rect[0], txt.rect[1], txt.rect[2], txt.rect[3], txt.opacity }) catch noteOom(session, txt.graph_index);
+        if (txt.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, txt.graph_index, txt.opacity_param) catch noteOom(session, txt.graph_index);
+        if (txt.rotation != 0) session.sprite_rotations.put(gpa, txt.graph_index, txt.rotation) catch noteOom(session, txt.graph_index);
+        if (txt.rotation_param.len > 0) session.sprite_rotation_params.put(gpa, txt.graph_index, txt.rotation_param) catch noteOom(session, txt.graph_index);
+        if (txt.anchor_face >= 0) session.sprite_anchor_faces.put(gpa, txt.graph_index, @intCast(txt.anchor_face)) catch noteOom(session, txt.graph_index);
         // A live content source registers the node for per-frame refresh; the
         // static raster above stands in until the first frame resolves it.
         if (txt.content_source.len > 0) session.dynamic_texts.put(gpa, txt.graph_index, .{
@@ -12009,7 +12255,7 @@ fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
             .stroke = txt.stroke,
             .bend = txt.bend,
             .wrap = txt.wrap,
-        }) catch {};
+        }) catch noteOom(session, txt.graph_index);
     }
 }
 
@@ -12073,8 +12319,8 @@ fn createPaintFaceParams(session: *Session, gpa: std.mem.Allocator) !void {
     const paints = try lens.paintFaceNodes(gpa, &session.lens_graph);
     defer gpa.free(paints);
     for (paints) |paint| {
-        session.paint_face_params.put(gpa, paint.graph_index, .{ paint.opacity, @floatFromInt(paint.blend) }) catch {};
-        if (paint.mask_channel) |channel| session.paint_face_masks.put(gpa, paint.graph_index, channel) catch {};
+        session.paint_face_params.put(gpa, paint.graph_index, .{ paint.opacity, @floatFromInt(paint.blend) }) catch noteOom(session, paint.graph_index);
+        if (paint.mask_channel) |channel| session.paint_face_masks.put(gpa, paint.graph_index, channel) catch noteOom(session, paint.graph_index);
     }
 }
 
@@ -12124,8 +12370,8 @@ fn createFaceSwapParams(session: *Session, gpa: std.mem.Allocator) !void {
     const swaps = try lens.faceSwapNodes(gpa, &session.lens_graph);
     defer gpa.free(swaps);
     for (swaps) |swap| {
-        session.face_swap_params.put(gpa, swap.graph_index, .{ swap.opacity, swap.feather }) catch {};
-        if (swap.mask_channel) |channel| session.face_swap_masks.put(gpa, swap.graph_index, channel) catch {};
+        session.face_swap_params.put(gpa, swap.graph_index, .{ swap.opacity, swap.feather }) catch noteOom(session, swap.graph_index);
+        if (swap.mask_channel) |channel| session.face_swap_masks.put(gpa, swap.graph_index, channel) catch noteOom(session, swap.graph_index);
     }
 }
 
@@ -13411,7 +13657,7 @@ fn pollMlStyle(session: *Session) void {
         if (mw.style_tex.idx == render.invalid_handle) {
             mw.style_tex = render.Renderer.createDynamicBgraTexture(@intCast(side), @intCast(side));
         }
-        render.Renderer.updateDynamicBgraTexture(mw.style_tex, @intCast(side), @intCast(side), mw.style_bgra);
+        render.Renderer.updateDynamicBgraTexture(sessionRenderer(session) orelse return, mw.style_tex, @intCast(side), @intCast(side), mw.style_bgra);
         session.ml_style_textures.put(session.engine.gpa, target, mw.style_tex) catch {};
     }
     pollTemporalStyle(session);
@@ -13528,7 +13774,7 @@ fn pollTemporalStyle(session: *Session) void {
         if (tw.style_tex.idx == render.invalid_handle) {
             tw.style_tex = render.Renderer.createDynamicBgraTexture(@intCast(side), @intCast(side));
         }
-        render.Renderer.updateDynamicBgraTexture(tw.style_tex, @intCast(side), @intCast(side), tw.style_bgra);
+        render.Renderer.updateDynamicBgraTexture(sessionRenderer(session) orelse return, tw.style_tex, @intCast(side), @intCast(side), tw.style_bgra);
         session.ml_style_textures.put(session.engine.gpa, tw.target, tw.style_tex) catch {};
     }
 }
@@ -14229,7 +14475,7 @@ fn pollDiffusion(session: *Session) void {
         if (dw.tex.idx == render.invalid_handle) {
             dw.tex = render.Renderer.createDynamicBgraTexture(@intCast(side), @intCast(side));
         }
-        render.Renderer.updateDynamicBgraTexture(dw.tex, @intCast(side), @intCast(side), dw.bgra);
+        render.Renderer.updateDynamicBgraTexture(sessionRenderer(session) orelse return, dw.tex, @intCast(side), @intCast(side), dw.bgra);
         session.ml_style_textures.put(session.engine.gpa, dw.target, dw.tex) catch {};
     }
 }
@@ -14256,25 +14502,25 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     defer gpa.free(models);
     for (models) |model| {
         if (model.face_anchor) {
-            session.model_face_anchors.put(gpa, model.graph_index, model.face_index) catch {};
+            session.model_face_anchors.put(gpa, model.graph_index, model.face_index) catch noteOom(session, model.graph_index);
         }
         if (model.retarget) {
-            session.model_retargets.put(gpa, model.graph_index, {}) catch {};
+            session.model_retargets.put(gpa, model.graph_index, {}) catch noteOom(session, model.graph_index);
         }
         if (model.talk) {
-            session.model_talks.put(gpa, model.graph_index, {}) catch {};
+            session.model_talks.put(gpa, model.graph_index, {}) catch noteOom(session, model.graph_index);
         }
         if (model.body_anchor) {
-            session.model_body_anchors.put(gpa, model.graph_index, {}) catch {};
+            session.model_body_anchors.put(gpa, model.graph_index, {}) catch noteOom(session, model.graph_index);
         }
         if (model.skeleton_anchor) {
-            session.model_skeleton_anchors.put(gpa, model.graph_index, {}) catch {};
+            session.model_skeleton_anchors.put(gpa, model.graph_index, {}) catch noteOom(session, model.graph_index);
         }
         if (model.world_anchor) {
-            session.model_world_anchors.put(gpa, model.graph_index, {}) catch {};
+            session.model_world_anchors.put(gpa, model.graph_index, {}) catch noteOom(session, model.graph_index);
         }
         if (model.control) |c| {
-            if (c.any()) session.model_controls.put(gpa, model.graph_index, .{ .cfg = c }) catch {};
+            if (c.any()) session.model_controls.put(gpa, model.graph_index, .{ .cfg = c }) catch noteOom(session, model.graph_index);
         }
         if (model.particles) |pf| {
             if (session.engine.renderer) |*r| {
@@ -14402,7 +14648,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                                         _ = session.hair_ids.remove(model.graph_index);
                                         break :register false;
                                     };
-                                    session.hair_vcount.put(gpa, model.graph_index, hair.strands * hair.verts) catch {};
+                                    session.hair_vcount.put(gpa, model.graph_index, hair.strands * hair.verts) catch noteOom(session, model.graph_index);
                                     reserveFrameStage(session, @as(usize, hair.strands) * hair.verts * 3);
                                     break :register true;
                                 };
@@ -14435,7 +14681,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                                         _ = session.cloth_bodies.remove(model.graph_index);
                                         break :register false;
                                     };
-                                    session.cloth_cols.put(gpa, model.graph_index, cloth.cols * cloth.rows) catch {};
+                                    session.cloth_cols.put(gpa, model.graph_index, cloth.cols * cloth.rows) catch noteOom(session, model.graph_index);
                                     reserveFrameStage(session, @as(usize, cloth.cols) * cloth.rows * 3);
                                     break :register true;
                                 };
@@ -14469,7 +14715,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                                             _ = session.cloth_bodies.remove(model.graph_index);
                                             break :register false;
                                         };
-                                        session.cloth_cols.put(gpa, model.graph_index, @intCast(sphere.verts.len)) catch {};
+                                        session.cloth_cols.put(gpa, model.graph_index, @intCast(sphere.verts.len)) catch noteOom(session, model.graph_index);
                                         reserveFrameStage(session, sphere.verts.len * 3);
                                         break :register true;
                                     };
@@ -14496,7 +14742,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                     const id = if (body.shape == .mesh and body.mesh_from_glb) id: {
                         // The collider is the node's own glb; build it once the
                         // geometry decodes (pollModelLoaders), not now.
-                        session.pending_glb_colliders.put(gpa, model.graph_index, .{ .position = body.position, .rotation = rotation, .friction = body.friction, .restitution = body.restitution }) catch {};
+                        session.pending_glb_colliders.put(gpa, model.graph_index, .{ .position = body.position, .rotation = rotation, .friction = body.friction, .restitution = body.restitution }) catch noteOom(session, model.graph_index);
                         break :id physics.invalid_body;
                     } else switch (body.shape) {
                         .hull => world.addBodyHull(body.hull_points, body.position, rotation, body.friction, body.restitution, motion, body.planar) catch physics.invalid_body,
@@ -14513,7 +14759,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                         },
                     };
                     if (id != physics.invalid_body) {
-                        session.physics_bodies.put(gpa, model.graph_index, id) catch {};
+                        session.physics_bodies.put(gpa, model.graph_index, id) catch noteOom(session, model.graph_index);
                         // A dynamic body can be grabbed and thrown by a pointer.
                         if (body.dynamic and !body.kinematic) session.grabbable_bodies.append(gpa, id) catch {};
                         // A head-following collider is driven to the tracked head.
@@ -14867,6 +15113,44 @@ pub export fn goss_session_activate_lens_from_directory(session: ?*Session, bund
     return .ok;
 }
 
+/// Releases every render target a lens's capabilities brought up. These were
+/// freed only when the session died, so browsing lenses accumulated one
+/// full-size target per capability ever touched: 8 MB each at 1080p, 33 MB at
+/// 4K. Nulling the size caches is what makes the next lens recreate them.
+fn releaseLensTargets(s: *Session) void {
+    const targets = [_]*?render.Renderer.OffscreenTarget{
+        &s.prev_frame_target,
+        &s.occluder_frame_target,
+        &s.splat_scene_target,
+        &s.cutout_sticker_target,
+        &s.cutout_source_target,
+        &s.inpaint_fresh_target,
+        &s.inpaint_prev_target,
+        &s.inpaint_coherent_target,
+        &s.hair_matte_target,
+    };
+    for (targets) |slot| {
+        if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
+        slot.* = null;
+    }
+    s.prev_frame_w = 0;
+    s.prev_frame_h = 0;
+    s.prev_frame_valid = false;
+    s.occluder_frame_w = 0;
+    s.occluder_frame_h = 0;
+    s.splat_scene_w = 0;
+    s.splat_scene_h = 0;
+    s.cutout_sticker_w = 0;
+    s.cutout_sticker_h = 0;
+    s.cutout_source_w = 0;
+    s.cutout_source_h = 0;
+    s.inpaint_coherence_w = 0;
+    s.inpaint_coherence_h = 0;
+    s.inpaint_prev_valid = false;
+    s.hair_matte_w = 0;
+    s.hair_matte_h = 0;
+}
+
 pub export fn goss_session_deactivate_lens(session: ?*Session) void {
     const s = session orelse return;
     destroyShaderPrograms(s);
@@ -14883,6 +15167,9 @@ pub export fn goss_session_deactivate_lens(session: ?*Session) void {
     destroyChainOrder(s);
     teardownScript(s);
     destroySounds(s);
+    releaseLensTargets(s);
+    s.node_reports.clearRetainingCapacity();
+    s.node_reports_lost = 0;
     if (s.active_lens) |*lens| lens.deinit(&s.lens_graph);
     s.active_lens = null;
     if (s.layout_from_lens) {

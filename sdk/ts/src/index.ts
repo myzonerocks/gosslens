@@ -1147,6 +1147,35 @@ export interface GossCaptureUi {
 /// its own scratch allocations (frame descriptor, pixel buffer,
 /// landmarks) rather than one shared per-engine pool - matches every
 /// other SDK's own per-session confinement.
+/// What a lens node is doing, as against what its manifest asked for.
+export enum GossNodeState {
+  Ready = 0,
+  Degraded = 1,
+  Failed = 2,
+}
+
+/// Why a node is not ready.
+export enum GossNodeReason {
+  None = 0,
+  OutOfMemory = 1,
+  AssetMissing = 2,
+  AssetMalformed = 3,
+  AssetTooLarge = 4,
+  ShaderMissing = 5,
+  ShaderLinkFailed = 6,
+  ModelRejected = 7,
+  ModelUnsupported = 8,
+  CapabilityUnavailable = 9,
+}
+
+/// One lens node that is not doing what its manifest asked.
+export interface GossNodeReport {
+  id: string;
+  nodeIndex: number;
+  state: GossNodeState;
+  reason: GossNodeReason;
+}
+
 export class GossSession {
   private worldScratchPtr = 0;
   private worldScratchLen = 0;
@@ -2878,6 +2907,63 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 
+  /// Every node of the active lens that is not doing what its manifest asked,
+  /// beside how many diagnostics could not be recorded at all. An empty list
+  /// with a non-zero lost count means the lens degraded in ways the session
+  /// could not write down, which is not the same as a lens that is fine.
+  nodeReports(): { reports: GossNodeReport[]; lost: number } {
+    const scratch = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    let count = 0;
+    let lost = 0;
+    try {
+      const status = this.mod.ccall(
+        "goss_session_node_report_count",
+        "number",
+        ["number", "number", "number"],
+        [this.handle, scratch, scratch + 4],
+      ) as number;
+      if (status !== 0) return { reports: [], lost: 0 };
+      count = this.mod.HEAPU32[scratch >> 2];
+      lost = this.mod.HEAPU32[(scratch + 4) >> 2];
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [scratch, 8]);
+    }
+
+    const reports: GossNodeReport[] = [];
+    // One report is three u32; the id buffer is sized for a manifest node id.
+    const record = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const idBytes = 256;
+    const idPtr = this.mod.ccall("goss_alloc", "number", ["number"], [idBytes + 4]) as number;
+    try {
+      for (let at = 0; at < count; at += 1) {
+        if (this.mod.ccall("goss_session_node_report_at", "number", ["number", "number", "number"], [this.handle, at, record]) !== 0) break;
+        const nodeIndex = this.mod.HEAPU32[record >> 2];
+        const state = this.mod.HEAPU32[(record + 4) >> 2];
+        const reason = this.mod.HEAPU32[(record + 8) >> 2];
+        let id = "";
+        const lenPtr = idPtr + idBytes;
+        if (
+          this.mod.ccall(
+            "goss_session_node_report_id",
+            "number",
+            ["number", "number", "number", "number", "number"],
+            [this.handle, at, idPtr, idBytes, lenPtr],
+          ) === 0
+        ) {
+          const len = this.mod.HEAPU32[lenPtr >> 2];
+          if (len > 0 && len <= idBytes) {
+            id = new TextDecoder().decode(this.mod.HEAPU8.subarray(idPtr, idPtr + len));
+          }
+        }
+        reports.push({ id, nodeIndex, state: state as GossNodeState, reason: reason as GossNodeReason });
+      }
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [record, 12]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [idPtr, idBytes + 4]);
+    }
+    return { reports, lost };
+  }
+
   /// Submits a bare camera pose and projection, for a host driving a scan with
   /// no platform world session behind it: a selfie scan on the front camera,
   /// where the depth comes from a lens's own net rather than a sensor. Both
@@ -2952,7 +3038,10 @@ export class GossSession {
   /// Reports one finished frame: measured whole-pipeline time plus
   /// thermal pressure (nominal by default - no browser API surfaces
   /// device thermal state). Returns the degradation level in effect
-  /// for the next frame.
+  /// for the next frame. A page that never calls this still degrades:
+  /// the engine derives the frame period from the camera timestamps it
+  /// is handed. Calling it lets the page account for its own work
+  /// outside the engine as well.
   reportFrame(frameTimeUs: number, thermal: GossThermal = GossThermal.Nominal): GossDegradeLevel {
     return this.mod.ccall("goss_session_report_frame", "number", ["number", "number", "number"], [this.handle, frameTimeUs, thermal]);
   }

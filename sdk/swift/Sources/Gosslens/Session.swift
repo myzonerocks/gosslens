@@ -119,6 +119,27 @@ public final class GossSession: @unchecked Sendable {
         return GossDegradeLevel(rawValue: raw.rawValue) ?? .passthrough
     }
 
+    /// The platform's current thermal pressure, mapped onto the engine's
+    /// four states. Read it once per frame and pass it to reportFrame: the
+    /// engine can measure a frame period on its own but has no way to reach
+    /// this.
+    public static var platformThermal: GossThermal {
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: return .nominal
+        case .fair: return .fair
+        case .serious: return .serious
+        case .critical: return .critical
+        @unknown default: return .nominal
+        }
+    }
+
+    /// Reports one finished frame with the platform's thermal state read
+    /// here, the call a frame loop wants.
+    @discardableResult
+    public func reportFrame(frameTimeUs: UInt32) -> GossDegradeLevel {
+        reportFrame(frameTimeUs: frameTimeUs, thermal: Session.platformThermal)
+    }
+
     // MARK: - Face tracking
 
     public func enableFaceTracking(taskBundle: Data, threads: Int32) throws {

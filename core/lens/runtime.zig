@@ -1913,6 +1913,14 @@ pub const Lens = struct {
         return null;
     }
 
+    /// The manifest id of the node at a graph index, so a diagnostic a caller
+    /// reads names the node its author wrote rather than an internal index.
+    pub fn nodeIdAt(self: *const Lens, graph_index: graph.NodeIndex) ?[]const u8 {
+        const node = self.findNode(graph_index) orelse return null;
+        if (node.node_id.len == 0) return null;
+        return node.node_id;
+    }
+
     /// Whether a draw node is currently hidden by a hide or swap_subgraph action,
     /// read by the composite chain to skip its draw.
     pub fn isNodeHidden(self: *const Lens, graph_index: graph.NodeIndex) bool {
