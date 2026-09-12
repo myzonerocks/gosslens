@@ -149,3 +149,35 @@ public struct GossClipInfo: Sendable {
         ended = raw.ended != 0
     }
 }
+
+/// What this build's media backend declares it encodes, as bit sets over the codec
+/// and container enums, so a host asks rather than assuming from the platform.
+public struct GossMediaCapabilities: Sendable {
+    public var videoCodecs: UInt32
+    public var audioCodecs: UInt32
+    public var containers: UInt32
+    public var maxWidth: UInt32
+    public var maxHeight: UInt32
+    public var maxBitDepth: UInt32
+    public var hdr: Bool
+    public var zeroCopy: Bool
+
+    init(_ raw: goss_media_capabilities) {
+        videoCodecs = raw.video_codecs
+        audioCodecs = raw.audio_codecs
+        containers = raw.containers
+        maxWidth = raw.max_width
+        maxHeight = raw.max_height
+        maxBitDepth = raw.max_bit_depth
+        hdr = raw.hdr != 0
+        zeroCopy = raw.zero_copy != 0
+    }
+}
+
+extension GossEngine {
+    public func mediaCapabilities() throws -> GossMediaCapabilities {
+        var raw = goss_media_capabilities()
+        try checked(goss_engine_media_capabilities(handle, &raw))
+        return GossMediaCapabilities(raw)
+    }
+}

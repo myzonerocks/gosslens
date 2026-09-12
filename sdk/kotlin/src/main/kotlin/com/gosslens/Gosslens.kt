@@ -23,6 +23,18 @@ enum class Interruption(val raw: Int) {
     PAUSE(0), CAMERA_LOST(1), AUDIO_ROUTE(2), BACKGROUNDED(3), THERMAL(4);
 }
 
+/** What this build's media backend declares it encodes. */
+data class MediaCapabilities(
+    val videoCodecs: Int,
+    val audioCodecs: Int,
+    val containers: Int,
+    val maxWidth: Int,
+    val maxHeight: Int,
+    val maxBitDepth: Int,
+    val hdr: Boolean,
+    val zeroCopy: Boolean,
+)
+
 /** What an opened clip is and where it is. */
 data class ClipInfo(
     val width: Int,
@@ -116,6 +128,8 @@ object Gosslens {
     internal external fun nativeClipSeek(session: Long, clip: Int, targetUs: Long): Int
     internal external fun nativeClipInfo(session: Long, clip: Int, out: ByteBuffer): Int
     internal external fun nativeCloseClip(session: Long, clip: Int): Int
+    internal external fun nativeClipStep(session: Long, clip: Int, frames: Int): Int
+    internal external fun nativeMediaCapabilities(engine: Long, out: ByteBuffer): Int
     internal external fun nativeRecordingPause(engine: Long): Int
     internal external fun nativeRecordingResume(engine: Long): Int
     internal external fun nativeReportInterruption(session: Long, kind: Int): Int
@@ -853,6 +867,9 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
 
     fun closeClip(clip: Int): Boolean = Gosslens.nativeCloseClip(handle, clip) == 0
 
+    /** Forward decodes; backward seeks and decodes. */
+    fun clipStep(clip: Int, frames: Int): Boolean = Gosslens.nativeClipStep(handle, clip, frames) == 0
+
     /**
      * Holds the recording clock. Frames submitted while paused are not written and
      * the output has no gap, so a pause and resume pair is a clip boundary.
@@ -1525,6 +1542,15 @@ class GossSession private constructor(
     data class NodeReport(val id: String, val nodeIndex: Int, val state: NodeState, val reason: NodeReason)
 
     /** What the engine is doing now; every field is measured, not configured. */
+    /** What this build's media backend declares it encodes. */
+    fun mediaCapabilities(): MediaCapabilities? {
+        // Eight u32 in declaration order.
+        val buf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeMediaCapabilities(engine.handle, buf) != 0) return null
+        val w = buf.asIntBuffer()
+        return MediaCapabilities(w.get(0), w.get(1), w.get(2), w.get(3), w.get(4), w.get(5), w.get(6) != 0, w.get(7) != 0)
+    }
+
     fun engineReport(): EngineReport? {
         // Thirteen u32, four padding bytes, then three u64: the struct's own layout.
         val buf = ByteBuffer.allocateDirect(14 * 4 + 3 * 8).order(ByteOrder.nativeOrder())

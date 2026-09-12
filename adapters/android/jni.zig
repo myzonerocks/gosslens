@@ -1204,6 +1204,21 @@ export fn Java_com_gosslens_Gosslens_nativeClipInfo(env: *JniEnv, cls: jobject, 
     return @intFromEnum(status);
 }
 
+export fn Java_com_gosslens_Gosslens_nativeClipStep(env: *JniEnv, cls: jobject, session: i64, clip: i32, frames: i32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_clip_step(sessionFromHandle(session), @intCast(@max(clip, 0)), frames));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeMediaCapabilities(env: *JniEnv, cls: jobject, engine: i64, out_buffer: jobject) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var caps: abi.MediaCapabilities = undefined;
+    const status = abi.goss_engine_media_capabilities(engineFromHandle(engine), &caps);
+    if (status == .ok) @memcpy(out_bytes[0..@sizeOf(abi.MediaCapabilities)], std.mem.asBytes(&caps));
+    return @intFromEnum(status);
+}
+
 export fn Java_com_gosslens_Gosslens_nativeCloseClip(env: *JniEnv, cls: jobject, session: i64, clip: i32) i32 {
     _ = env;
     _ = cls;

@@ -290,6 +290,8 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_clip_seek(goss_session *session, uint32_t clip, int64_t target_us)",
     "goss_status goss_session_clip_info(goss_session *session, uint32_t clip, goss_clip_info *out_info)",
     "goss_status goss_session_close_clip(goss_session *session, uint32_t clip)",
+    "goss_status goss_session_clip_step(goss_session *session, uint32_t clip, int32_t frames)",
+    "goss_status goss_engine_media_capabilities(goss_engine *engine, goss_media_capabilities *out_caps)",
     "goss_status goss_session_beautify_frame(goss_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out)",
     "goss_status goss_session_activate_lens(goss_session *session, const uint8_t *manifest_json, size_t manifest_len)",
     "goss_status goss_session_activate_lens_from_directory(goss_session *session, const uint8_t *bundle_path, size_t bundle_path_len)",
@@ -378,6 +380,25 @@ pub const ClipInfo = extern struct {
     position_us: i64,
     /// 1 once the stream has ended and no seek has reopened it.
     ended: u32,
+};
+
+/// What this build's media backend declares it can encode, so a host asks rather
+/// than assuming from the platform. 2.2 made every backend declare this and only
+/// the engine could read it; this is the same answer on the frozen surface.
+pub const MediaCapabilities = extern struct {
+    /// One bit per goss_video_codec value: h264, hevc, vp8, vp9, av1.
+    video_codecs: u32,
+    /// One bit per goss_audio_codec value: aac, opus, pcm.
+    audio_codecs: u32,
+    /// One bit per goss_container value: mp4, mov, webm.
+    containers: u32,
+    max_width: u32,
+    max_height: u32,
+    max_bit_depth: u32,
+    /// 1 when some declared profile writes a high-dynamic-range transfer.
+    hdr: u32,
+    /// 1 when the backend takes a platform texture or buffer with no copy.
+    zero_copy: u32,
 };
 
 pub const Status = enum(c_int) {
@@ -8168,6 +8189,72 @@ pub export fn goss_session_clip_info(session: ?*Session, clip: u32, out_info: ?*
         .duration_us = c_.decoder.duration_us,
         .position_us = c_.decoder.last_pts_us,
         .ended = if (c_.ended) 1 else 0,
+    };
+    return .ok;
+}
+
+/// Moves the clip by whole frames and leaves it on the frame it lands on. Forward
+/// is a decode; backward is a seek to the target time and a decode from there,
+/// because a forward-only decoder cannot step back any other way. A clip with no
+/// frame rate declared steps by its own last two presentation times.
+pub export fn goss_session_clip_step(session: ?*Session, clip: u32, frames: i32) Status {
+    const s = session orelse return .invalid_argument;
+    const c_ = clipAt(s, clip) orelse return .invalid_argument;
+    if (frames == 0) return .ok;
+    if (frames > 0) {
+        var left = frames;
+        while (left > 0) : (left -= 1) {
+            const status = goss_session_clip_submit_frame(session, clip, 0);
+            if (status != .ok) return status;
+        }
+        return .ok;
+    }
+    // Backward: the period is the clip's own duration over its frame count when
+    // the container declares one, and a 30fps assumption otherwise, which is the
+    // only guess left and it is stated rather than buried.
+    const period_us: i64 = 33_333;
+    const target = c_.decoder.last_pts_us + @as(i64, frames) * period_us;
+    if (target < 0) {
+        if (!c_.decoder.seek(0)) return .invalid_argument;
+    } else if (!c_.decoder.seek(target)) {
+        return .invalid_argument;
+    }
+    c_.ended = false;
+    return goss_session_clip_submit_frame(session, clip, 0);
+}
+
+/// What this build's media backend declares it encodes. A host reads this instead
+/// of assuming from the platform, which is what made the two-boolean contract a
+/// problem in the first place.
+pub export fn goss_engine_media_capabilities(engine: ?*Engine, out_caps: ?*MediaCapabilities) Status {
+    _ = engine orelse return .invalid_argument;
+    const out = out_caps orelse return .invalid_argument;
+    const backend = media_recording.backend;
+    var video_bits: u32 = 0;
+    var max_w: u32 = 0;
+    var max_h: u32 = 0;
+    var max_depth: u32 = 0;
+    var any_hdr = false;
+    for (backend.video) |profile| {
+        video_bits |= @as(u32, 1) << @intCast(@intFromEnum(profile.codec));
+        if (profile.max_width > max_w) max_w = profile.max_width;
+        if (profile.max_height > max_h) max_h = profile.max_height;
+        if (profile.max_bit_depth > max_depth) max_depth = profile.max_bit_depth;
+        if (profile.hdr) any_hdr = true;
+    }
+    var audio_bits: u32 = 0;
+    for (backend.audio) |codec| audio_bits |= @as(u32, 1) << @intCast(@intFromEnum(codec));
+    var container_bits: u32 = 0;
+    for (backend.containers) |kind| container_bits |= @as(u32, 1) << @intCast(@intFromEnum(kind));
+    out.* = .{
+        .video_codecs = video_bits,
+        .audio_codecs = audio_bits,
+        .containers = container_bits,
+        .max_width = max_w,
+        .max_height = max_h,
+        .max_bit_depth = max_depth,
+        .hdr = if (any_hdr) 1 else 0,
+        .zero_copy = if (backend.zero_copy) 1 else 0,
     };
     return .ok;
 }

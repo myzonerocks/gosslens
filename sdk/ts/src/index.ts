@@ -8,6 +8,18 @@
 
 export const GOSS_OK = 0;
 
+/// What this build's media backend declares it encodes.
+export interface GossMediaCapabilities {
+  videoCodecs: number;
+  audioCodecs: number;
+  containers: number;
+  maxWidth: number;
+  maxHeight: number;
+  maxBitDepth: number;
+  hdr: boolean;
+  zeroCopy: boolean;
+}
+
 /// What interrupted a recording, as the page saw it.
 export const enum GossInterruption {
   Pause = 0,
@@ -1106,6 +1118,29 @@ export class GossEngine {
   /// What the engine is doing now, as against what it was asked for. Every
   /// field is measured. The u64 fields are read as their low word, which holds
   /// the whole count at any rate this engine reaches.
+  /// What this build's media backend declares it encodes, as bit sets over the
+  /// codec and container enums, so a page asks rather than assuming.
+  mediaCapabilities(): GossMediaCapabilities | null {
+    const bytes = 8 * 4;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    try {
+      if (this.mod.ccall("goss_engine_media_capabilities", "number", ["number", "number"], [this.handle, ptr]) !== GOSS_OK) return null;
+      const w = (offset: number) => this.mod.HEAPU32[(ptr + offset) >> 2];
+      return {
+        videoCodecs: w(0),
+        audioCodecs: w(4),
+        containers: w(8),
+        maxWidth: w(12),
+        maxHeight: w(16),
+        maxBitDepth: w(20),
+        hdr: w(24) !== 0,
+        zeroCopy: w(28) !== 0,
+      };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+    }
+  }
+
   engineReport(): GossEngineReport | null {
     const bytes = 14 * 4 + 3 * 8;
     const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;

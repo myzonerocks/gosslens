@@ -358,6 +358,13 @@ public final class GossSession: @unchecked Sendable {
         try checked(goss_session_close_clip(handle, clip))
     }
 
+    /// Moves by whole frames and leaves the clip on the one it lands on. Forward
+    /// decodes; backward seeks and decodes, because a forward-only decoder cannot
+    /// step back any other way.
+    public func clipStep(_ clip: UInt32, frames: Int32) throws {
+        try checked(goss_session_clip_step(handle, clip, frames))
+    }
+
     // MARK: - Beauty
 
     public func enableBeauty(resourceDir: String) throws {

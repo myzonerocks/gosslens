@@ -228,6 +228,8 @@ the capability is present on all three platforms; only the mechanism differs.
 | `goss_session_clip_seek` | `clipSeek(clip, targetUs)`, the keyframe at or before a time, refused past the end rather than clamped | native SDKs |
 | `goss_session_clip_info` | `clipInfo(clip)`, the clip's size, duration, the position last submitted, and whether it ended | native SDKs |
 | `goss_session_close_clip` | `closeClip(clip)` | native SDKs |
+| `goss_session_clip_step` | `clipStep(clip, frames)`, moves by whole frames and leaves the clip on the one it lands on. Forward decodes; backward seeks and decodes, because a forward-only decoder cannot step back any other way | native SDKs |
+| `goss_engine_media_capabilities` | `mediaCapabilities()`, what this build's media backend declares it encodes as bit sets over the codec and container enums, so a host asks rather than assuming from the platform | all SDKs |
 
 ### Events and degradation
 

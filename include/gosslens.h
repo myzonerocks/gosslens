@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 124u
+#define GOSS_ABI_MINOR 126u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -1075,6 +1075,27 @@ goss_status goss_session_clip_seek(goss_session *session, uint32_t clip, int64_t
 
 goss_status goss_session_clip_info(goss_session *session, uint32_t clip, goss_clip_info *out_info);
 goss_status goss_session_close_clip(goss_session *session, uint32_t clip);
+
+/* Graph thread. Moves the clip by whole frames and leaves it on the one it lands
+ * on. Forward is a decode; backward is a seek and a decode, because a
+ * forward-only decoder cannot step back any other way. */
+goss_status goss_session_clip_step(goss_session *session, uint32_t clip, int32_t frames);
+
+/* What this build's media backend declares it encodes, as bit sets over the codec
+ * and container enums, so a host asks rather than assuming from the platform. */
+typedef struct goss_media_capabilities {
+    uint32_t video_codecs;   /* bit per goss_video_codec */
+    uint32_t audio_codecs;   /* bit per goss_audio_codec */
+    uint32_t containers;     /* bit per goss_container */
+    uint32_t max_width;
+    uint32_t max_height;
+    uint32_t max_bit_depth;
+    uint32_t hdr;            /* 1 when a declared profile writes an hdr transfer */
+    uint32_t zero_copy;      /* 1 when the backend takes a platform buffer */
+} goss_media_capabilities;
+
+/* Any thread. */
+goss_status goss_engine_media_capabilities(goss_engine *engine, goss_media_capabilities *out_caps);
 
 /* Graph thread. Multi-source composition (Duet, Stitch, live grids). Register a
  * named RGBA source with define_source, feed it with submit_source_frame_rgba_copy,

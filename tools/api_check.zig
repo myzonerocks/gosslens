@@ -45,6 +45,7 @@ const no_ts_wrapper = [_]Exception{
     .{ .op = "goss_session_clip_seek", .why = "paired with open_clip; a page seeks its own video element" },
     .{ .op = "goss_session_clip_info", .why = "paired with open_clip" },
     .{ .op = "goss_session_close_clip", .why = "paired with open_clip" },
+    .{ .op = "goss_session_clip_step", .why = "paired with open_clip; a page steps its own video element" },
 };
 
 const Exception = struct { op: []const u8, why: []const u8 };
