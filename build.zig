@@ -354,6 +354,8 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("perception", perceptionModule(b, target, optimize));
     abi_module.addImport("text", textModule(b, target, optimize));
     abi_module.addImport("memory", memoryModule(b, target, optimize));
+    abi_module.addImport("screen", screenModule(b, target, optimize));
+    abi_module.addImport("screen_capture", screenCaptureModule(b, target, optimize));
     abi_module.addImport("media_video", mediaVideoModule(b, target, optimize, null));
     abi_module.addImport("photo", photoModule(b, target, optimize, null));
     abi_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
@@ -493,6 +495,7 @@ pub fn build(b: *std.Build) void {
     const media_core_tests = b.addTest(.{ .root_module = mediaCoreModule(b, target, optimize, math_module) });
     const text_core_tests = b.addTest(.{ .root_module = textModule(b, target, optimize) });
     const screen_core_tests = b.addTest(.{ .root_module = screenModule(b, target, optimize) });
+    const screen_capture_tests = b.addTest(.{ .root_module = screenCaptureModule(b, target, optimize) });
     const memory_core_tests = b.addTest(.{ .root_module = memoryModule(b, target, optimize) });
     const spatial_core_tests = b.addTest(.{ .root_module = spatialModule(b, target, optimize) });
     // The determinism gate: the same input stream must produce the same records.
@@ -586,6 +589,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(media_core_tests).step);
     test_step.dependOn(&b.addRunArtifact(text_core_tests).step);
     test_step.dependOn(&b.addRunArtifact(screen_core_tests).step);
+    test_step.dependOn(&b.addRunArtifact(screen_capture_tests).step);
     test_step.dependOn(&b.addRunArtifact(memory_core_tests).step);
     test_step.dependOn(&b.addRunArtifact(spatial_core_tests).step);
     test_step.dependOn(&b.addRunArtifact(determinism_tests).step);
@@ -1035,6 +1039,8 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("perception", perceptionModule(b, target, optimize));
         abi_tracking_module.addImport("text", textModule(b, target, optimize));
         abi_tracking_module.addImport("memory", memoryModule(b, target, optimize));
+        abi_tracking_module.addImport("screen", screenModule(b, target, optimize));
+        abi_tracking_module.addImport("screen_capture", screenCaptureModule(b, target, optimize));
         abi_tracking_module.addImport("media_video", mediaVideoModule(b, target, optimize, null));
         abi_tracking_module.addImport("photo", photoModule(b, target, optimize, null));
         abi_tracking_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
@@ -1315,6 +1321,8 @@ pub fn build(b: *std.Build) void {
         abi_wasm.addImport("perception", perceptionModule(b, wasm_target, opt_small));
         abi_wasm.addImport("text", textModule(b, wasm_target, opt_small));
         abi_wasm.addImport("memory", memoryModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("screen", screenModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("screen_capture", screenCaptureModule(b, wasm_target, opt_small));
         abi_wasm.addImport("media_video", mediaVideoModule(b, wasm_target, opt_small, null));
         abi_wasm.addImport("photo", photoModule(b, wasm_target, opt_small, null));
         abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, opt_small));
@@ -1546,6 +1554,8 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("perception", perceptionModule(b, target, optimize));
         abi_conformance_module.addImport("text", textModule(b, target, optimize));
         abi_conformance_module.addImport("memory", memoryModule(b, target, optimize));
+        abi_conformance_module.addImport("screen", screenModule(b, target, optimize));
+        abi_conformance_module.addImport("screen_capture", screenCaptureModule(b, target, optimize));
         abi_conformance_module.addImport("media_video", mediaVideoModule(b, target, optimize, null));
         abi_conformance_module.addImport("photo", photoModule(b, target, optimize, null));
         abi_conformance_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
@@ -2419,6 +2429,32 @@ fn memoryModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     // The vault primitives already exist in the media library; the memory plane
     // seals through them rather than growing a second cipher.
     module.addImport("library", medialibModule(b, target, optimize));
+    return module;
+}
+
+/// Screen capture, per target. ScreenCaptureKit on Apple, which is also the
+/// desktop harness path, so the proof runs where the suite runs; every other
+/// target takes the stub and reports the capability as absent.
+fn screenCaptureModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-screen-capture-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    const is_apple = target.result.os.tag == .macos or target.result.os.tag == .ios;
+    const module = b.addModule(key, .{
+        .root_source_file = b.path(if (is_apple) "adapters/screen/screen_capture.zig" else "adapters/screen/screen_capture_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    if (is_apple) {
+        module.addCSourceFile(.{
+            .file = b.path("adapters/screen/screen_capture_apple.mm"),
+            .flags = &.{ "-std=c++17", "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
+        module.link_libcpp = true;
+        module.linkFramework("Foundation", .{});
+        module.linkFramework("CoreMedia", .{});
+        module.linkFramework("CoreVideo", .{});
+        module.linkFramework("ScreenCaptureKit", .{});
+    }
     return module;
 }
 

@@ -382,3 +382,50 @@ public struct GossReading: Sendable {
         self.paragraph = raw.paragraph
     }
 }
+
+/// What the engine will let this process capture. Scale is the field to carry
+/// through: a point sent back without it lands at half its place on a retina
+/// display.
+public struct GossScreenSurface: Sendable {
+    public let id: UInt64
+    public let kind: UInt32
+    public let title: String
+    public let logicalWidth: Float
+    public let logicalHeight: Float
+    public let originX: Float
+    public let originY: Float
+    public let scale: Float
+}
+
+public extension GossEngine {
+    /// Everything capturable. Empty where permission has not been granted, so
+    /// prompt rather than treating it as an error.
+    func screens() throws -> [GossScreenSurface] {
+        var count: UInt32 = 0
+        let status = goss_engine_screen_count(handle, &count)
+        if status == GOSS_UNSUPPORTED { return [] }
+        try checked(status)
+        var out: [GossScreenSurface] = []
+        out.reserveCapacity(Int(count))
+        for index in 0..<count {
+            var raw = goss_screen_surface()
+            try checked(goss_engine_screen_at(handle, index, &raw))
+            var needed = 0
+            _ = goss_engine_screen_title(handle, index, nil, 0, &needed)
+            var title = ""
+            if needed > 0 {
+                var bytes = [UInt8](repeating: 0, count: needed)
+                let titleStatus = bytes.withUnsafeMutableBufferPointer { buffer in
+                    goss_engine_screen_title(handle, index, buffer.baseAddress, needed, &needed)
+                }
+                if titleStatus == GOSS_OK { title = String(decoding: bytes, as: UTF8.self) }
+            }
+            out.append(GossScreenSurface(
+                id: raw.id, kind: raw.kind, title: title,
+                logicalWidth: raw.logical_width, logicalHeight: raw.logical_height,
+                originX: raw.origin_x, originY: raw.origin_y, scale: raw.scale
+            ))
+        }
+        return out
+    }
+}

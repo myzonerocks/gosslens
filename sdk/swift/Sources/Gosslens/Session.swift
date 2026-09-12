@@ -412,6 +412,42 @@ public final class GossSession: @unchecked Sendable {
         return (raw.prefix(Int(count)).map(GossEvent.init), dropped)
     }
 
+    // MARK: - Screens
+
+    /// Opens a screen as a source. A scale of zero takes the surface's own, which
+    /// is what you want unless you are deliberately capturing small.
+    public func openScreen(surfaceId: UInt64, scale: Float = 0) throws -> UInt32 {
+        var screen: UInt32 = 0
+        try checked(goss_session_open_screen(handle, surfaceId, scale, &screen))
+        return screen
+    }
+
+    public func closeScreen(_ screen: UInt32) throws {
+        try checked(goss_session_close_screen(handle, screen))
+    }
+
+    /// Submits the newest frame under a source name. Answers false when the
+    /// screen has not changed, so a still desktop costs nothing.
+    public func stepScreen(_ screen: UInt32, source: String = "") -> Bool {
+        let bytes = Array(source.utf8)
+        if bytes.isEmpty {
+            return goss_session_step_screen(handle, screen, nil, 0) == GOSS_OK
+        }
+        return bytes.withUnsafeBufferPointer { buffer in
+            goss_session_step_screen(handle, screen, buffer.baseAddress, bytes.count) == GOSS_OK
+        }
+    }
+
+    /// Where a normalized point lands: the surface's logical points, its backing
+    /// pixels, and the desktop.
+    public func screenPoint(_ screen: UInt32, x: Float, y: Float) throws -> (logical: (Float, Float), pixel: (Float, Float), desktop: (Float, Float)) {
+        var logical = [Float](repeating: 0, count: 2)
+        var pixel = [Float](repeating: 0, count: 2)
+        var desktop = [Float](repeating: 0, count: 2)
+        try checked(goss_session_screen_point(handle, screen, x, y, &logical, &pixel, &desktop))
+        return ((logical[0], logical[1]), (pixel[0], pixel[1]), (desktop[0], desktop[1]))
+    }
+
     // MARK: - Scope
 
     /// Narrows what this session answers. A session opens fully permissive; a

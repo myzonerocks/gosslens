@@ -220,6 +220,20 @@ object Gosslens {
     internal external fun nativeWriteReconstruction(session: Long, buffer: ByteBuffer, count: Int): Int
     internal external fun nativeMlOpSupport(model: ByteBuffer, modelLen: Int, out: ByteBuffer, capacity: Int): Int
 
+    internal external fun nativeScreenCount(engine: Long): Int
+
+    internal external fun nativeScreenAt(engine: Long, index: Int, out: ByteBuffer): Int
+
+    internal external fun nativeScreenTitle(engine: Long, index: Int, out: ByteBuffer, capacity: Int): Int
+
+    internal external fun nativeOpenScreen(session: Long, surfaceId: Long, scale: Float): Int
+
+    internal external fun nativeCloseScreen(session: Long, screen: Int): Int
+
+    internal external fun nativeStepScreen(session: Long, screen: Int, name: ByteBuffer?, nameLen: Int): Int
+
+    internal external fun nativeScreenPoint(session: Long, screen: Int, x: Float, y: Float, out: ByteBuffer): Int
+
     internal external fun nativeSetScope(session: Long, sections: Int, verbs: Int): Int
 
     internal external fun nativeScope(session: Long): Long
@@ -2754,3 +2768,17 @@ data class GossReading(
 
 /// One remembered embedding and how near it was.
 data class GossMemoryMatch(val id: Long, val score: Float)
+
+/// What the engine will let this process capture. Scale is the field to carry
+/// through: a point sent back without it lands at half its place on a dense
+/// display.
+data class GossScreenSurface(
+    val id: Long,
+    val kind: Int,
+    val title: String,
+    val logicalWidth: Float,
+    val logicalHeight: Float,
+    val originX: Float,
+    val originY: Float,
+    val scale: Float,
+)

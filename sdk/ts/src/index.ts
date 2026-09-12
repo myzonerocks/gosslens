@@ -21,6 +21,20 @@ export interface GossMediaCapabilities {
   zeroCopy: boolean;
 }
 
+/// What the engine will let this process capture. Scale is the field to carry
+/// through: a point sent back without it lands at half its place on a retina
+/// display.
+export interface GossScreenSurface {
+  id: number;
+  kind: number;
+  title: string;
+  logicalWidth: number;
+  logicalHeight: number;
+  originX: number;
+  originY: number;
+  scale: number;
+}
+
 /// What the frame says at one place in it. The quadrilateral is in normalized
 /// frame space and in reading order, so a coordinate sent back maps to a pixel.
 export interface GossReading {
@@ -1227,6 +1241,43 @@ export class GossEngine {
       };
     } finally {
       this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+    }
+  }
+
+  /// Everything capturable. Empty where permission has not been granted, so
+  /// prompt rather than treating it as an error.
+  screens(): GossScreenSurface[] {
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const entryPtr = this.mod.ccall("goss_alloc", "number", ["number"], [40]) as number;
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    const out: GossScreenSurface[] = [];
+    try {
+      if (this.mod.ccall("goss_engine_screen_count", "number", ["number", "number"], [this.handle, countPtr]) !== GOSS_OK) return out;
+      const count = this.mod.HEAPU32[countPtr >> 2];
+      for (let i = 0; i < count; i += 1) {
+        if (this.mod.ccall("goss_engine_screen_at", "number", ["number", "number", "number"], [this.handle, i, entryPtr]) !== GOSS_OK) continue;
+        const f = (off: number) => this.mod.HEAPF32[(entryPtr + off) >> 2];
+        const u = (off: number) => this.mod.HEAPU32[(entryPtr + off) >> 2];
+        this.mod.ccall("goss_engine_screen_title", "number", ["number", "number", "number", "number", "number"], [this.handle, i, 0, 0, lenPtr]);
+        const needed = this.mod.HEAPU32[lenPtr >> 2];
+        let title = "";
+        if (needed > 0) {
+          const titlePtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed]) as number;
+          try {
+            if (this.mod.ccall("goss_engine_screen_title", "number", ["number", "number", "number", "number", "number"], [this.handle, i, titlePtr, needed, lenPtr]) === GOSS_OK) {
+              title = new TextDecoder().decode(this.mod.HEAPU8.subarray(titlePtr, titlePtr + needed));
+            }
+          } finally {
+            this.mod.ccall("goss_free", null, ["number", "number"], [titlePtr, needed]);
+          }
+        }
+        out.push({ id: u(0), kind: u(8), title, logicalWidth: f(12), logicalHeight: f(16), originX: f(20), originY: f(24), scale: f(28) });
+      }
+      return out;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [entryPtr, 40]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 8]);
     }
   }
 
@@ -3220,6 +3271,46 @@ export class GossSession {
       }
     } finally {
       this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    }
+  }
+
+  /// Opens a screen as a source. A scale of zero takes the surface's own.
+  openScreen(surfaceId: number, scale = 0): number | null {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    try {
+      if (this.mod.ccall("goss_session_open_screen", "number", ["number", "number", "number", "number"], [this.handle, surfaceId, scale, ptr]) !== GOSS_OK) return null;
+      return this.mod.HEAPU32[ptr >> 2];
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 4]);
+    }
+  }
+
+  closeScreen(screen: number): boolean {
+    return this.mod.ccall("goss_session_close_screen", "number", ["number", "number"], [this.handle, screen]) === GOSS_OK;
+  }
+
+  /// Submits the newest frame. False when the screen has not changed, so a still
+  /// desktop costs nothing.
+  stepScreen(screen: number, source = ""): boolean {
+    const bytes = new TextEncoder().encode(source);
+    const ptr = bytes.length === 0 ? 0 : (this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]) as number);
+    try {
+      if (ptr !== 0) this.mod.HEAPU8.set(bytes, ptr);
+      return this.mod.ccall("goss_session_step_screen", "number", ["number", "number", "number", "number"], [this.handle, screen, ptr, bytes.length]) === GOSS_OK;
+    } finally {
+      if (ptr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
+    }
+  }
+
+  /// Where a normalized point lands: logical points, backing pixels, desktop.
+  screenPoint(screen: number, x: number, y: number): { logical: [number, number]; pixel: [number, number]; desktop: [number, number] } | null {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [24]) as number;
+    try {
+      if (this.mod.ccall("goss_session_screen_point", "number", ["number", "number", "number", "number", "number", "number", "number"], [this.handle, screen, x, y, ptr, ptr + 8, ptr + 16]) !== GOSS_OK) return null;
+      const f = (off: number) => this.mod.HEAPF32[(ptr + off) >> 2];
+      return { logical: [f(0), f(4)], pixel: [f(8), f(12)], desktop: [f(16), f(20)] };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 24]);
     }
   }
 

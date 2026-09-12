@@ -910,6 +910,32 @@ goss_status goss_session_memory_load(goss_session *session, const uint8_t *bytes
 goss_status goss_session_set_scope(goss_session *session, uint32_t sections, uint32_t verbs);
 goss_status goss_session_scope(goss_session *session, uint32_t *out_sections, uint32_t *out_verbs);
 
+/* One thing that can be captured. The scale factor is the field a caller must not
+   ignore: a point sent back without it lands at half its intended place on a
+   retina display. */
+typedef struct goss_screen_surface {
+    uint64_t id;
+    uint32_t kind;
+    float logical_width;
+    float logical_height;
+    float origin_x;
+    float origin_y;
+    float scale;
+    uint32_t title_len;
+} goss_screen_surface;
+
+/* Zero surfaces is the honest answer for a host that has not been granted
+   permission, so a caller prompts rather than reading an error. */
+goss_status goss_engine_screen_count(goss_engine *engine, uint32_t *out_count);
+goss_status goss_engine_screen_at(goss_engine *engine, uint32_t index, goss_screen_surface *out_surface);
+goss_status goss_engine_screen_title(goss_engine *engine, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len);
+/* A scale of zero takes the surface's own. */
+goss_status goss_session_open_screen(goss_session *session, uint64_t surface_id, float scale, uint32_t *out_screen);
+goss_status goss_session_close_screen(goss_session *session, uint32_t screen);
+/* GOSS_AGAIN means the screen has not changed since the last step. */
+goss_status goss_session_step_screen(goss_session *session, uint32_t screen, const uint8_t *name, size_t name_len);
+goss_status goss_session_screen_point(goss_session *session, uint32_t screen, float x, float y, float *out_logical, float *out_pixel, float *out_desktop);
+
 goss_status goss_engine_read_report(goss_engine *engine, goss_engine_report *out_report);
 
 /* Graph thread. This session's counters: frames in and out, the rung and how

@@ -322,6 +322,81 @@ export fn Java_com_gosslens_Gosslens_nativeMlOpSupport(env: *JniEnv, cls: jobjec
     return @intCast(written);
 }
 
+/// Screen capture. MediaProjection is the Android path and is not wired yet, so
+/// these cross to the same ABI and report the capability as absent rather than
+/// pretending: a host reads zero surfaces and prompts.
+export fn Java_com_gosslens_Gosslens_nativeScreenCount(env: *JniEnv, cls: jobject, engine: i64) i32 {
+    _ = env;
+    _ = cls;
+    var count: u32 = 0;
+    if (abi.goss_engine_screen_count(engineFromHandle(engine), &count) != .ok) return 0;
+    return @intCast(count);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeScreenAt(env: *JniEnv, cls: jobject, engine: i64, index: i32, out_buffer: jobject) i32 {
+    _ = cls;
+    if (index < 0) return @intFromEnum(abi.Status.invalid_argument);
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var surface: abi.ScreenSurface = undefined;
+    const status = abi.goss_engine_screen_at(engineFromHandle(engine), @intCast(index), &surface);
+    if (status == .ok) @memcpy(out_bytes[0..@sizeOf(abi.ScreenSurface)], std.mem.asBytes(&surface));
+    return @intFromEnum(status);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeScreenTitle(env: *JniEnv, cls: jobject, engine: i64, index: i32, out_buffer: jobject, capacity: i32) i32 {
+    _ = cls;
+    if (index < 0 or capacity < 0) return -1;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return -1;
+    var written: usize = 0;
+    const status = abi.goss_engine_screen_title(engineFromHandle(engine), @intCast(index), out_bytes, @intCast(capacity), &written);
+    if (status != .ok and status != .again) return -1;
+    return @intCast(written);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeOpenScreen(env: *JniEnv, cls: jobject, session: i64, surface_id: i64, scale: f32) i32 {
+    _ = env;
+    _ = cls;
+    var screen: u32 = 0;
+    if (abi.goss_session_open_screen(sessionFromHandle(session), @bitCast(surface_id), scale, &screen) != .ok) return -1;
+    return @intCast(screen);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeCloseScreen(env: *JniEnv, cls: jobject, session: i64, screen: i32) i32 {
+    _ = env;
+    _ = cls;
+    if (screen < 0) return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_close_screen(sessionFromHandle(session), @intCast(screen)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeStepScreen(env: *JniEnv, cls: jobject, session: i64, screen: i32, name: jobject, name_len: i32) i32 {
+    _ = cls;
+    if (screen < 0) return @intFromEnum(abi.Status.invalid_argument);
+    const source = if (name_len > 0) getDirectBufferAddress(env, name) else null;
+    return @intFromEnum(abi.goss_session_step_screen(
+        sessionFromHandle(session),
+        @intCast(screen),
+        source,
+        if (name_len > 0) @intCast(name_len) else 0,
+    ));
+}
+
+/// Six floats out: logical, pixel and desktop, in that order.
+export fn Java_com_gosslens_Gosslens_nativeScreenPoint(env: *JniEnv, cls: jobject, session: i64, screen: i32, x: f32, y: f32, out_buffer: jobject) i32 {
+    _ = cls;
+    if (screen < 0) return @intFromEnum(abi.Status.invalid_argument);
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var logical: [2]f32 = undefined;
+    var pixel: [2]f32 = undefined;
+    var desktop: [2]f32 = undefined;
+    const status = abi.goss_session_screen_point(sessionFromHandle(session), @intCast(screen), x, y, &logical, &pixel, &desktop);
+    if (status == .ok) {
+        @memcpy(out_bytes[0..8], std.mem.asBytes(&logical));
+        @memcpy(out_bytes[8..16], std.mem.asBytes(&pixel));
+        @memcpy(out_bytes[16..24], std.mem.asBytes(&desktop));
+    }
+    return @intFromEnum(status);
+}
+
 /// The scope in force. Sections in the low word and verbs in the high, so one
 /// crossing reads both.
 export fn Java_com_gosslens_Gosslens_nativeSetScope(env: *JniEnv, cls: jobject, session: i64, sections: i32, verbs: i32) i32 {

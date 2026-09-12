@@ -1,8 +1,6 @@
-//! Anchors that survive. A point agreed in a room is worth nothing if it is
-//! forgotten when the app closes, and worth nothing to a second device if the
-//! two cannot name the same point. This is the saved map: anchors with their
-//! labels, in a versioned file, with the relocalization quality reported rather
-//! than assumed.
+//! Anchors that survive. A point agreed in a room is worth nothing forgotten,
+//! and worth nothing to a second device if neither can name it, so an anchor
+//! carries a purpose and a label in a versioned file.
 
 const std = @import("std");
 

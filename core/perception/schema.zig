@@ -1,8 +1,6 @@
 //! The snapshot record's schema, declared rather than implied. The writer and
 //! the JSON projector both worked from offsets written by hand in two places,
-//! which is exactly the arrangement that lets one drift from the other. The
-//! layout lives here, the projector reads through it, and a baseline file pins
-//! it so a field cannot be reordered or dropped inside a major version.
+//! which is what lets one drift from the other. A baseline gate pins it.
 
 const std = @import("std");
 const snapshot = @import("snapshot.zig");

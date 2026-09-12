@@ -1,9 +1,7 @@
-//! Screens as a source. A captured surface is not a camera frame: it has a
-//! scale factor, a logical geometry, and an origin somewhere on a desktop, and
-//! an agent that says "press here" needs that point to land on a real pixel of
-//! a real display. This is the arithmetic that makes that true, plus the
-//! structured layer the platform already knows and nobody should infer from
-//! pixels.
+//! Screens as a source. A captured surface has a scale factor and a desktop
+//! origin, and an agent that says "press here" needs that point to land on a
+//! real pixel. This is that arithmetic, plus the layer the platform already
+//! knows and nobody should infer from pixels.
 
 const std = @import("std");
 

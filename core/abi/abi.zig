@@ -19,6 +19,8 @@ const ml_infer = @import("ml_infer");
 const text_core = @import("text");
 const text_infer = @import("text_infer");
 const memory_plane = @import("memory");
+const screen_geometry = @import("screen");
+const screen_capture = @import("screen_capture");
 const diffusion = @import("diffusion");
 const face = @import("face");
 const face_geometry = @import("face_geometry");
@@ -365,6 +367,13 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_memory_load(goss_session *session, const uint8_t *bytes, size_t len)",
     "goss_status goss_session_set_scope(goss_session *session, uint32_t sections, uint32_t verbs)",
     "goss_status goss_session_scope(goss_session *session, uint32_t *out_sections, uint32_t *out_verbs)",
+    "goss_status goss_engine_screen_count(goss_engine *engine, uint32_t *out_count)",
+    "goss_status goss_engine_screen_at(goss_engine *engine, uint32_t index, goss_screen_surface *out_surface)",
+    "goss_status goss_engine_screen_title(goss_engine *engine, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_open_screen(goss_session *session, uint64_t surface_id, float scale, uint32_t *out_screen)",
+    "goss_status goss_session_close_screen(goss_session *session, uint32_t screen)",
+    "goss_status goss_session_step_screen(goss_session *session, uint32_t screen, const uint8_t *name, size_t name_len)",
+    "goss_status goss_session_screen_point(goss_session *session, uint32_t screen, float x, float y, float *out_logical, float *out_pixel, float *out_desktop)",
 };
 
 // The minor advances from the surface, never by hand: a new op lengthens
@@ -610,6 +619,12 @@ const pixel_format_rgba8: u32 = 4;
 
 pub const Engine = struct {
     gpa: std.mem.Allocator,
+    /// What the platform last said this process may capture. Cached on the engine
+    /// because a coordinate sent back is resolved against the surface's own
+    /// geometry, and re-enumerating per point would be a permission prompt per
+    /// point on some platforms.
+    screen_surfaces: [max_screen_surfaces]screen_capture.CSurface = undefined,
+    screen_surface_count: usize = 0,
     texture_pool: graph.Pool,
     staging_pool: graph.Pool,
     texture_pool_capacity: u16,
@@ -832,6 +847,10 @@ const max_embedding_dim = 1024;
 /// The most results one memory query returns, and how wide it searches. The
 /// width is the recall dial the index's own proof measures.
 const max_memory_results: usize = 64;
+
+/// The most capturable surfaces one enumeration holds. A desktop has a handful
+/// of displays and tens of windows; past this a caller wants a filter.
+const max_screen_surfaces: usize = 128;
 const memory_search_width: usize = 64;
 
 const max_model_digests: usize = 16;
@@ -868,6 +887,17 @@ const PendingGlbCollider = struct {
 /// A masked sprite's segmentation key: the channel and whether the sprite fills
 /// over that region (a restyle) or behind it (a greenscreen).
 const SpriteMask = struct { channel: u8, over: bool, strength: f32 = 1 };
+
+const ScreenSlot = struct {
+    capture: screen_capture.Capture,
+    bgra: []u8,
+    surface_id: u64,
+
+    fn deinit(slot: *ScreenSlot, gpa: std.mem.Allocator) void {
+        slot.capture.close();
+        gpa.free(slot.bgra);
+    }
+};
 
 pub const Session = struct {
     /// Mask scratch for the per-frame matte and segmentation polls. On the session, which lives
@@ -1029,6 +1059,9 @@ pub const Session = struct {
     memory_index: ?*memory_plane.Index = null,
     /// What this session will answer. Fully permissive until a host narrows it.
     scope: perception_mod.scope.Scope = .all,
+    /// The screens this session is capturing. A slot freed by a close is reused,
+    /// so opening and closing screens in a loop does not grow the table.
+    screens: std.ArrayListUnmanaged(?ScreenSlot) = .empty,
     text_store: TextStore = .{},
     /// The whole reading lowered once per tick, so a text.matches trigger is
     /// case-insensitive without lowering per trigger.
@@ -5418,6 +5451,11 @@ pub fn destroySession(session: *Session) void {
     teardownScript(session);
     disableText(session);
     closeMemory(session);
+    // Every screen a host opened, closed here whether or not the host closed it.
+    for (session.screens.items) |*slot| {
+        if (slot.*) |*live| live.deinit(session.engine.gpa);
+    }
+    session.screens.deinit(session.engine.gpa);
     // Every clip a host opened, closed here whether or not the host closed it: a
     // decoder and its reused decode buffer are the session's to release.
     for (session.clips.items) |*slot| {
@@ -10180,6 +10218,190 @@ pub export fn goss_session_text_string(session: ?*Session, index: u32, out: ?[*]
 /// denied them would break working code rather than protect anything. A host
 /// that wants a narrow scope says so, once, and every read and action after it
 /// answers to this.
+/// One thing that can be captured, as the platform reports it. The scale factor
+/// is the field a caller must not ignore: a point sent back without it lands at
+/// half its intended place on a retina display.
+pub const ScreenSurface = extern struct {
+    id: u64,
+    /// 0 display, 1 window, 2 application, 3 unknown.
+    kind: u32,
+    logical_width: f32,
+    logical_height: f32,
+    origin_x: f32,
+    origin_y: f32,
+    scale: f32,
+    title_len: u32,
+};
+
+/// What this process may capture. Zero is the honest answer for a host that has
+/// not been granted permission, so a caller prompts rather than reading an error
+/// it cannot act on.
+pub export fn goss_engine_screen_count(engine: ?*Engine, out_count: ?*u32) Status {
+    const e = engine orelse return .invalid_argument;
+    const out = out_count orelse return .invalid_argument;
+    if (!screen_capture.supported) {
+        out.* = 0;
+        return .unsupported;
+    }
+    e.screen_surface_count = screen_capture.enumerate(&e.screen_surfaces);
+    out.* = @intCast(e.screen_surface_count);
+    return .ok;
+}
+
+pub export fn goss_engine_screen_at(engine: ?*Engine, index: u32, out_surface: ?*ScreenSurface) Status {
+    const e = engine orelse return .invalid_argument;
+    const out = out_surface orelse return .invalid_argument;
+    if (index >= e.screen_surface_count) return .invalid_argument;
+    const s = screen_capture.view(&e.screen_surfaces[index]);
+    out.* = .{
+        .id = s.id,
+        .kind = @intFromEnum(s.kind),
+        .logical_width = s.logical_width,
+        .logical_height = s.logical_height,
+        .origin_x = s.origin_x,
+        .origin_y = s.origin_y,
+        .scale = s.scale,
+        .title_len = @intCast(s.title.len),
+    };
+    return .ok;
+}
+
+pub export fn goss_engine_screen_title(engine: ?*Engine, index: u32, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const e = engine orelse return .invalid_argument;
+    const len_out = out_len orelse return .invalid_argument;
+    if (index >= e.screen_surface_count) return .invalid_argument;
+    const title = screen_capture.view(&e.screen_surfaces[index]).title;
+    len_out.* = title.len;
+    if (title.len > capacity) return .again;
+    if (out) |p| @memcpy(p[0..title.len], title);
+    return .ok;
+}
+
+/// Opens a surface as a source. A scale of zero takes the surface's own, which is
+/// what a caller wants unless it is deliberately capturing small.
+pub export fn goss_session_open_screen(session: ?*Session, surface_id: u64, scale: f32, out_screen: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_screen orelse return .invalid_argument;
+    if (!screen_capture.supported) return .unsupported;
+    if (!s.scope.allowsVerb(.capture_screen)) return .unsupported;
+    openScreen(s, surface_id, scale, out) catch |err| return switch (err) {
+        error.NoCapture => .invalid_argument,
+        error.BadDimensions => .unsupported,
+        error.OutOfMemory => .out_of_memory,
+    };
+    return .ok;
+}
+
+/// The fallible half, so the capture and its buffer are released when a later
+/// step fails. An errdefer only runs where a real error can propagate.
+fn openScreen(s: *Session, surface_id: u64, scale: f32, out: *u32) error{ NoCapture, BadDimensions, OutOfMemory }!void {
+    const gpa = s.engine.gpa;
+    var capture = screen_capture.Capture.open(surface_id, scale) orelse return error.NoCapture;
+    errdefer capture.close();
+    if (!validDims(capture.width, capture.height)) return error.BadDimensions;
+    const bgra = try gpa.alloc(u8, @as(usize, capture.width) * capture.height * 4);
+    errdefer gpa.free(bgra);
+
+    for (s.screens.items, 0..) |slot, i| {
+        if (slot != null) continue;
+        s.screens.items[i] = .{ .capture = capture, .bgra = bgra, .surface_id = surface_id };
+        out.* = @intCast(i);
+        return;
+    }
+    try s.screens.append(gpa, .{ .capture = capture, .bgra = bgra, .surface_id = surface_id });
+    out.* = @intCast(s.screens.items.len - 1);
+}
+
+pub export fn goss_session_close_screen(session: ?*Session, screen: u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (screen >= s.screens.items.len) return .invalid_argument;
+    const slot = &s.screens.items[screen];
+    if (slot.* == null) return .invalid_argument;
+    slot.*.?.deinit(s.engine.gpa);
+    slot.* = null;
+    return .ok;
+}
+
+/// Pulls the newest frame and submits it under a source name, so a screen
+/// composites, records and egresses exactly as a camera does. A screen that has
+/// not changed answers again rather than resubmitting the same pixels.
+pub export fn goss_session_step_screen(session: ?*Session, screen: u32, name: ?[*]const u8, name_len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    if (screen >= s.screens.items.len) return .invalid_argument;
+    const slot = &(s.screens.items[screen] orelse return .invalid_argument);
+    switch (slot.capture.read(slot.bgra)) {
+        .unchanged => return .again,
+        .failed => return .invalid_argument,
+        .frame => {},
+    }
+    const desc: FrameDesc = .{
+        .width = slot.capture.last_width,
+        .height = slot.capture.last_height,
+        .pixel_format = pixel_format_bgra8,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = slot.capture.last_timestamp_us,
+    };
+    if (name) |n| {
+        if (name_len != 0) return goss_session_submit_source_frame_rgba_copy(session, n, name_len, &desc, slot.bgra.ptr, desc.width * 4);
+    }
+    return goss_session_submit_frame_rgba_copy(session, &desc, slot.bgra.ptr, desc.width * 4);
+}
+
+/// Where a normalized point an agent sent lands: the surface's own logical
+/// points, its backing pixels, and the desktop. The scale factor and the origin
+/// are applied here, once, rather than by every caller.
+pub export fn goss_session_screen_point(session: ?*Session, screen: u32, x: f32, y: f32, out_logical: ?[*]f32, out_pixel: ?[*]f32, out_desktop: ?[*]f32) Status {
+    const s = session orelse return .invalid_argument;
+    if (screen >= s.screens.items.len) return .invalid_argument;
+    const slot = s.screens.items[screen] orelse return .invalid_argument;
+
+    // The surface as the engine last enumerated it, because a window moves and a
+    // point sent against a stale origin lands on whatever is there now.
+    var surface: screen_geometry.Surface = .{
+        .id = slot.surface_id,
+        .kind = .unknown,
+        .logical_width = @floatFromInt(slot.capture.last_width),
+        .logical_height = @floatFromInt(slot.capture.last_height),
+        .scale = 1,
+    };
+    for (s.engine.screen_surfaces[0..s.engine.screen_surface_count]) |*raw| {
+        const view = screen_capture.view(raw);
+        if (view.id != slot.surface_id) continue;
+        surface = .{
+            .id = view.id,
+            .kind = switch (view.kind) {
+                .display => .display,
+                .window => .window,
+                .application => .application,
+                .unknown => .unknown,
+            },
+            .logical_width = view.logical_width,
+            .logical_height = view.logical_height,
+            .origin_x = view.origin_x,
+            .origin_y = view.origin_y,
+            .scale = view.scale,
+        };
+        break;
+    }
+
+    const landing = screen_geometry.landing(surface, .{ .x = x, .y = y });
+    if (out_logical) |p| {
+        p[0] = landing.logical.x;
+        p[1] = landing.logical.y;
+    }
+    if (out_pixel) |p| {
+        p[0] = landing.pixel.x;
+        p[1] = landing.pixel.y;
+    }
+    if (out_desktop) |p| {
+        p[0] = landing.desktop.x;
+        p[1] = landing.desktop.y;
+    }
+    return .ok;
+}
+
 pub export fn goss_session_set_scope(session: ?*Session, sections: u32, verbs: u32) Status {
     const s = session orelse return .invalid_argument;
     s.scope = .{ .sections = sections, .verbs = verbs };

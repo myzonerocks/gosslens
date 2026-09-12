@@ -1,10 +1,6 @@
 //! The MCP protocol surface: the tool list, the server info, and the result and
-//! error shapes a client reads. One static binary speaking JSON-RPC on stdin and
-//! stdout, implementing the protocol directly rather than through an SDK, so
-//! there is no runtime to install and nothing between the tools and the ABI.
-//!
-//! The stdio loop lives in main.zig; these shapes are here so they are testable
-//! without a process.
+//! error shapes a client reads. The stdio loop lives in main.zig; these shapes
+//! are here so they are testable without a process.
 
 const std = @import("std");
 

@@ -1,14 +1,7 @@
-//! A bounded ring of ordered events the render thread publishes and any thread
-//! drains.
-//!
-//! Bounded on purpose: an agent that stops draining must not grow the engine's
-//! memory, and a ring that silently forgets is worse than one that says how much
-//! it dropped. Overflow is counted and reported with the drained batch, so a
-//! consumer always knows whether it saw everything.
-//!
-//! Single producer, single consumer, no lock: the render thread publishes and one
-//! drainer reads. Two drainers would need a lock and there is no reason to have
-//! two, so the contract says one rather than paying for a case nobody wants.
+//! A bounded ring of ordered events the render thread publishes and a consumer
+//! drains. When it fills the oldest is dropped and the count of drops is
+//! reported and cleared on read, so a consumer learns it missed something rather
+//! than silently seeing a gap.
 
 const std = @import("std");
 

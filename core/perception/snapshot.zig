@@ -1,13 +1,7 @@
-//! One versioned record of everything the engine currently sees.
-//!
-//! Forward compatibility is structural rather than promised: every section
-//! carries its own tag, version and byte length, so a reader that does not know a
-//! tag steps over it by length and keeps going. That is what lets Wave 7's text
-//! section exist in the format from day one, empty, without the format breaking
-//! when it fills.
-//!
-//! Nothing here allocates. A caller hands in a buffer and is told what it would
-//! have needed, so an agent polling every frame allocates nothing.
+//! One versioned record of everything the engine currently sees, as bytes a
+//! consumer reads without linking the engine. Tagged sections carry their own
+//! length, so a reader steps over a tag it does not know and an older consumer
+//! reads a newer record.
 
 const std = @import("std");
 

@@ -1,8 +1,6 @@
-//! The on-device index. A phone-sized corpus of embeddings that must answer a
-//! nearest-neighbour query inside a frame, take inserts and deletes while it is
-//! being queried, and stay inside a memory budget it was given rather than one
-//! it discovers. The exact search stays beside it as the oracle the approximate
-//! path is measured against, because a recall number nobody computed is a hope.
+//! The on-device index. The exact search lives here beside the approximate one
+//! as the oracle its recall is measured against, because a recall number nobody
+//! computed is a hope.
 
 const std = @import("std");
 

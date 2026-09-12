@@ -1,11 +1,7 @@
-//! What a caller is allowed to see and do. An engine that hands an agent the
-//! whole frame, everything it recognised and every verb it can act with is fine
-//! until the agent is not the host's own code. A scope is the host narrowing
-//! that, once, and every read and action answering to it.
-//!
-//! It opens fully permissive on purpose: this engine already had callers before
-//! scopes existed, and a default that silently denied them would break working
-//! code rather than protect anything. A host that wants a narrow scope says so.
+//! What a caller is allowed to see and do. It opens fully permissive: this
+//! engine had callers before scopes existed, and a default that silently denied
+//! them would break working code rather than protect anything. A host that wants
+//! a narrow scope says so.
 
 const std = @import("std");
 const snapshot = @import("snapshot.zig");

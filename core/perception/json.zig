@@ -1,13 +1,6 @@
-//! The snapshot as JSON, for the agent gateways that speak it.
-//!
-//! Written by READING the binary record rather than from the session, so the two
-//! forms cannot diverge: there is one producer of the facts and this is a
-//! projection of it. A second writer walking the session again is how two
-//! representations of one thing drift apart, and nothing would catch it.
-//!
-//! An unknown section becomes an object with its tag and byte length rather than
-//! being dropped, so a newer engine's record stays readable and honestly says what
-//! it is carrying that this build cannot name.
+//! The snapshot as JSON, for the agent gateways that speak it. Projected from
+//! the binary record rather than written a second time, so the two cannot drift,
+//! and read through the declared schema rather than offsets typed here.
 
 const std = @import("std");
 const snapshot = @import("snapshot.zig");

@@ -1,8 +1,6 @@
 //! Spatial semantics and the questions asked of them. A plane's classification
 //! was an opaque number every consumer decoded for itself; here it is a named
-//! channel with an agreed meaning. On top of that sit the queries an agent
-//! actually asks before it tells a person where to put something: does this
-//! fit, how much of this surface is free, how high is it off the floor.
+//! channel, and on top of it sit the placement queries an agent asks.
 
 const std = @import("std");
 

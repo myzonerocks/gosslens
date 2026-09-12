@@ -1,8 +1,6 @@
 //! The CPU reference conversion, the number the GPU path is measured against.
-//! The shader consumes the same matrix through a uniform, so the two agreeing is
-//! a real check on the uniform plumbing rather than on the arithmetic alone: a
-//! matrix transposed on its way into the shader converts every frame wrong and no
-//! test of the matrix by itself would notice.
+//! One place defines what a colour standard means, so a shader and a harness
+//! cannot disagree about it quietly.
 
 const std = @import("std");
 const types = @import("types.zig");

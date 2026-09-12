@@ -1,8 +1,6 @@
-//! The demux contract: what a container holds, how a packet comes out of it, and
-//! where the read position is. Nothing in the repo demuxed before this; the word
-//! appeared three times and every one was a comment. Apple delegated to
-//! AVAssetReader and Android to AMediaExtractor, forward-only with no seek, so a
-//! timeline could not be scrubbed and an imported clip could not be stepped.
+//! The demux contract: what a container holds, how a packet is addressed, and
+//! what a seek is allowed to do. A seek refuses rather than clamps, because a
+//! clamped seek returns the wrong frame and says nothing.
 
 const std = @import("std");
 const types = @import("types.zig");

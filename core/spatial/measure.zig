@@ -1,8 +1,6 @@
 //! Measurement with its uncertainty attached. A distance reported as a number is
-//! a number; a distance reported with the accuracy the platform claimed is a
-//! measurement, and the difference matters the moment anyone acts on it. Every
-//! result here carries both, and the uncertainty compounds the way the geometry
-//! says rather than being quoted once and forgotten.
+//! a number; reported with the accuracy the platform claimed it is a
+//! measurement, and the uncertainty compounds the way the geometry says.
 
 const std = @import("std");
 

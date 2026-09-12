@@ -183,6 +183,13 @@ file must move together.
 | `goss_session_memory_load` | bytes | Reads a memory back, refusing a file from another version or a truncated one. |
 | `goss_session_set_scope` | sections, verbs | Narrows what the session answers; a read out of scope is dropped, a verb out of scope refused. |
 | `goss_session_scope` | out sections, out verbs | The scope in force. |
+| `goss_engine_screen_count` | out count | What this process may capture; zero where permission has not been granted. |
+| `goss_engine_screen_at` | index, out surface | One surface: its logical geometry, desktop origin and scale factor. |
+| `goss_engine_screen_title` | index, out buffer | The surface title; GOSS_AGAIN with the size when the buffer is short. |
+| `goss_session_open_screen` | surface id, scale | Opens a surface as a source; a scale of zero takes its own. |
+| `goss_session_close_screen` | screen | Releases a capture. |
+| `goss_session_step_screen` | screen, source name | Submits the newest frame; GOSS_AGAIN when the screen has not changed. |
+| `goss_session_screen_point` | screen, normalized x and y | Where a point lands, in logical points, backing pixels and desktop coordinates. |
 | `goss_engine_read_report` | `engineReport()`, what the engine is doing now rather than what it was asked for: the render backend it actually brought up, whether the zero-copy image import came up, the bounded texture and staging pools with their live counts, peaks, exhaustion counts, the distinct descriptions each holds and the descriptions turned away at the bin cap, the bytes held on the heap no managed allocator sees, and the vendor-heap allocation calls and bytes of the frame just drawn | all SDKs |
 | `goss_session_read_report` | `sessionReport()`, this session's counters: frames submitted and rendered, the degradation rung and how many times it moved, how much analysis each modality actually ran, how many lens nodes are not ready, and how many script handlers or ticks threw | all SDKs |
 | `goss_session_node_report_count` | `nodeReportCount()`, how many nodes of the active lens are not doing what the manifest asked, beside how many diagnostics could not be recorded at all; a zero count with a non-zero lost count means the lens degraded in ways the session could not write down | all SDKs |

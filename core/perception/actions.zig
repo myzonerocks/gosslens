@@ -1,12 +1,7 @@
-//! The action channel: what an agent draws back into the frame.
-//!
-//! This is the other half of the loop. The perception rail lets a brain see; this
-//! lets it point, label, highlight and correct, without authoring a lens bundle to
-//! do it. An agent that can see but not act is a camera with extra steps.
-//!
-//! Annotations are addressed by id so an agent updates one without rebuilding the
-//! set, and every one carries a lifetime, because the failure mode of an
-//! imperative overlay is annotations nobody removed.
+//! The action channel: what an agent draws back into the frame. Annotations are
+//! addressed by id, so moving one every frame leaks no entry, and each carries a
+//! lifetime because the failure mode of an imperative overlay is annotations
+//! nobody removed.
 
 const std = @import("std");
 

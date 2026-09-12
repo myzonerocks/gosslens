@@ -1,9 +1,6 @@
-//! What is worth remembering. A camera produces thirty frames a second and
-//! almost none of them are worth keeping: this decides which are, from the
-//! change score the egress rail already computes, the events the frame carried,
-//! and how unlike anything already remembered it is. Novelty is the one that
-//! matters, because a change score alone remembers a hundred frames of the same
-//! sign from slightly different angles.
+//! What is worth remembering. Novelty is measured against what is already
+//! remembered rather than against the previous frame: a change score alone keeps
+//! a hundred frames of one sign from slightly different angles.
 
 const std = @import("std");
 const vector_index = @import("vector_index.zig");

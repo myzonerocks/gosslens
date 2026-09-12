@@ -1,12 +1,8 @@
 //! Prints the snapshot record's schema as deterministic text and checks it
-//! against the tracked baseline. The baseline commits with the code, so
-//! reordering or dropping a field shows up in review as a diff to
-//! tools/snapshot-baseline.txt rather than as a consumer that reads the wrong
-//! bytes and says nothing.
+//! against the tracked baseline, so reordering or dropping a field shows up in
+//! review rather than as a consumer reading the wrong bytes.
 //!
-//!   schema_dump --print              write the current schema to stdout
-//!   schema_dump --check <baseline>   exit 1 if the schema drifted
-//!   schema_dump --update <baseline>  rewrite the baseline from the schema
+//!   schema_dump --print | --check <baseline> | --update <baseline>
 
 const std = @import("std");
 const perception = @import("perception");

@@ -1,14 +1,7 @@
-//! What the brain actually sees, and what it costs to show it.
-//!
-//! An agent behind a token meter cannot afford a frame every tick, and a still
-//! room should cost nothing at all. So egress is budgeted and gated rather than
-//! streamed: a policy decides whether this frame is worth sending, the decision
-//! and its reason travel with the frame, and a gateway can explain why it did or
-//! did not send rather than guessing.
-//!
-//! Pure arithmetic and policy here. The encode and the downscale belong to the
-//! adapter; what belongs in core is the decision, because that is the part that
-//! must be the same on every platform and provable without a GPU.
+//! What the brain sees, and what it costs to show it. The budget is checked
+//! before any trigger fires, change is scored from the mean plus a structural
+//! term so a still room costs nothing, and redaction happens in normalized space
+//! so a rect means the same thing at any capture size.
 
 const std = @import("std");
 

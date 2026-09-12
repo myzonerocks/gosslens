@@ -1,10 +1,6 @@
-//! The media harness the wave plan names: the checks that belong to the media
-//! contracts themselves rather than to a rendered frame, so they run without a
-//! window and without a GPU. What needs a real composite stays in conformance.zig
-//! beside the other rendered proofs.
-//!
-//! Each check states what it asserts and what it cannot: a harness whose failures
-//! are unexplained costs a whole run to diagnose, which conformance taught here.
+//! The media harness: the checks that belong to the contracts rather than to a
+//! rendered frame, so they need no window and no GPU. What needs a real
+//! composite stays in conformance beside the other rendered proofs.
 
 const std = @import("std");
 const media = @import("media");

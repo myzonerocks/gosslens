@@ -1,8 +1,6 @@
-//! The determinism gate. An agent acting on what the engine reported must be
-//! able to replay it: the same input stream has to produce the same snapshot
-//! stream, the same events and the same action results, bit for bit, on the same
-//! target. This is the harness that holds that, and it names the first place two
-//! runs parted rather than reporting that they differ.
+//! The determinism gate. The same input stream must produce the same records,
+//! bit for bit, on the same target, and this names the first place two runs
+//! parted rather than reporting that they differ.
 
 const std = @import("std");
 

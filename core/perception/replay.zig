@@ -1,15 +1,7 @@
-//! A session's inputs and outputs as one ordered log, so a run can be replayed
-//! bit for bit.
-//!
-//! This is the determinism claim made checkable. A log records what went in
-//! (frames by hash rather than by pixels, world submissions, audio, touches, all
-//! stamped) and what came out (events and snapshot digests), and a replay that
-//! produces a different output stream is a regression with an exact first
-//! divergence rather than a vague "it looks different".
-//!
-//! Frames go in by hash because a log that carried pixels would be gigabytes and
-//! nobody would keep one; the hash is what makes a divergence provable without
-//! storing the frame.
+//! A session's inputs and outputs as one ordered log, so a run replays bit for
+//! bit. Frames go in by hash rather than by pixels, because a log carrying
+//! pixels would be gigabytes and nobody would keep one, and a replay producing a
+//! different stream is a regression with an exact first divergence.
 
 const std = @import("std");
 
