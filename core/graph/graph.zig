@@ -7,6 +7,7 @@
 pub const topology = @import("topology.zig");
 pub const pool = @import("pool.zig");
 pub const analysis = @import("analysis.zig");
+pub const node_map = @import("node_map.zig");
 pub const degrade = @import("degrade.zig");
 
 pub const Graph = topology.Graph;
@@ -19,9 +20,11 @@ pub const ResultSlot = analysis.ResultSlot;
 pub const DegradeLevel = degrade.Level;
 pub const DegradeController = degrade.Controller;
 pub const DegradePlan = degrade.Plan;
+pub const NodeMap = node_map.NodeMap;
 
 test {
     _ = topology;
+    _ = node_map;
     _ = pool;
     _ = analysis;
     _ = degrade;
