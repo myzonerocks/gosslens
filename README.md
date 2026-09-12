@@ -64,6 +64,7 @@ or the [C SDK](sdk/c/README.md) for any other language with a C FFI.
 
 - **For agents** - one versioned record of everything the engine sees, an event stream, budgeted frame egress, and annotations an agent draws back into the frame. An [MCP server](docs/MCP.md) makes all of it tools a model can call.
 - **What the frame says** - text detection and recognition on the engine's own ONNX rail: oriented regions, reading order, and a track id that survives a frame.
+- **Screens** - a display or a window is a source like any other, with the scale factor and desktop origin that put a coordinate back on a real pixel: ScreenCaptureKit, MediaProjection, or getDisplayMedia.
 - **Memory** - an on-device index over embeddings with the keyframe selection that decides what was worth remembering, and the search that finds it again.
 - **Beauty and makeup** - smooth, whiten, reshape, lipstick, and blush, each a live 0-to-1 control.
 - **Tracking** - multi-face, hands with gestures, and full-body pose, plus selfie segmentation for virtual backgrounds.
@@ -87,6 +88,16 @@ is the honest table of what is proven where.
 The platform SDKs are thin wrappers over the same C ABI and share one operation
 contract, so an effect behaves identically everywhere. Full install and
 render-loop steps live in each platform's guide above.
+
+## Documents
+
+- [API.md](docs/API.md), the operation contract every SDK wraps
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md), what owns what and why
+- [LENS-FORMAT.md](docs/LENS-FORMAT.md) and [PERCEPTION-FORMAT.md](docs/PERCEPTION-FORMAT.md), the
+  two formats published for forking
+- [MCP.md](docs/MCP.md), the engine as tools a model calls
+- [PARITY.md](docs/PARITY.md), what is proven on which platform
+- [ROADMAP.md](docs/ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md)
 
 ## On device
 

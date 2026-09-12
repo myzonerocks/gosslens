@@ -223,7 +223,10 @@ What an agent needs sits on the same seams, not beside them.
   remembered rather than against the previous frame.
 - **Screens** (`core/screen/`) carry a scale factor and a desktop origin, so a
   normalized point an agent sends lands on a real pixel and a point off the
-  surface is refused rather than answered.
+  surface is refused rather than answered. The capture itself is per platform
+  behind one seam (`adapters/screen/`): ScreenCaptureKit on Apple, MediaProjection
+  on Android whose consent dialog only an Activity can show, and getDisplayMedia
+  in the web SDK where the browser owns the picker.
 - **Scope** (`core/perception/scope.zig`) is two words: the sections a caller may
   read and the verbs it may act with. A read out of scope is dropped from the
   record; a verb out of scope is refused.

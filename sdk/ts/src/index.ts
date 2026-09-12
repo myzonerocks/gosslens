@@ -4111,3 +4111,5 @@ export { GossVideoTexture } from "./video-texture.js";
 // the way the Swift and Kotlin SDKs carry theirs.
 export { GossFaceTracker, GossHandTracker, GossPoseTracker, GossSegmenter, GOSS_FACE_BLENDSHAPE_COUNT, GOSS_MAX_HANDS } from "./tracking.js";
 export type { GossFaceResult, GossHand, GossHandResult, GossPoseResult } from "./tracking.js";
+
+export { shareScreen, type GossScreenShare, type GossDisplaySurface } from "./screen-capture.js";

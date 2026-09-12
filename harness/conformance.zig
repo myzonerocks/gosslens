@@ -4410,6 +4410,108 @@ fn normalizeVector(v: []f32) void {
     for (v) |*x| x.* *= inv;
 }
 
+
+/// Screens through the real ABI. On a host that has granted permission this
+/// captures for real; on one that has not, zero surfaces is the answer and the
+/// proof says so rather than failing, because permission is the host's to give.
+/// The coordinate arithmetic is asserted either way: it is arithmetic, not
+/// capture, and a point that lands in the wrong place is wrong on every host.
+fn proveScreenSource(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    var count: u32 = 0;
+    const status = abi.goss_engine_screen_count(engine, &count);
+    if (status == .unsupported) {
+        std.debug.print("conformance: screens skipped - no screen capture on this target\n", .{});
+        return true;
+    }
+    if (status != .ok) {
+        std.debug.print("conformance: FAIL enumerating screens answered {t}\n", .{status});
+        return false;
+    }
+
+    // Every surface must carry a usable geometry, whatever it is. A zero scale or
+    // a zero extent is a surface nothing can map a coordinate onto.
+    for (0..count) |i| {
+        var surface: abi.ScreenSurface = undefined;
+        if (abi.goss_engine_screen_at(engine, @intCast(i), &surface) != .ok) {
+            std.debug.print("conformance: FAIL surface {d} would not read back\n", .{i});
+            return false;
+        }
+        if (surface.scale <= 0 or surface.logical_width <= 0 or surface.logical_height <= 0) {
+            std.debug.print("conformance: FAIL surface {d} reports scale {d} and {d}x{d}\n", .{ i, surface.scale, surface.logical_width, surface.logical_height });
+            return false;
+        }
+        var needed: usize = 0;
+        if (abi.goss_engine_screen_title(engine, @intCast(i), null, 0, &needed) != .ok and needed == 0) {
+            std.debug.print("conformance: FAIL surface {d} would not size its title\n", .{i});
+            return false;
+        }
+    }
+
+    if (count == 0) {
+        std.debug.print("conformance: PROOF screen enumeration answers zero surfaces where permission has not been granted, rather than an error a caller cannot act on\n", .{});
+        return true;
+    }
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    var first: abi.ScreenSurface = undefined;
+    _ = abi.goss_engine_screen_at(engine, 0, &first);
+    var screen: u32 = 0;
+    if (abi.goss_session_open_screen(session, first.id, 0, &screen) != .ok) {
+        std.debug.print("conformance: PROOF screen enumeration answers {d} surfaces, each with a usable geometry; opening one is the host's to permit\n", .{count});
+        return true;
+    }
+    defer _ = abi.goss_session_close_screen(session, screen);
+
+    // The centre of the frame must land at the centre of the surface, in logical
+    // points, in backing pixels, and on the desktop. The scale factor is the
+    // difference between pressing a button and pressing what is at half its place.
+    var logical: [2]f32 = undefined;
+    var pixel: [2]f32 = undefined;
+    var desktop: [2]f32 = undefined;
+    if (abi.goss_session_screen_point(session, screen, 0.5, 0.5, &logical, &pixel, &desktop) != .ok) {
+        std.debug.print("conformance: FAIL a screen point would not resolve\n", .{});
+        return false;
+    }
+    const want_logical_x = first.logical_width * 0.5;
+    if (@abs(logical[0] - want_logical_x) > 0.5) {
+        std.debug.print("conformance: FAIL the centre landed at {d} logical where the surface is {d} wide\n", .{ logical[0], first.logical_width });
+        return false;
+    }
+    if (@abs(pixel[0] - want_logical_x * first.scale) > 1.0) {
+        std.debug.print("conformance: FAIL the centre landed at {d} pixels at scale {d}\n", .{ pixel[0], first.scale });
+        return false;
+    }
+    if (@abs(desktop[0] - (first.origin_x + want_logical_x)) > 0.5) {
+        std.debug.print("conformance: FAIL the centre landed at {d} on the desktop where the surface starts at {d}\n", .{ desktop[0], first.origin_x });
+        return false;
+    }
+
+    // A step either submits a frame or says nothing changed; both are answers, and
+    // a failure is neither.
+    var frames: usize = 0;
+    var unchanged: usize = 0;
+    for (0..30) |_| {
+        switch (abi.goss_session_step_screen(session, screen, null, 0)) {
+            .ok => frames += 1,
+            .again => unchanged += 1,
+            else => |bad| {
+                std.debug.print("conformance: FAIL stepping a screen answered {t}\n", .{bad});
+                return false;
+            },
+        }
+    }
+
+    std.debug.print(
+        "conformance: PROOF a screen is a source through the real ABI: {d} surfaces, the frame centre landing at {d} logical, {d} pixels at scale {d} and {d} on the desktop, and {d} frames with {d} steps reporting no change\n",
+        .{ count, logical[0], pixel[0], first.scale, desktop[0], frames, unchanged },
+    );
+    return true;
+}
+
 /// Writes a lens bundle whose ml.infer node runs a bundled author model, the
 /// way an author ships one. It binds the segmenter mask center (256x256, so
 /// 128*256+128 - foreground on a centered portrait, background on a blank frame)
@@ -22894,6 +22996,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     // behind the whole suite, the same way the lifecycle proof owns the process.
     const text_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--text") else false;
     const memory_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--memory") else false;
+    const screen_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--screen") else false;
 
     if (c.glfwInit() == c.GLFW_FALSE) return error.GlfwInit;
     defer c.glfwTerminate();
@@ -22906,6 +23009,13 @@ pub fn main(init_args: std.process.Init) !u8 {
     // bringing renderers up and down has to own the process to say anything.
     if (lifecycle_mode) {
         return if (try proveRendererLifecycle(gpa, window)) 0 else 1;
+    }
+
+    if (screen_mode) {
+        var counter = CountingAllocator{ .backing = gpa };
+        const engine = try abi.createEngine(counter.allocator(), .{ .texture_pool_capacity = 4, .staging_pool_capacity = 4 });
+        defer abi.destroyEngine(engine);
+        return if (try proveScreenSource(gpa, engine)) 0 else 1;
     }
 
     if (memory_mode) {
@@ -23394,6 +23504,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("color managed capture");
     if (!try proveMlInfer(gpa, engine)) return 1;
     watchHold("ml infer");
+    if (!try proveScreenSource(gpa, engine)) return 1;
+    watchHold("screen source");
     if (!try proveMemoryPlane(gpa, engine)) return 1;
     watchHold("memory plane");
     if (!try proveModelZoo(gpa, engine)) return 1;

@@ -17,7 +17,7 @@ pub const max_title_bytes: usize = 128;
 extern fn goss_screen_enumerate(out: [*]CSurface, capacity: usize, out_count: *u32) i32;
 extern fn goss_screen_open(id: u64, scale: f32, out_width: *u32, out_height: *u32) ?*anyopaque;
 extern fn goss_screen_read(handle: *anyopaque, out_bgra: [*]u8, capacity: usize, out_width: ?*u32, out_height: ?*u32, out_timestamp_us: ?*i64) i32;
-extern fn goss_screen_close(handle: *anyopaque) void;
+extern fn goss_screen_close(handle: *anyopaque) i32;
 
 /// The flat struct the shim fills. It is extern because it crosses the boundary;
 /// the Zig-facing type below borrows its title rather than copying it, so
@@ -101,7 +101,7 @@ pub const Capture = struct {
         var height: u32 = 0;
         const handle = goss_screen_open(id, scale, &width, &height) orelse return null;
         if (width == 0 or height == 0) {
-            goss_screen_close(handle);
+            _ = goss_screen_close(handle); // result ignored: the open already failed and there is nothing to recover
             return null;
         }
         return .{ .handle = handle, .width = width, .height = height, .last_width = width, .last_height = height };
@@ -130,7 +130,8 @@ pub const Capture = struct {
     }
 
     pub fn close(self: *Capture) void {
-        goss_screen_close(self.handle);
+        // result ignored: the capture is being torn down and there is nothing left to do about a failure
+        _ = goss_screen_close(self.handle);
     }
 };
 

@@ -220,6 +220,12 @@ object Gosslens {
     internal external fun nativeWriteReconstruction(session: Long, buffer: ByteBuffer, count: Int): Int
     internal external fun nativeMlOpSupport(model: ByteBuffer, modelLen: Int, out: ByteBuffer, capacity: Int): Int
 
+    internal external fun nativeScreenGrant(width: Float, height: Float, density: Float, label: ByteBuffer?, labelLen: Int): Int
+
+    internal external fun nativeScreenRevoke(): Int
+
+    internal external fun nativeScreenFrame(pixels: ByteBuffer, width: Int, height: Int, stride: Int, timestampUs: Long): Int
+
     internal external fun nativeScreenCount(engine: Long): Int
 
     internal external fun nativeScreenAt(engine: Long, index: Int, out: ByteBuffer): Int
@@ -2781,3 +2787,25 @@ data class GossScreenSurface(
     val originY: Float,
     val scale: Float,
 )
+
+/// The MediaProjection consent flow. Only an Activity can show the dialog and
+/// receive the answer, so this is the app's to drive: grant after the result
+/// arrives, feed each frame the virtual display produces, and revoke when the
+/// projection stops.
+object GossScreenCapture {
+    fun grant(widthPx: Float, heightPx: Float, density: Float, label: String) {
+        val bytes = label.toByteArray()
+        val buffer = ByteBuffer.allocateDirect(bytes.size.coerceAtLeast(1))
+        buffer.put(bytes)
+        Gosslens.nativeScreenGrant(widthPx, heightPx, density, buffer, bytes.size)
+    }
+
+    fun revoke() {
+        Gosslens.nativeScreenRevoke()
+    }
+
+    /// One frame off the ImageReader. The buffer must be direct and must stay
+    /// valid until the next call, which is what the engine reads from.
+    fun frame(pixels: ByteBuffer, width: Int, height: Int, stride: Int, timestampUs: Long): Boolean =
+        Gosslens.nativeScreenFrame(pixels, width, height, stride, timestampUs) == 0
+}

@@ -12,6 +12,7 @@ const std = @import("std");
 const max_jni_embedding: usize = 4096;
 const max_jni_results: usize = 64;
 const abi = @import("abi");
+const screen_capture = @import("screen_capture");
 
 const JniEnv = opaque {};
 const jobject = ?*anyopaque;
@@ -322,9 +323,40 @@ export fn Java_com_gosslens_Gosslens_nativeMlOpSupport(env: *JniEnv, cls: jobjec
     return @intCast(written);
 }
 
-/// Screen capture. MediaProjection is the Android path and is not wired yet, so
-/// these cross to the same ABI and report the capability as absent rather than
-/// pretending: a host reads zero surfaces and prompts.
+/// MediaProjection's consent dialog is the app's to show: only an Activity can
+/// receive the answer, so the SDK drives the grant and tells the engine here what
+/// it was given. Nothing is capturable before this, which is the flow rather than
+/// a limitation.
+export fn Java_com_gosslens_Gosslens_nativeScreenGrant(env: *JniEnv, cls: jobject, width: f32, height: f32, density: f32, label: jobject, label_len: i32) i32 {
+    _ = cls;
+    var name: []const u8 = &.{};
+    if (label_len > 0) {
+        if (getDirectBufferAddress(env, label)) |bytes| name = bytes[0..@intCast(label_len)];
+    }
+    screen_capture.setGranted(width, height, density, name);
+    return @intFromEnum(abi.Status.ok);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeScreenRevoke(env: *JniEnv, cls: jobject) i32 {
+    _ = env;
+    _ = cls;
+    screen_capture.clearGranted();
+    return @intFromEnum(abi.Status.ok);
+}
+
+/// One frame off the ImageReader the SDK's virtual display writes into. The bytes
+/// stay the caller's until the next offer, which is the same latest-wins
+/// discipline every other source uses.
+export fn Java_com_gosslens_Gosslens_nativeScreenFrame(env: *JniEnv, cls: jobject, pixels: jobject, width: i32, height: i32, stride: i32, timestamp_us: i64) i32 {
+    _ = cls;
+    if (width <= 0 or height <= 0 or stride <= 0) return @intFromEnum(abi.Status.invalid_argument);
+    const bytes = getDirectBufferAddress(env, pixels) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const total: usize = @as(usize, @intCast(stride)) * @as(usize, @intCast(height));
+    screen_capture.offerFrame(bytes[0..total], @intCast(width), @intCast(height), @intCast(stride), timestamp_us);
+    return @intFromEnum(abi.Status.ok);
+}
+
+/// Screen capture through the same ABI every other client uses.
 export fn Java_com_gosslens_Gosslens_nativeScreenCount(env: *JniEnv, cls: jobject, engine: i64) i32 {
     _ = env;
     _ = cls;

@@ -10,6 +10,24 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <cstdio>
+
+// This TU keeps exceptions enabled: ScreenCaptureKit can raise NSException, and
+// the modern ObjC runtime unwinds those as C++ exceptions whatever the C++ flag
+// says. Every extern "C" entry is a guard mapping any unwind to its failure
+// value, never into Zig.
+#define GOSS_SHIM_GUARD(ret_type, failure_value, call)                        \
+  try {                                                                       \
+    @try {                                                                    \
+      return (call);                                                          \
+    } @catch (NSException* e) {                                               \
+      fprintf(stderr, "gosslens screen: %s: %s\n", e.name.UTF8String,         \
+              e.reason ? e.reason.UTF8String : "");                           \
+      return (failure_value);                                                 \
+    }                                                                         \
+  } catch (...) {                                                             \
+    return (failure_value);                                                   \
+  }
 
 namespace {
 
@@ -121,10 +139,12 @@ SCShareableContent *shareableContent(void) {
 
 }  // namespace
 
-extern "C" int32_t goss_screen_enumerate(CSurface *out, size_t capacity, uint32_t *out_count) {
+namespace {
+
+int32_t enumerate_impl(CSurface *out, size_t capacity, uint32_t *out_count) {
     if (out == nullptr || out_count == nullptr) return -1;
     *out_count = 0;
-    @try {
+    {
         @autoreleasepool {
             SCShareableContent *content = shareableContent();
             // No permission and no content read the same way on purpose: a host
@@ -170,14 +190,20 @@ extern "C" int32_t goss_screen_enumerate(CSurface *out, size_t capacity, uint32_
             *out_count = (uint32_t)written;
             return 0;
         }
-    } @catch (NSException *e) {
-        return -1;
     }
 }
 
-extern "C" void *goss_screen_open(uint64_t id, float scale, uint32_t *out_width, uint32_t *out_height) {
+}  // namespace
+
+extern "C" int32_t goss_screen_enumerate(CSurface *out, size_t capacity, uint32_t *out_count) {
+    GOSS_SHIM_GUARD(int32_t, -1, enumerate_impl(out, capacity, out_count))
+}
+
+namespace {
+
+void *open_impl(uint64_t id, float scale, uint32_t *out_width, uint32_t *out_height) {
     if (out_width == nullptr || out_height == nullptr) return nullptr;
-    @try {
+    {
         @autoreleasepool {
             SCShareableContent *content = shareableContent();
             if (content == nil) return nullptr;
@@ -249,17 +275,23 @@ extern "C" void *goss_screen_open(uint64_t id, float scale, uint32_t *out_width,
             *out_height = height;
             return capture;
         }
-    } @catch (NSException *e) {
-        return nullptr;
     }
 }
 
-extern "C" int32_t goss_screen_read(void *handle, uint8_t *out_bgra, size_t capacity,
-                                    uint32_t *out_width, uint32_t *out_height,
-                                    int64_t *out_timestamp_us) {
+}  // namespace
+
+extern "C" void *goss_screen_open(uint64_t id, float scale, uint32_t *out_width, uint32_t *out_height) {
+    GOSS_SHIM_GUARD(void *, nullptr, open_impl(id, scale, out_width, out_height))
+}
+
+namespace {
+
+int32_t read_impl(void *handle, uint8_t *out_bgra, size_t capacity,
+                  uint32_t *out_width, uint32_t *out_height,
+                  int64_t *out_timestamp_us) {
     if (handle == nullptr || out_bgra == nullptr) return -1;
     Capture *capture = (Capture *)handle;
-    @try {
+    {
         @autoreleasepool {
             GossScreenSink *sink = capture->sink;
             [sink.lock lock];
@@ -301,15 +333,23 @@ extern "C" int32_t goss_screen_read(void *handle, uint8_t *out_bgra, size_t capa
             CVPixelBufferRelease(buffer);
             return status;
         }
-    } @catch (NSException *e) {
-        return -1;
     }
 }
 
-extern "C" void goss_screen_close(void *handle) {
-    if (handle == nullptr) return;
+}  // namespace
+
+extern "C" int32_t goss_screen_read(void *handle, uint8_t *out_bgra, size_t capacity,
+                                    uint32_t *out_width, uint32_t *out_height,
+                                    int64_t *out_timestamp_us) {
+    GOSS_SHIM_GUARD(int32_t, -1, read_impl(handle, out_bgra, capacity, out_width, out_height, out_timestamp_us))
+}
+
+namespace {
+
+int32_t close_impl(void *handle) {
+    if (handle == nullptr) return 0;
     Capture *capture = (Capture *)handle;
-    @try {
+    {
         @autoreleasepool {
             dispatch_semaphore_t done = dispatch_semaphore_create(0);
             [capture->stream stopCaptureWithCompletionHandler:^(NSError *error) {
@@ -319,9 +359,15 @@ extern "C" void goss_screen_close(void *handle) {
             CFRelease((CFTypeRef)capture->stream);
             CFRelease((CFTypeRef)capture->sink);
         }
-    } @catch (NSException *e) {
-        // Nothing to do but release the rest: a throw here must not leak the
-        // allocation below.
     }
     delete capture;
+    return 0;
+}
+
+}  // namespace
+
+/// Returns a status rather than void, so the guard has a failure value to hand
+/// back: a close that threw must not unwind into Zig either.
+extern "C" int32_t goss_screen_close(void *handle) {
+    GOSS_SHIM_GUARD(int32_t, -1, close_impl(handle))
 }

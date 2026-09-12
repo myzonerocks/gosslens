@@ -169,3 +169,8 @@ A pull request should answer five things plainly:
 
 If a change weakens the architecture, API contract, or license policy, it is not
 ready for review.
+
+A change under `core/`, `adapters/`, `include/`, `sdk/` or `tools/` adds a line under
+**Unreleased** in [CHANGELOG.md](CHANGELOG.md). A release moves that section under its tag with
+the date, and the release notes are that section.
+

@@ -2428,14 +2428,22 @@ fn memoryModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
 }
 
 /// Screen capture, per target. ScreenCaptureKit on Apple, which is also the
-/// desktop harness path, so the proof runs where the suite runs; every other
-/// target takes the stub and reports the capability as absent.
+/// desktop harness path, so the proof runs where the suite runs. MediaProjection
+/// on Android, whose consent dialog only an Activity can show, so the SDK drives
+/// the grant and feeds the frames. The web uses getDisplayMedia in its own SDK.
 fn screenCaptureModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     const key = b.fmt("goss-screen-capture-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
     if (b.modules.get(key)) |existing| return existing;
     const is_apple = target.result.os.tag == .macos or target.result.os.tag == .ios;
+    const is_android = target.result.abi == .android or target.result.abi == .androideabi;
+    const root_file = if (is_apple)
+        "adapters/screen/screen_capture.zig"
+    else if (is_android)
+        "adapters/screen/screen_capture_android.zig"
+    else
+        "adapters/screen/screen_capture_stub.zig";
     const module = b.addModule(key, .{
-        .root_source_file = b.path(if (is_apple) "adapters/screen/screen_capture.zig" else "adapters/screen/screen_capture_stub.zig"),
+        .root_source_file = b.path(root_file),
         .target = target,
         .optimize = optimize,
     });
