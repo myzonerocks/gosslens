@@ -132,7 +132,7 @@ pub const abi_major: u16 = 0;
 // The frozen ABI surface lives here so the version and the dump tool read
 // one list. A new export adds a line to abi_functions, its header decl, and
 // its body - nothing else.
-pub const abi_surface_types = .{ FrameDesc, Landmarks, EngineConfig, SessionConfig, RendererDesc, FramePlanes, FaceResult, HandResult, PoseResult, LensSignals, CameraControls, RecordingPolicy, CaptureUiIntent, CaptionSegment, CaptureGuidance, NodeReport };
+pub const abi_surface_types = .{ FrameDesc, Landmarks, EngineConfig, SessionConfig, RendererDesc, FramePlanes, FaceResult, HandResult, PoseResult, LensSignals, CameraControls, RecordingPolicy, CaptureUiIntent, CaptionSegment, CaptureGuidance, NodeReport, EngineReport, SessionReport };
 
 pub const abi_functions = [_][]const u8{
     "uint32_t goss_abi_version(void)",
@@ -306,6 +306,9 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_chain_report(goss_session *session, uint32_t *out_ready, uint32_t *out_total, uint32_t *out_beauty)",
     "goss_status goss_session_read_reconstruction(goss_session *session, float *out, uint32_t capacity, uint32_t *out_count)",
     "goss_status goss_session_write_reconstruction(goss_session *session, const float *gaussians, uint32_t count)",
+    "goss_status goss_session_submit_source_hardware_buffer(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, void *hardware_buffer)",
+    "goss_status goss_engine_read_report(goss_engine *engine, goss_engine_report *out_report)",
+    "goss_status goss_session_read_report(goss_session *session, goss_session_report *out_report)",
     "goss_status goss_session_node_report_count(goss_session *session, uint32_t *out_count, uint32_t *out_lost)",
     "goss_status goss_session_node_report_at(goss_session *session, uint32_t index, goss_node_report *out_report)",
     "goss_status goss_session_node_report_id(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)",
@@ -436,6 +439,25 @@ pub const Engine = struct {
     staging_pool: graph.Pool,
     texture_pool_capacity: u16,
     staging_pool_capacity: u16,
+    /// The vendor-heap traffic of the frame just drawn, so a host can watch per
+    /// frame allocation without a build of the harness.
+    bgfx_calls_last_frame: u64 = 0,
+    bgfx_bytes_last_frame: u64 = 0,
+    bgfx_calls_at_frame_start: u64 = 0,
+    bgfx_bytes_at_frame_start: u64 = 0,
+    /// Every target the texture pool ever created, destroyed once at engine
+    /// teardown rather than by whichever session held a slot last.
+    pooled_targets: std.ArrayListUnmanaged(render.Renderer.OffscreenTarget) = .empty,
+    /// Slots held for the frame being drawn, given back at its end. A
+    /// capability target is scratch within a frame, so two capabilities that
+    /// never appear in one lens share a target instead of each keeping its own.
+    held_slots: std.ArrayListUnmanaged(HeldSlot) = .empty,
+    /// Every readback texture the staging pool ever created, and the slot the
+    /// capture path is holding. Unlike a scratch target this hold spans calls:
+    /// capture keeps its surface until the size changes, and a host alternating
+    /// two capture sizes then reuses both instead of recreating each time.
+    pooled_readbacks: std.ArrayListUnmanaged(render.TextureHandle) = .empty,
+    capture_staging_slot: ?HeldSlot = null,
     renderer: ?render.Renderer = null,
     /// Ping-pong offscreen targets a shader.pass chain renders through:
     /// camera capture and every pass but the last write into whichever
@@ -669,10 +691,10 @@ pub const Session = struct {
     /// The lens's rigid-body world, created at activation when any
     /// model node declares a body; poses drive those model matrices.
     physics_world: ?physics.World = null,
-    physics_bodies: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
+    physics_bodies: graph.NodeMap(u32) = .empty,
     /// Mesh colliders whose geometry is the node's own glb: their body is built
     /// once the glb decodes, from the decoded positions, at these placements.
-    pending_glb_colliders: std.AutoHashMapUnmanaged(graph.NodeIndex, PendingGlbCollider) = .empty,
+    pending_glb_colliders: graph.NodeMap(PendingGlbCollider) = .empty,
     /// Dynamic bodies a pointer can grab, the currently grabbed one (driven
     /// kinematically to grab_target each tick), and where it is being dragged.
     grabbable_bodies: std.ArrayListUnmanaged(u32) = .empty,
@@ -686,34 +708,34 @@ pub const Session = struct {
     live_colliders: std.ArrayListUnmanaged(struct { id: u32, pos: [3]f32 }) = .empty,
     /// Cloth nodes: the solver body and the dynamic render mesh, by
     /// graph index. Cloth replaces the glb mesh with a simulated grid.
-    cloth_bodies: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
-    cloth_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.ClothMesh) = .empty,
-    cloth_cols: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
+    cloth_bodies: graph.NodeMap(u32) = .empty,
+    cloth_meshes: graph.NodeMap(render.Renderer.ClothMesh) = .empty,
+    cloth_cols: graph.NodeMap(u32) = .empty,
     /// Hair nodes: the solver hair id and its strand render mesh, by
     /// graph index. Hair is driven by the tracked head pose.
-    hair_ids: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
-    hair_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.HairMesh) = .empty,
-    particle_systems: std.AutoHashMapUnmanaged(graph.NodeIndex, particles.System) = .empty,
-    particle_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.ParticleMesh) = .empty,
+    hair_ids: graph.NodeMap(u32) = .empty,
+    hair_meshes: graph.NodeMap(render.Renderer.HairMesh) = .empty,
+    particle_systems: graph.NodeMap(particles.System) = .empty,
+    particle_meshes: graph.NodeMap(render.Renderer.ParticleMesh) = .empty,
     /// A mesh-mode particle node's shared base octahedron, drawn once per
     /// particle at its position instead of a billboard.
-    particle_base_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.ModelMesh) = .empty,
+    particle_base_meshes: graph.NodeMap(render.Renderer.ModelMesh) = .empty,
     /// 2D SPH fluid nodes: the fluid sim and the shared base mesh each particle
     /// draws at its position, by graph index.
-    fluid_sims: std.AutoHashMapUnmanaged(graph.NodeIndex, sph.Fluid) = .empty,
-    fluid_base_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.ModelMesh) = .empty,
+    fluid_sims: graph.NodeMap(sph.Fluid) = .empty,
+    fluid_base_meshes: graph.NodeMap(render.Renderer.ModelMesh) = .empty,
     /// A ribbon-mode particle node's dynamic strip buffer, rebaked each frame
     /// from the trail history and drawn as one connected ribbon per particle.
-    particle_ribbon_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.ParticleMesh) = .empty,
+    particle_ribbon_meshes: graph.NodeMap(render.Renderer.ParticleMesh) = .empty,
     /// Particle nodes whose sim runs on the GPU compute path.
-    gpu_particle_sims: std.AutoHashMapUnmanaged(graph.NodeIndex, GpuParticleNode) = .empty,
+    gpu_particle_sims: graph.NodeMap(GpuParticleNode) = .empty,
     /// A fading fountain's own sprite texture, loaded once at activation from
     /// assets/<stem>.png when the particles field names one.
-    particle_sprite_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    particle_sprite_textures: graph.NodeMap(render.TextureHandle) = .empty,
     /// A reusable buffer of tracked-landmark spawn points (particle world
     /// space) for the face emission pattern, refilled each frame.
     particle_emitter_buf: [96][3]f32 = undefined,
-    hair_vcount: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
+    hair_vcount: graph.NodeMap(u32) = .empty,
     physics_last_us: i64 = 0,
 
     engine: *Engine,
@@ -733,6 +755,12 @@ pub const Session = struct {
     /// Diagnostics that could not even be recorded, so a caller can tell an
     /// empty report from an unmeasured one.
     node_reports_lost: u32 = 0,
+    /// Frames this session was handed, and frames actually drawn for it.
+    frames_submitted: u64 = 0,
+    frames_rendered: u64 = 0,
+    /// Times the ladder moved, up or down. A number that keeps climbing is a
+    /// session flapping at a boundary the hysteresis should have held.
+    degrade_transitions: u32 = 0,
     /// The beauty tier last pushed into the native chain, so the six amounts
     /// are rewritten when the rung changes and not on every frame.
     beauty_tier_pushed: graph.DegradePlan.Beauty = .full,
@@ -1011,20 +1039,20 @@ pub const Session = struct {
     /// at lens activation, sliced fresh each frame, freed at destroy.
     frame_stage: []f32 = &.{},
     /// dof.pass nodes by graph index: their focus plane and blur strength.
-    dof_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    dof_params: graph.NodeMap([2]f32) = .empty,
     /// fog.pass nodes by graph index: their fog color (rgb) and density.
-    fog_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    fog_params: graph.NodeMap([4]f32) = .empty,
     /// outline.pass nodes by graph index: their line color (rgb) and threshold.
-    outline_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    outline_params: graph.NodeMap([4]f32) = .empty,
     /// outline.pass nodes that trace a mask channel's edge instead of depth,
     /// by graph index, holding the channel (0 person, else a class).
-    outline_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    outline_masks: graph.NodeMap(u8) = .empty,
     /// occluder.pass nodes by graph index: their silhouette expand and edge
     /// softness. The head matte reveals the preserved frame over content.
-    occluder_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    occluder_params: graph.NodeMap([2]f32) = .empty,
     /// occluder.pass nodes' revealed mask channel by graph index (head by
     /// default, else another landmark or class channel).
-    occluder_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    occluder_masks: graph.NodeMap(u8) = .empty,
     /// The camera frame preserved at chain start, held across the chain so an
     /// occluder.pass reveals the head over content drawn behind it; sized to
     /// the frame and null until a lens carries an occluder node.
@@ -1063,45 +1091,45 @@ pub const Session = struct {
     inpaint_prev_valid: bool = false,
     /// cutout.pass nodes by graph index: their background color (rgb) and edge
     /// softness. The face matte keys the frame through, the rest goes flat color.
-    cutout_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    cutout_params: graph.NodeMap([4]f32) = .empty,
     /// cutout.pass nodes' kept face-matte channel by graph index (head by
     /// default, else another landmark or class channel).
-    cutout_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    cutout_masks: graph.NodeMap(u8) = .empty,
     /// tint.pass nodes by graph index: their color (rgb) and opacity.
-    tint_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    tint_params: graph.NodeMap([4]f32) = .empty,
     /// tint.pass nodes' mask channel by graph index (0 person, else a class).
-    tint_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    tint_masks: graph.NodeMap(u8) = .empty,
     /// tint.pass nodes' blend mode by graph index: 0 normal blend, 1 multiply
     /// (contour darken), 2 screen (highlight lighten). Absent reads as normal.
-    tint_modes: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    tint_modes: graph.NodeMap(u8) = .empty,
     /// tint.pass nodes' finish by graph index: 1 gloss, 2 shimmer, 3 metallic.
     /// Absent reads as matte, the flat blend, so the effect is byte-identical.
-    tint_finishes: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    tint_finishes: graph.NodeMap(u8) = .empty,
     /// tint.pass nodes whose color comes from the makeup reference, not the
     /// static field, by graph index.
-    tint_reference: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
+    tint_reference: graph.NodeMap(void) = .empty,
     /// Per-face-part color sampled from a reference photo by
     /// goss_session_set_makeup_reference; a reference-sourced tint.pass reads
     /// its channel's entry instead of a static color. null until set.
     makeup_reference: [manifest.mask_channels.len]?[3]f32 = @splat(null),
     /// smooth.pass nodes by graph index: their retouch amount.
-    smooth_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    smooth_params: graph.NodeMap(f32) = .empty,
     /// smooth.pass nodes' mask channel by graph index (0 person, else a class).
-    smooth_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    smooth_masks: graph.NodeMap(u8) = .empty,
     /// retouch.pass nodes by graph index: their filter packed as (mode, amount).
-    retouch_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    retouch_params: graph.NodeMap([2]f32) = .empty,
     /// retouch.pass nodes' mask channel by graph index (0 person, else a class).
-    retouch_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    retouch_masks: graph.NodeMap(u8) = .empty,
     /// matte.refine nodes by graph index: their guided-filter parameters
     /// (radius, sensitivity, strength).
-    matte_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [3]f32) = .empty,
+    matte_params: graph.NodeMap([3]f32) = .empty,
     /// matte.refine nodes that refine a mask channel's matte instead of the
     /// submitted depth, by graph index (0 person, else a class).
-    matte_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    matte_masks: graph.NodeMap(u8) = .empty,
     /// matte.hair source nodes by graph index: their guided-filter parameters
     /// (radius, sensitivity, strength). Each refines the coarse hair class into
     /// the strand-level hair_matte channel the passes below can bind.
-    hair_matte_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [3]f32) = .empty,
+    hair_matte_params: graph.NodeMap([3]f32) = .empty,
     /// The session-owned target a matte.hair source refines the hair alpha into,
     /// aliased as the hair_matte channel texture each frame; sized to the frame
     /// and null until a lens carries a matte.hair node, freed at teardown.
@@ -1110,34 +1138,34 @@ pub const Session = struct {
     hair_matte_h: u16 = 0,
     /// stylize.pass nodes by graph index: their artistic filter packed for
     /// u_stylize (mode, strength, threshold, levels), resolved at activation.
-    stylize_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    stylize_params: graph.NodeMap([4]f32) = .empty,
     /// edge.pass nodes by graph index: their detector packed as (mode, low,
     /// high, blur_radius, strength, invert), resolved at activation.
-    edge_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [6]f32) = .empty,
+    edge_params: graph.NodeMap([6]f32) = .empty,
     /// warp.pass nodes by graph index: their distortion flat-packed as a header
     /// (mode, center_x, center_y, radius, strength, refractive_index,
     /// aspect_auto, symmetry, symmetry_x, point_count) then the liquify points
     /// and their radii, resolved at activation.
-    warp_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [manifest.warp_params_len]f32) = .empty,
+    warp_params: graph.NodeMap([manifest.warp_params_len]f32) = .empty,
     /// warp.pass nodes' mask channel by graph index (0 person, else a class):
     /// present only when a node confines its displacement to a segmentation
     /// class, so the reshape moves the subject and leaves the background put.
-    warp_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    warp_masks: graph.NodeMap(u8) = .empty,
     /// reshape.bank nodes by graph index: their sixty-six per-region sculpt
     /// amounts in ReshapeField order, resolved at activation. The live tracked
     /// contour joins them each frame in the draw arm.
-    reshape_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [66]f32) = .empty,
+    reshape_params: graph.NodeMap([66]f32) = .empty,
     /// reshape.body nodes by graph index: their body sculpt amounts in
     /// BodyReshapeField order, resolved at activation. The live pose landmarks
     /// and the body mask join them each frame in the draw arm.
-    body_reshape_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [runtime.body_reshape_param_count]f32) = .empty,
+    body_reshape_params: graph.NodeMap([runtime.body_reshape_param_count]f32) = .empty,
     /// ssr.pass nodes by graph index: their reflection strength and floor plane.
-    ssr_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    ssr_params: graph.NodeMap([2]f32) = .empty,
     /// env.pass nodes by graph index: their sky gradient (top rgb, bottom rgb)
     /// and intensity, seven floats in that order.
-    env_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [7]f32) = .empty,
+    env_params: graph.NodeMap([7]f32) = .empty,
     /// trail.pass nodes by graph index: their motion-trail echo amount.
-    trail_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    trail_params: graph.NodeMap(f32) = .empty,
     /// The previous composited frame a trail.pass echoes, held across frames
     /// and re-copied each frame; sized to the frame and null until a trail
     /// node draws. `prev_frame_valid` gates the first frame (no echo yet).
@@ -1156,6 +1184,11 @@ pub const Session = struct {
     /// Whether the script has had its onInit and onTurnOn handlers called yet,
     /// so those fire exactly once on the first tick after activation.
     script_inited: bool = false,
+    /// Script handlers that threw, counted so a faulting script is visible.
+    script_faults: u32 = 0,
+    /// Set when a bounded pool turned this session's frame-path request away,
+    /// read and cleared by the next report_frame.
+    resource_pressure: bool = false,
     /// The lens's sound mixer and the mixer id each play_sound path resolves
     /// to, built from the bundle at activation. Playback is pulled out by the
     /// SDK; the engine only decodes and mixes.
@@ -1311,10 +1344,10 @@ pub const Session = struct {
     /// its graph index. Created at activation (goss_session_activate_lens_
     /// from_directory only - the bytes-based activate has no bundle path
     /// to read compiled shaders from), destroyed on deactivation.
-    shader_programs: std.AutoHashMapUnmanaged(graph.NodeIndex, u16) = .empty,
+    shader_programs: graph.NodeMap(u16) = .empty,
     /// shader.pass nodes that named a mask channel, by graph index -
     /// filled at directory activation alongside the programs.
-    shader_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    shader_masks: graph.NodeMap(u8) = .empty,
     /// One uploaded texture per named mask channel in use; index 0
     /// (person) aliases segmentation_texture and stays null here.
     segmentation_class_textures: [manifest.mask_channels.len]?render.TextureHandle = @splat(null),
@@ -1338,65 +1371,65 @@ pub const Session = struct {
     /// activation (directory-based only, same reason as shader_programs
     /// above), removed once goss_engine_render_frame's poll turns its
     /// result into a real texture or observes it failed.
-    lut_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
+    lut_loaders: graph.NodeMap(*asset.ImageLoader) = .empty,
     /// One bgfx texture per lut.pass node whose asset finished loading.
-    lut_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    lut_textures: graph.NodeMap(render.TextureHandle) = .empty,
     /// One background loader per currently-spliced blend.pass node still
     /// waiting on its background image - mirrors lut_loaders exactly,
     /// one node type over.
-    blend_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
+    blend_loaders: graph.NodeMap(*asset.ImageLoader) = .empty,
     /// One bgfx texture per blend.pass node whose background finished
     /// loading.
-    blend_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    blend_textures: graph.NodeMap(render.TextureHandle) = .empty,
     /// One equirect loader per env.pass node that ships an environment image,
     /// still in flight - mirrors blend_loaders. A node with no image (or a
     /// load that fails) simply falls back to the gradient sky.
-    env_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
+    env_loaders: graph.NodeMap(*asset.ImageLoader) = .empty,
     /// One bgfx texture per env.pass node whose equirect image finished
     /// loading, sampled by the camera pose instead of the gradient.
-    env_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    env_textures: graph.NodeMap(render.TextureHandle) = .empty,
     /// The color adjustment of each spliced grade.pass node, packed as
     /// three vec4 (tone, white balance with hue, then posterize and
     /// invert) - resolved once at activation since grade.pass ships no
     /// asset and needs no loader.
-    grade_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [12]f32) = .empty,
+    grade_params: graph.NodeMap([12]f32) = .empty,
     /// The mask channel of each grade.pass node that scopes its grade to a
     /// region; a node absent here grades the whole frame.
-    grade_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    grade_masks: graph.NodeMap(u8) = .empty,
     /// The dark-channel dehaze strength of each spliced dehaze.pass node,
     /// resolved once at activation like grade_params.
-    dehaze_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    dehaze_params: graph.NodeMap(f32) = .empty,
     /// The directional key light of each spliced relight.pass node, packed as
     /// (strength, light dir x, light dir y), resolved once at activation.
-    relight_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [3]f32) = .empty,
+    relight_params: graph.NodeMap([3]f32) = .empty,
     /// The specular rolloff (strength, threshold) of each spliced glare.pass
     /// node, resolved once at activation.
-    glare_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    glare_params: graph.NodeMap([2]f32) = .empty,
     /// The radial gain (strength, radius) of each spliced vignette.pass node,
     /// resolved once at activation.
-    vignette_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    vignette_params: graph.NodeMap([2]f32) = .empty,
     /// The lift and denoise (strength, denoise) of each spliced lowlight.pass
     /// node, resolved once at activation.
-    lowlight_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    lowlight_params: graph.NodeMap([2]f32) = .empty,
     /// The correction strength of each spliced undistort.pass node, resolved
     /// once at activation. The radial map itself rides the submitted intrinsics.
-    undistort_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    undistort_params: graph.NodeMap(f32) = .empty,
     /// The blend strength of each spliced awb.pass node, resolved once at
     /// activation; the correction itself is estimated per frame from the thumb.
-    awb_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    awb_params: graph.NodeMap(f32) = .empty,
     /// The blend strength of each spliced stabilize.pass node, resolved once at
     /// activation; the shift and crop are estimated per frame by the stabilizer.
-    stabilize_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    stabilize_params: graph.NodeMap(f32) = .empty,
     /// The magnify factor and centre (factor, cx, cy) of each spliced zoom.pass
     /// node, resolved once at activation.
-    zoom_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [3]f32) = .empty,
+    zoom_params: graph.NodeMap([3]f32) = .empty,
     /// The attenuation strength of each spliced dereflect.pass node, resolved
     /// once at activation.
-    dereflect_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    dereflect_params: graph.NodeMap(f32) = .empty,
     /// The blend strength and transfer direction (strength, direction) of each
     /// spliced harmonize.pass node, resolved once at activation; the region
     /// statistics are measured per frame.
-    harmonize_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    harmonize_params: graph.NodeMap([2]f32) = .empty,
     /// A CPU copy of the latest person segmentation mask, kept only when a
     /// harmonize.pass node is active, so its region statistics can be measured on
     /// the CPU without a GPU readback. Allocated to the mask resolution.
@@ -1405,7 +1438,7 @@ pub const Session = struct {
     wants_person_mask: bool = false,
     /// The removal mask channel and search radius (channel, radius) of each
     /// spliced inpaint.pass node, resolved once at activation.
-    inpaint_params: std.AutoHashMapUnmanaged(graph.NodeIndex, InpaintParams) = .empty,
+    inpaint_params: graph.NodeMap(InpaintParams) = .empty,
     /// A small RGB downsample of the latest copied frame, filled at submit from
     /// the frame bytes (no GPU readback), so an auto-enhance pass can estimate a
     /// scene-adaptive correction from the whole frame's statistics.
@@ -1446,10 +1479,10 @@ pub const Session = struct {
     orientation_omega: [2]f32 = .{ 0, 0 },
     /// The correction strength and sensor readout time (strength, readout) of each
     /// spliced rolling.pass node, resolved once at activation.
-    rolling_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    rolling_params: graph.NodeMap([2]f32) = .empty,
     /// The max shift, focus plane and fill mode (amount, focus, fill) of each
     /// spliced parallax.pass node, resolved once at activation.
-    parallax_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [3]f32) = .empty,
+    parallax_params: graph.NodeMap([3]f32) = .empty,
     /// The smoothed face center and scale an auto_frame warp steers toward its
     /// target each frame, a running mean so the reframing eases instead of
     /// snapping. Invalid until the first face seeds it.
@@ -1467,73 +1500,73 @@ pub const Session = struct {
     bracket_seq: i64 = 0,
     /// The glow of each spliced bloom.pass node, packed as (threshold,
     /// intensity, 0, 0) - resolved once at activation like grade_params.
-    bloom_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
-    mesh_face_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
-    mesh_face_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    bloom_params: graph.NodeMap([4]f32) = .empty,
+    mesh_face_loaders: graph.NodeMap(*asset.ImageLoader) = .empty,
+    mesh_face_textures: graph.NodeMap(render.TextureHandle) = .empty,
     /// mesh.lashes nodes: the lash strip's {r, g, b, opacity, length, curl},
     /// resolved once at activation. It ships no asset and runs no loader; the
     /// strip is rebuilt from the tracked eye landmarks each frame.
-    lash_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [6]f32) = .empty,
+    lash_params: graph.NodeMap([6]f32) = .empty,
     /// paint.face nodes: the texture load in flight and its resolved texture,
     /// the face region each is masked to (absent means the whole face), and
     /// its {opacity, blend mode} laid onto the skin.
-    paint_face_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
-    paint_face_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
-    paint_face_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
-    paint_face_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    paint_face_loaders: graph.NodeMap(*asset.ImageLoader) = .empty,
+    paint_face_textures: graph.NodeMap(render.TextureHandle) = .empty,
+    paint_face_masks: graph.NodeMap(u8) = .empty,
+    paint_face_params: graph.NodeMap([2]f32) = .empty,
     /// face.swap nodes: the donor load in flight and its resolved texture, the
     /// optional face region each is confined to (absent lets the mesh and its
     /// feather define it), and its {opacity, seam feather} blended onto the face.
-    face_swap_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
-    face_swap_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
-    face_swap_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
-    face_swap_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    face_swap_loaders: graph.NodeMap(*asset.ImageLoader) = .empty,
+    face_swap_textures: graph.NodeMap(render.TextureHandle) = .empty,
+    face_swap_masks: graph.NodeMap(u8) = .empty,
+    face_swap_params: graph.NodeMap([2]f32) = .empty,
     /// sprite.2d nodes: the image load in flight, its resolved texture, and
     /// the normalized rect+opacity {x,y,w,h,opacity} the node draws at.
-    sprite_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
-    sprite_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
-    sprite_rects: std.AutoHashMapUnmanaged(graph.NodeIndex, [5]f32) = .empty,
+    sprite_loaders: graph.NodeMap(*asset.ImageLoader) = .empty,
+    sprite_textures: graph.NodeMap(render.TextureHandle) = .empty,
+    sprite_rects: graph.NodeMap([5]f32) = .empty,
     /// A sprite.2d or text.2d node's authored turn in degrees, and the parameter
     /// name that replaces it live. A gesture's turn adds to this, so an authored
     /// angle is where the sticker starts rather than something the first drag
     /// discards. Read back through goss_session_sprite_transform.
-    sprite_rotations: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
-    sprite_rotation_params: std.AutoHashMapUnmanaged(graph.NodeIndex, []const u8) = .empty,
+    sprite_rotations: graph.NodeMap(f32) = .empty,
+    sprite_rotation_params: graph.NodeMap([]const u8) = .empty,
     /// Extruded 3D text nodes: the glyph block mesh and its color, drawn via
     /// the model path, by graph index.
-    text3d_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, struct { mesh: render.Renderer.ModelMesh, color: [4]f32 }) = .empty,
+    text3d_meshes: graph.NodeMap(struct { mesh: render.Renderer.ModelMesh, color: [4]f32 }) = .empty,
     /// video.texture nodes: the streaming decoder, the dynamic texture its
     /// frames upload into, and the playback cursor, by graph index. Drawn in
     /// the sprite branch like an animated sprite, one decoded frame at a time.
-    video_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, VideoPlayback) = .empty,
+    video_textures: graph.NodeMap(VideoPlayback) = .empty,
     /// A sprite node the current inference of an ml.infer style binding drives:
     /// its texture is the model's restyled frame, refreshed each render, drawn
     /// in the sprite branch like a video texture. The texture itself is owned by
     /// the ml worker; this maps only which sprite shows it.
-    ml_style_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    ml_style_textures: graph.NodeMap(render.TextureHandle) = .empty,
     /// A sprite/text node's opacity parameter name (a slice into the lens
     /// manifest arena), when it binds one, so the draw reads a live opacity.
-    sprite_opacity_params: std.AutoHashMapUnmanaged(graph.NodeIndex, []const u8) = .empty,
+    sprite_opacity_params: graph.NodeMap([]const u8) = .empty,
     /// A sprite.2d node's rect parameter names (x, y, w, h; empty where
     /// unbound), slices into the manifest arena, so a model output driving those
     /// parameters moves and sizes the sprite each frame.
-    sprite_placement_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4][]const u8) = .empty,
+    sprite_placement_params: graph.NodeMap([4][]const u8) = .empty,
     /// A sprite.2d node's live interaction transform, when it declares one, so
     /// the recognized gestures drag and scale it and a tap on it fires an event.
-    sprite_interactions: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteInteraction) = .empty,
+    sprite_interactions: graph.NodeMap(SpriteInteraction) = .empty,
     /// A sprite.2d node's face-mesh anchor landmark, when it declares one, so the
     /// sprite pins its center to that point on the tracked face each frame - a
     /// sticker that follows the head (glasses on the eyes, a hat over the brow).
-    sprite_anchor_faces: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
+    sprite_anchor_faces: graph.NodeMap(u32) = .empty,
     /// A sprite.2d node that lifts the live subject as its source instead of a
     /// bundled image, by graph index: the segmentation channel it cuts out and
     /// the matte-edge feather. The frame keyed by it draws at the sprite rect as a
     /// movable, scalable cutout sticker.
-    sprite_cutouts: std.AutoHashMapUnmanaged(graph.NodeIndex, struct { channel: u8, softness: f32, whole: bool }) = .empty,
+    sprite_cutouts: graph.NodeMap(struct { channel: u8, softness: f32, whole: bool }) = .empty,
     /// A text.2d node whose content comes from a live source, by graph index. The
     /// frame path re-rasterizes each when its resolved string changes, so an info
     /// sticker (a clock, a countdown, a host-fed reading) updates in place.
-    dynamic_texts: std.AutoHashMapUnmanaged(graph.NodeIndex, DynamicText) = .empty,
+    dynamic_texts: graph.NodeMap(DynamicText) = .empty,
     /// Host-fed info values keyed by name (owned copies), the rail an info sticker
     /// reads through `content_source`: the app writes time, place, or a sensor
     /// reading with goss_session_set_info and a bound text node shows the latest.
@@ -1541,41 +1574,41 @@ pub const Session = struct {
     /// A sprite.2d node's segmentation key, when it declares one: the channel
     /// and whether the sprite fills behind that region (greenscreen) or over it
     /// (a restyle). The generative background and full-face restyle ride this.
-    sprite_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteMask) = .empty,
+    sprite_masks: graph.NodeMap(SpriteMask) = .empty,
     /// A masked sprite's over-mode strength parameter name, so a slider mixes
     /// the restyle onto its region live (a partial de-age, beauty, harmonize).
-    sprite_mask_strength_params: std.AutoHashMapUnmanaged(graph.NodeIndex, []const u8) = .empty,
+    sprite_mask_strength_params: graph.NodeMap([]const u8) = .empty,
     /// A model.gltf node's live turntable control, when it declares one, so the
     /// gestures orbit, dolly and roll it each tick.
-    model_controls: std.AutoHashMapUnmanaged(graph.NodeIndex, ModelControlState) = .empty,
+    model_controls: graph.NodeMap(ModelControlState) = .empty,
     /// An animated sprite's frame state, when it declares frames > 1: the
     /// per-frame loads in flight, the textures they land in, and the rate
     /// the draw cycles them at off the lens clock.
-    sprite_anims: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteAnim) = .empty,
+    sprite_anims: graph.NodeMap(SpriteAnim) = .empty,
     /// model.gltf nodes anchored to the tracked face, by graph index.
     /// Face-anchored model nodes, each mapped to the face index it binds to
     /// (-1 draws on every submitted face, a non-negative index only that one).
-    model_face_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, i32) = .empty,
-    model_body_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
-    model_skeleton_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
+    model_face_anchors: graph.NodeMap(i32) = .empty,
+    model_body_anchors: graph.NodeMap(void) = .empty,
+    model_skeleton_anchors: graph.NodeMap(void) = .empty,
     /// model.gltf nodes anchored to the tracked world, by graph index.
-    model_world_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
+    model_world_anchors: graph.NodeMap(void) = .empty,
     /// One background loader per currently-spliced model.gltf node
     /// still waiting on its .glb - mirrors lut_loaders/blend_loaders,
     /// one node type over.
-    model_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ModelLoader) = .empty,
+    model_loaders: graph.NodeMap(*asset.ModelLoader) = .empty,
     /// One loaded model per model.gltf node whose .glb finished
     /// loading: the gpu mesh plus the plain animation-sampling data
     /// pollModelLoaders keeps around (not a bgfx resource, so it lives
     /// here rather than inside render.Renderer).
-    model_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, LoadedModel) = .empty,
+    model_meshes: graph.NodeMap(LoadedModel) = .empty,
     /// model.gltf nodes that retarget the tracked face: their mesh auto-binds
     /// each morph target to the live blendshapes. Filled at activation from the
     /// manifest's retarget fields, read when the mesh finishes loading.
-    model_retargets: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
+    model_retargets: graph.NodeMap(void) = .empty,
     /// model.gltf nodes that mouth the submitted audio: their jaw-open morph is
     /// driven by the audio envelope. Filled at activation, read at mesh load.
-    model_talks: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
+    model_talks: graph.NodeMap(void) = .empty,
 };
 
 /// A model.gltf node's loaded state: real gpu buffers plus the plain
@@ -1834,9 +1867,8 @@ pub fn destroyEngine(engine: *Engine) void {
         if (slot) |target| render.Renderer.destroyOffscreenTarget(target);
     }
     if (engine.capture_target) |target| render.Renderer.destroyOffscreenTarget(target);
-    if (engine.capture_staging) |staging| {
-        if (engine.renderer) |*r| r.destroyTexture(staging);
-    }
+    // capture_staging is a pooled readback surface: pooled_readbacks owns it and
+    // destroys it below, so destroying it here would be a double free.
     var live_it = engine.live_output_slots.valueIterator();
     while (live_it.next()) |slot| {
         if (slot.target) |target| render.Renderer.destroyOffscreenTarget(target);
@@ -1845,6 +1877,15 @@ pub fn destroyEngine(engine: *Engine) void {
     engine.live_output_slots.deinit(engine.gpa);
     if (engine.capture_convert.len > 0) engine.gpa.free(engine.capture_convert);
     engine.music_db.deinit();
+    // Every pooled target goes while bgfx is still up: destroying a frame buffer
+    // past shutdown dereferences a context that is already gone.
+    for (engine.pooled_targets.items) |target| render.Renderer.destroyOffscreenTarget(target);
+    engine.pooled_targets.deinit(engine.gpa);
+    if (engine.renderer) |*r| {
+        for (engine.pooled_readbacks.items) |texture| r.destroyTexture(texture);
+    }
+    engine.pooled_readbacks.deinit(engine.gpa);
+    engine.held_slots.deinit(engine.gpa);
     if (engine.renderer) |*r| r.deinit();
     engine.texture_pool.deinit();
     engine.staging_pool.deinit();
@@ -1889,16 +1930,44 @@ fn ensureCaptureTarget(e: *Engine, width: u16, height: u16) !void {
     if (e.capture_width == width and e.capture_height == height and e.capture_target != null and e.capture_staging != null) return;
     if (e.capture_target) |target| render.Renderer.destroyOffscreenTarget(target);
     e.capture_target = null;
-    if (e.capture_staging) |staging| {
-        if (e.renderer) |*r| r.destroyTexture(staging);
-    }
+    // The readback goes back to the pool rather than being destroyed, so a host
+    // that alternates two capture sizes reuses both surfaces.
+    if (e.capture_staging_slot) |held| e.staging_pool.release(held.bin, held.slot);
+    e.capture_staging_slot = null;
     e.capture_staging = null;
     const target = try render.Renderer.createOffscreenTarget(width, height);
     errdefer render.Renderer.destroyOffscreenTarget(target);
-    e.capture_staging = try render.Renderer.createReadbackTexture(width, height);
+    e.capture_staging = try acquireStagingReadback(e, width, height);
     e.capture_target = target;
     e.capture_width = width;
     e.capture_height = height;
+}
+
+/// A readback staging texture of this size from the staging pool, creating the
+/// slot's surface the first time that slot is used. The hold is recorded on the
+/// engine, not in held_slots, because it lasts until the capture size changes
+/// rather than to the end of a frame.
+fn acquireStagingReadback(e: *Engine, width: u16, height: u16) !render.TextureHandle {
+    const desc: graph.ResourceDesc = .{
+        .width = width,
+        .height = height,
+        .format = 0,
+        .usage = readback_usage,
+        .size_bytes = @as(u64, width) * height * 4,
+    };
+    const bin = try e.staging_pool.binFor(desc, e.staging_pool_capacity);
+    const slot = try e.staging_pool.acquire(bin);
+    errdefer e.staging_pool.release(bin, slot);
+    const stored = e.staging_pool.payload(bin, slot);
+    const texture = if (stored != 0) render.Renderer.unpackTexture(stored) else made: {
+        const fresh = try render.Renderer.createReadbackTexture(width, height);
+        errdefer if (e.renderer) |*r| r.destroyTexture(fresh);
+        try e.pooled_readbacks.append(e.gpa, fresh);
+        e.staging_pool.setPayload(bin, slot, render.Renderer.packTexture(fresh));
+        break :made fresh;
+    };
+    e.capture_staging_slot = .{ .bin = bin, .slot = slot };
+    return texture;
 }
 
 /// (Re)creates the session-owned previous-frame target a trail.pass echoes,
@@ -2735,10 +2804,12 @@ fn gazeEyePoints(s: *Session, width: u16, height: u16, rotation: u32, mirror: bo
 }
 
 /// Grows the per-frame vertex staging to hold `floats`, called once per
-/// dynamic mesh at lens activation. Never runs on the frame path.
-fn reserveFrameStage(s: *Session, floats: usize) void {
+/// dynamic mesh at lens activation. Never runs on the frame path. A failure here
+/// is recorded, not dropped: every frame after it would skip the mesh update and
+/// redraw stale geometry, which looks like a frozen effect with nothing to read.
+fn reserveFrameStage(s: *Session, graph_index: graph.NodeIndex, floats: usize) void {
     if (floats <= s.frame_stage.len) return;
-    const grown = s.engine.gpa.alloc(f32, floats) catch return;
+    const grown = s.engine.gpa.alloc(f32, floats) catch return noteOom(s, graph_index);
     if (s.frame_stage.len != 0) s.engine.gpa.free(s.frame_stage);
     s.frame_stage = grown;
 }
@@ -2981,7 +3052,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     // of it here at chain start before any content draws over it. Only a lens
     // carrying an occluder node pays for the copy, so nothing else shifts.
     if (chainHasOccluder(s)) {
-        ensureOccluderFrame(s, width, height) catch noteChainKind(s, .occluder, .failed, .out_of_memory);
+        takeScratch(s, &s.occluder_frame_target, width, height) orelse noteChainKind(s, .occluder, .failed, .capability_unavailable);
         if (s.occluder_frame_target) |oft| {
             const seed_view = next_view_id;
             next_view_id += 1;
@@ -2995,7 +3066,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     // before any pass edits the chain - an object-move lens inpaints the subject
     // out of place yet still cuts it from this copy to draw at a new rect.
     if (s.sprite_cutouts.count() > 0) {
-        ensureCutoutSource(s, width, height) catch noteChainKind(s, .sprite, .degraded, .out_of_memory);
+        takeScratch(s, &s.cutout_source_target, width, height) orelse noteChainKind(s, .sprite, .degraded, .capability_unavailable);
         if (s.cutout_source_target) |cst| {
             const seed_view = next_view_id;
             next_view_id += 1;
@@ -3773,7 +3844,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 // hair_matte channel the passes below sample. No coarse hair
                 // clears the channel, so a hair pass keyed to it fades out.
                 if (s.segmentation_class_textures[manifest.hair_channel]) |coarse| {
-                    ensureHairMatteTarget(s, width, height) catch noteNode(s, entry.graph_index, .failed, .out_of_memory);
+                    takeScratch(s, &s.hair_matte_target, width, height) orelse noteNode(s, entry.graph_index, .failed, .capability_unavailable);
                     if (s.hair_matte_target) |hmt| {
                         const refine_view = next_view_id;
                         next_view_id += 1;
@@ -4063,7 +4134,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                             // Draw the cloud into a dedicated scene target, then
                             // composite the frame's subject over it by the subject
                             // mask, so the splats sit behind as a 3D backdrop.
-                            ensureSplatScene(s, @intCast(rect_w), @intCast(rect_h)) catch noteNode(s, entry.graph_index, .failed, .out_of_memory);
+                            takeScratch(s, &s.splat_scene_target, @intCast(rect_w), @intCast(rect_h)) orelse noteNode(s, entry.graph_index, .failed, .capability_unavailable);
                             const scene_target = s.splat_scene_target orelse {
                                 r.submitSplats(blit_view, mesh_view, input_texture, mesh, aspect_ratio, null);
                                 break :background;
@@ -5190,15 +5261,13 @@ pub fn destroySession(session: *Session) void {
     session.trail_params.deinit(session.engine.gpa);
     session.ssr_params.deinit(session.engine.gpa);
     session.env_params.deinit(session.engine.gpa);
+    // The four scratch targets come from the texture pool, which owns them; only
+    // the stateful ones are the session's to destroy.
     if (session.prev_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
-    if (session.occluder_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
-    if (session.splat_scene_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.cutout_sticker_target) |target| render.Renderer.destroyOffscreenTarget(target);
-    if (session.cutout_source_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.inpaint_fresh_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.inpaint_prev_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.inpaint_coherent_target) |target| render.Renderer.destroyOffscreenTarget(target);
-    if (session.hair_matte_target) |target| render.Renderer.destroyOffscreenTarget(target);
     session.node_reports.deinit(session.engine.gpa);
     session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
@@ -5368,6 +5437,9 @@ fn destroyWebBeautyTargets(session: *Session) void {
 }
 
 fn releaseCurrentFrame(session: *Session) void {
+    // Every ingress path releases the previous frame before taking the next, so
+    // this is the one place a submitted frame can be counted once.
+    session.frames_submitted +%= 1;
     const current = session.current orelse return;
     if (!current.owns_textures) {
         session.current = null;
@@ -5428,6 +5500,18 @@ pub export fn goss_capabilities() u64 {
     if (photo.supported) caps |= 1 << 7;
     if (media_recording.supported) caps |= 1 << 8;
     if (has_file_io) caps |= 1 << 9;
+    // The capabilities a caller could not discover before: half the engine was
+    // invisible to this call, so a host had to try an op to find out.
+    if (script.supported) caps |= 1 << 10;
+    if (audio_playback.supported) caps |= 1 << 11;
+    if (media_recording.audio_supported) caps |= 1 << 12;
+    // Built in every configuration: the world seam is the host's to feed, the
+    // stroke boards and the reconstruction store are pure core, and the node
+    // diagnostics and reports exist wherever the ABI does.
+    caps |= 1 << 13; // world tracking ingress
+    caps |= 1 << 14; // stroke boards, screen and world
+    caps |= 1 << 15; // reconstruction read and write
+    caps |= 1 << 16; // node diagnostics and the engine and session reports
     return caps;
 }
 
@@ -5593,6 +5677,8 @@ fn finishRecording(e: *Engine) bool {
 pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Status {
     const e = engine orelse return .invalid_argument;
     const r = if (e.renderer) |*r| r else return .renderer_unavailable;
+    e.bgfx_calls_at_frame_start = render.goss_bgfx_alloc_calls();
+    e.bgfx_bytes_at_frame_start = render.goss_bgfx_alloc_bytes();
     e.recording_frame_target = null;
     var recording_frame: ?media_recording.Frame = null;
     var recording_timestamp: i64 = 0;
@@ -5674,6 +5760,10 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         e.recording.?.abortFrame(frame);
     }
     _ = r.frame();
+    e.bgfx_calls_last_frame = render.goss_bgfx_alloc_calls() - e.bgfx_calls_at_frame_start;
+    e.bgfx_bytes_last_frame = render.goss_bgfx_alloc_bytes() - e.bgfx_bytes_at_frame_start;
+    if (session) |s| clearScratchTargets(s);
+    releaseHeldSlots(e);
     if (session) |s| {
         // Latch for the next tick: analysis, beauty and the chain all read one
         // level for a whole host frame rather than shifting under each other.
@@ -5681,6 +5771,7 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         // at exactly one rung and the rung cannot shift mid-frame.
         s.frame_level = s.controller.level;
         s.frame_index +%= 1;
+        s.frames_rendered +%= 1;
     }
     return .ok;
 }
@@ -5735,6 +5826,12 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
         r.touch();
     }
     _ = r.frame();
+    // A capture renders a whole frame, and a tiled capture renders one per tile,
+    // so the slots this render took go back here as well. Without it a tiled
+    // capture exhausts the pool tile by tile and every capability target after
+    // the first few tiles is refused.
+    clearScratchTargets(s);
+    releaseHeldSlots(e);
     return e.capture_target;
 }
 
@@ -5852,6 +5949,10 @@ fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
         r.touch();
     }
     _ = r.frame();
+    // The live-output lane renders its own frame, so its slots go back here the
+    // same way the preview's and the capture's do.
+    clearScratchTargets(s);
+    releaseHeldSlots(e);
 }
 
 /// Renders the composited frame straight into a caller-supplied external
@@ -6419,6 +6520,11 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
             shrunk = gpa.alloc(u8, @as(usize, still_w) * out_band * 4) catch return .out_of_memory;
         }
         const band_count: u32 = (render_h + band_rows - 1) / band_rows;
+        // One buffer at the largest tile this still can produce, reused by every
+        // tile, where the loop used to allocate and free per tile. Not sized to
+        // tile_cap: that defaults to 16384 and tiles are clamped to the render.
+        const tile_scratch = gpa.alloc(u8, @as(usize, @min(tile_cap, render_w)) * @as(usize, @min(band_rows, render_h)) * 4) catch return .out_of_memory;
+        defer gpa.free(tile_scratch);
         var ty: u32 = 0;
         while (ty < band_count) : (ty += 1) {
             const tile_y = ty * band_rows;
@@ -6443,8 +6549,7 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
                 }
                 if (!captureTargetMatches(e, tw, th)) return .again;
                 const staging = e.capture_staging orelse return .renderer_unavailable;
-                const tile_buf = gpa.alloc(u8, @as(usize, tw) * @as(usize, th) * 4) catch return .out_of_memory;
-                defer gpa.free(tile_buf);
+                const tile_buf = tile_scratch[0 .. @as(usize, tw) * @as(usize, th) * 4];
                 render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
                 const ready_frame = render.Renderer.readTexture(staging, tile_buf.ptr);
                 // bgfx writes the copy at ready_frame, so this waits rather than
@@ -6500,7 +6605,10 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
         while (r.frame() < ready_frame) {}
     } else {
         // Composite each tile into its own small target and stitch the
-        // rows into the full buffer at the tile's offset.
+        // rows into the full buffer at the tile's offset. One buffer at the
+        // largest tile serves them all; it used to be allocated per tile.
+        const tile_scratch = gpa.alloc(u8, @as(usize, @min(tile_cap, render_w)) * @as(usize, @min(tile_cap, render_h)) * 4) catch return .out_of_memory;
+        defer gpa.free(tile_scratch);
         var ty: u32 = 0;
         while (ty < rows) : (ty += 1) {
             const tile_y = ty * tile_cap;
@@ -6525,9 +6633,7 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
                 }
                 if (!captureTargetMatches(e, tw, th)) return .again;
                 const staging = e.capture_staging orelse return .renderer_unavailable;
-                const tile_size = @as(usize, tw) * @as(usize, th) * 4;
-                const tile_buf = gpa.alloc(u8, tile_size) catch return .out_of_memory;
-                defer gpa.free(tile_buf);
+                const tile_buf = tile_scratch[0 .. @as(usize, tw) * @as(usize, th) * 4];
                 render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
                 const ready_frame = render.Renderer.readTexture(staging, tile_buf.ptr);
                 // bgfx writes the copy at ready_frame, so this waits rather than
@@ -7789,6 +7895,138 @@ pub const NodeReason = enum(u32) {
     model_rejected = 7,
     model_unsupported = 8,
     capability_unavailable = 9,
+    /// The physics backend refused a body or a joint the manifest asked for, so
+    /// the node draws but does not move the way the lens described.
+    constraint_failed = 10,
+};
+
+/// Drops this frame's hold on every scratch target. The pool slots go back
+/// beside this, so the next frame takes again and two capabilities that never
+/// share a frame never need two targets.
+fn clearScratchTargets(s: *Session) void {
+    s.occluder_frame_target = null;
+    s.cutout_source_target = null;
+    s.hair_matte_target = null;
+    s.splat_scene_target = null;
+}
+
+/// Fills a session's scratch-target slot from the pool for this frame. Returns
+/// null when the pool is at capacity, which the caller records as a capability
+/// the frame could not serve rather than pretending it drew.
+fn takeScratch(s: *Session, slot: *?render.Renderer.OffscreenTarget, width: u16, height: u16) ?void {
+    if (slot.* != null) return {};
+    slot.* = acquireScratchTarget(s.engine, width, height) orelse {
+        s.resource_pressure = true;
+        return null;
+    };
+    return {};
+}
+
+/// Usage tags in a pool descriptor, so a colour target and a readback surface
+/// of the same size never share a bin.
+const target_usage: u32 = 1;
+const readback_usage: u32 = 2;
+
+/// One pool slot a frame is holding, kept so the frame can give it back.
+pub const HeldSlot = struct { bin: graph.pool.BinIndex, slot: graph.pool.SlotIndex };
+
+/// Takes a scratch render target of this size from the texture pool, creating a
+/// slot's target the first time that slot is used. Null when the pool is at
+/// capacity: a counted, degradable event rather than an allocation, and the
+/// caller skips the capability for this frame.
+fn acquireScratchTarget(e: *Engine, width: u16, height: u16) ?render.Renderer.OffscreenTarget {
+    const desc: graph.ResourceDesc = .{
+        .width = width,
+        .height = height,
+        .format = 0,
+        .usage = target_usage,
+        .size_bytes = @as(u64, width) * height * 4,
+    };
+    const bin = e.texture_pool.binFor(desc, e.texture_pool_capacity) catch return null;
+    const slot = e.texture_pool.acquire(bin) catch return null;
+    const stored = e.texture_pool.payload(bin, slot);
+    const target: render.Renderer.OffscreenTarget = blk: {
+        if (stored != 0) break :blk render.Renderer.unpackTarget(stored);
+        const made = render.Renderer.createOffscreenTarget(width, height) catch {
+            e.texture_pool.release(bin, slot);
+            return null;
+        };
+        e.pooled_targets.append(e.gpa, made) catch {
+            render.Renderer.destroyOffscreenTarget(made);
+            e.texture_pool.release(bin, slot);
+            return null;
+        };
+        e.texture_pool.setPayload(bin, slot, render.Renderer.packTarget(made));
+        break :blk made;
+    };
+    e.held_slots.append(e.gpa, .{ .bin = bin, .slot = slot }) catch {
+        e.texture_pool.release(bin, slot);
+        return null;
+    };
+    return target;
+}
+
+/// Gives every slot this frame took back, so a capability target lives exactly
+/// as long as the frame that used it.
+fn releaseHeldSlots(e: *Engine) void {
+    for (e.held_slots.items) |held| e.texture_pool.release(held.bin, held.slot);
+    e.held_slots.clearRetainingCapacity();
+}
+
+/// What the engine is actually doing right now, as against what it was asked
+/// for. Every field is measured rather than configured, so a host metering an
+/// agent, or a developer chasing a budget, reads one struct instead of guessing.
+pub const EngineReport = extern struct {
+    /// The render backend bgfx brought up, numbered as bgfx numbers them, and
+    /// whether the android zero-copy ycbcr import actually came up.
+    renderer_backend: u32,
+    zero_copy_import: u32,
+    /// Bounded resource pools: what they may hold, what they hold now, the most
+    /// they ever held, and how often a request found nothing free.
+    texture_pool_capacity: u32,
+    texture_pool_live: u32,
+    texture_pool_peak: u32,
+    texture_pool_exhausted: u32,
+    staging_pool_capacity: u32,
+    staging_pool_live: u32,
+    staging_pool_peak: u32,
+    staging_pool_exhausted: u32,
+    /// Distinct resource descriptions each pool holds, and descriptions the
+    /// texture pool turned away at its bin cap. A zero bin count means nothing
+    /// is pooled yet, which the live and peak counts alone cannot say.
+    texture_pool_bins: u32,
+    texture_pool_bins_refused: u32,
+    staging_pool_bins: u32,
+    /// Heaps the zig allocator cannot see, in bytes held right now.
+    bgfx_live_bytes: u64,
+    /// What the last rendered frame asked of the vendor heap. Steady state is
+    /// only bgfx's own two unavoidable sites. The zig heap is not here because
+    /// nothing outside the harness counts it, and a field that always read zero
+    /// would be taken as proof that it was measured.
+    bgfx_alloc_calls_last_frame: u64,
+    bgfx_bytes_last_frame: u64,
+};
+
+/// Per-session counters, the other half of the same question: what this session
+/// has been asked to do and how much of it it actually did.
+pub const SessionReport = extern struct {
+    frames_submitted: u64,
+    frames_rendered: u64,
+    degrade_level: u32,
+    degrade_transitions: u32,
+    face_analysis: u64,
+    hand_analysis: u64,
+    pose_analysis: u64,
+    segmentation_analysis: u64,
+    ml_analysis: u64,
+    /// Lens nodes not doing what the manifest asked, and diagnostics that could
+    /// not be recorded, the same pair node_report_count answers.
+    nodes_degraded: u32,
+    node_reports_lost: u32,
+    /// Script handlers and ticks that threw. A lens whose script faults every
+    /// frame still draws, so without this the host sees a lens that looks fine
+    /// and behaves as though it had no script at all.
+    script_faults: u32,
 };
 
 /// One node's diagnostic, POD across the ABI.
@@ -7826,6 +8064,13 @@ fn noteNode(s: *Session, graph_index: graph.NodeIndex, state: NodeState, reason:
 
 /// The reason an allocation failure maps to, used by the parameter stores whose
 /// only way to fail is running out of memory.
+/// A joint the physics backend refused. The node still draws, so without this
+/// a chained hair or tail that silently failed to hang reads as a lens bug the
+/// host has no way to see.
+fn noteConstraint(s: *Session, graph_index: graph.NodeIndex, result: anyerror!void) void {
+    result catch noteNode(s, graph_index, .degraded, .constraint_failed);
+}
+
 fn noteOom(s: *Session, graph_index: graph.NodeIndex) void {
     noteNode(s, graph_index, .degraded, .out_of_memory);
 }
@@ -7852,7 +8097,17 @@ pub const AnalysisCounts = struct {
 
 pub export fn goss_session_report_frame(session: ?*Session, frame_time_us: u32, thermal: c_int) c_int {
     const s = session orelse return 0;
-    _ = s.controller.step(.{ .frame_time_us = frame_time_us, .thermal = thermalFromC(thermal) });
+    // A pool that turned a request away since the last report counts as pressure
+    // whatever the clock said, then clears: the rung is what shrinks demand.
+    const pressure = s.resource_pressure;
+    s.resource_pressure = false;
+    if (s.controller.step(.{
+        .frame_time_us = frame_time_us,
+        .thermal = thermalFromC(thermal),
+        .resource_pressure = pressure,
+    }) != null) {
+        s.degrade_transitions +|= 1;
+    }
     return @intFromEnum(s.controller.level);
 }
 
@@ -8703,6 +8958,60 @@ pub export fn goss_session_reset_capture(session: ?*Session) Status {
 /// how many diagnostics could not be recorded at all. A zero count with a
 /// non-zero lost count means the lens degraded in ways this session could not
 /// even write down, which is a different thing from a lens that is fine.
+pub export fn goss_engine_read_report(engine: ?*Engine, out_report: ?*EngineReport) Status {
+    const e = engine orelse return .invalid_argument;
+    const out = out_report orelse return .invalid_argument;
+    out.* = std.mem.zeroes(EngineReport);
+    if (e.renderer) |*r| {
+        out.renderer_backend = r.activeBackend();
+        out.zero_copy_import = if (r.isAndroidVulkan()) 1 else 0;
+    }
+    out.texture_pool_capacity = e.texture_pool_capacity;
+    out.staging_pool_capacity = e.staging_pool_capacity;
+    poolInto(&e.texture_pool, &out.texture_pool_live, &out.texture_pool_peak, &out.texture_pool_exhausted);
+    poolInto(&e.staging_pool, &out.staging_pool_live, &out.staging_pool_peak, &out.staging_pool_exhausted);
+    out.texture_pool_bins = @intCast(e.texture_pool.binCount());
+    out.texture_pool_bins_refused = @intCast(@min(e.texture_pool.bins_refused, std.math.maxInt(u32)));
+    out.staging_pool_bins = @intCast(e.staging_pool.binCount());
+    out.bgfx_live_bytes = render.goss_bgfx_live_bytes();
+    out.bgfx_alloc_calls_last_frame = e.bgfx_calls_last_frame;
+    out.bgfx_bytes_last_frame = e.bgfx_bytes_last_frame;
+    return .ok;
+}
+
+/// Sums one pool's bins into the live, peak and exhausted figures a report
+/// carries. A pool with no bins reports zeroes, which is the truth before
+/// anything has been acquired from it.
+fn poolInto(pool: *const graph.Pool, live: *u32, peak: *u32, exhausted: *u32) void {
+    var at: usize = 0;
+    while (at < pool.binCount()) : (at += 1) {
+        const bin = pool.report(@intCast(at));
+        live.* += @intCast(bin.live);
+        peak.* += @intCast(bin.live_peak);
+        exhausted.* += @intCast(bin.exhausted_count);
+    }
+}
+
+pub export fn goss_session_read_report(session: ?*Session, out_report: ?*SessionReport) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_report orelse return .invalid_argument;
+    out.* = .{
+        .frames_submitted = s.frames_submitted,
+        .frames_rendered = s.frames_rendered,
+        .degrade_level = @intFromEnum(s.controller.level),
+        .degrade_transitions = s.degrade_transitions,
+        .face_analysis = s.analysis_submits.face,
+        .hand_analysis = s.analysis_submits.hand,
+        .pose_analysis = s.analysis_submits.pose,
+        .segmentation_analysis = s.analysis_submits.segmentation,
+        .ml_analysis = s.analysis_submits.ml,
+        .nodes_degraded = @intCast(s.node_reports.items.len),
+        .node_reports_lost = s.node_reports_lost,
+        .script_faults = s.script_faults,
+    };
+    return .ok;
+}
+
 pub export fn goss_session_node_report_count(session: ?*Session, out_count: ?*u32, out_lost: ?*u32) Status {
     const s = session orelse return .invalid_argument;
     if (out_count) |p| p.* = @intCast(s.node_reports.items.len);
@@ -10372,7 +10681,10 @@ fn fireScriptEvent(s: *Session, engine: *script.Script, handler: [*:0]const u8, 
         name_ptrs[i] = s.script_param_names[i].ptr;
         values[i] = lens.param_values[i];
     }
-    engine.event(handler, &script_signal_names, &sig_values, name_ptrs[0..n], values[0..n], arg) catch return;
+    engine.event(handler, &script_signal_names, &sig_values, name_ptrs[0..n], values[0..n], arg) catch {
+        s.script_faults +|= 1;
+        return;
+    };
     for (0..n) |i| lens.setParam(s.script_param_names[i], @floatCast(values[i]));
 }
 
@@ -10465,6 +10777,15 @@ fn fillScriptSignals(out: *[script_signal_names.len]f64, signals: ?*const trigge
     }
 }
 
+/// One script handler, with a throw counted rather than dropped. Every caller
+/// shares the running parameter values, so a faulting handler leaves them as
+/// the previous one wrote them instead of reverting the frame.
+fn runScriptHandler(s: *Session, engine: *script.Script, handler: [*:0]const u8, sig_values: *[script_signal_names.len]f64, names: [][*:0]const u8, vals: []f64, arg: ?[]const u8) void {
+    engine.event(handler, &script_signal_names, sig_values, names, vals, arg) catch {
+        s.script_faults +|= 1;
+    };
+}
+
 fn runScript(s: *Session, signals: *const trigger.Signals) void {
     const engine = if (s.script_engine) |*e| e else return;
     const lens = if (s.active_lens) |*l| l else return;
@@ -10486,17 +10807,20 @@ fn runScript(s: *Session, signals: *const trigger.Signals) void {
     // a no-op the backend skips.
     if (!s.script_inited) {
         s.script_inited = true;
-        engine.event("onInit", &script_signal_names, &sig_values, names, vals, null) catch {};
-        engine.event("onTurnOn", &script_signal_names, &sig_values, names, vals, null) catch {};
+        runScriptHandler(s, engine, "onInit", &sig_values, names, vals, null);
+        runScriptHandler(s, engine, "onTurnOn", &sig_values, names, vals, null);
     }
-    if (signals.tap) engine.event("onTap", &script_signal_names, &sig_values, names, vals, null) catch {};
-    if (signals.touch_double_tap) engine.event("onDoubleTap", &script_signal_names, &sig_values, names, vals, null) catch {};
-    if (signals.touch_long_press) engine.event("onLongPress", &script_signal_names, &sig_values, names, vals, null) catch {};
-    if (signals.touch_swipe != 0) engine.event("onSwipe", &script_signal_names, &sig_values, names, vals, null) catch {};
-    if (signals.touch_pinch != 1.0) engine.event("onPinch", &script_signal_names, &sig_values, names, vals, null) catch {};
-    if (signals.touch_rotate != 0) engine.event("onRotate", &script_signal_names, &sig_values, names, vals, null) catch {};
-    for (signals.events) |ev| engine.event("onEvent", &script_signal_names, &sig_values, names, vals, ev) catch {};
-    engine.tick(&script_signal_names, &sig_values, names, vals) catch return;
+    if (signals.tap) runScriptHandler(s, engine, "onTap", &sig_values, names, vals, null);
+    if (signals.touch_double_tap) runScriptHandler(s, engine, "onDoubleTap", &sig_values, names, vals, null);
+    if (signals.touch_long_press) runScriptHandler(s, engine, "onLongPress", &sig_values, names, vals, null);
+    if (signals.touch_swipe != 0) runScriptHandler(s, engine, "onSwipe", &sig_values, names, vals, null);
+    if (signals.touch_pinch != 1.0) runScriptHandler(s, engine, "onPinch", &sig_values, names, vals, null);
+    if (signals.touch_rotate != 0) runScriptHandler(s, engine, "onRotate", &sig_values, names, vals, null);
+    for (signals.events) |ev| runScriptHandler(s, engine, "onEvent", &sig_values, names, vals, ev);
+    engine.tick(&script_signal_names, &sig_values, names, vals) catch {
+        s.script_faults +|= 1;
+        return;
+    };
     for (0..n) |i| lens.setParam(s.script_param_names[i], @floatCast(vals[i]));
 }
 
@@ -13857,7 +14181,7 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                 gpa.free(order);
                 continue;
             };
-            reserveFrameStage(session, capture_max_gaussians * 6 * 12);
+            reserveFrameStage(session, node.graph_index, capture_max_gaussians * 6 * 12);
             continue;
         }
         if (session.ml_workers_loaded >= session.ml_worker_budget) {
@@ -13918,7 +14242,7 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         session.ml_workers_loaded += 1;
         // Reserve the staging the billboard cloud writes each frame, six vertices
         // of twelve floats per point, so the draw never falls back to a stale mesh.
-        reserveFrameStage(session, @as(usize, count) * 6 * 12);
+        reserveFrameStage(session, node.graph_index, @as(usize, count) * 6 * 12);
     }
 }
 
@@ -14228,7 +14552,7 @@ fn tempDirPath() []const u8 {
 fn clearSpilledAssets(s: *Session) void {
     const gpa = s.engine.gpa;
     for (s.spilled_assets.items) |path| {
-        if (comptime has_file_io) std.Io.Dir.cwd().deleteFile(defaultIo(), path) catch {};
+        if (comptime has_file_io) std.Io.Dir.cwd().deleteFile(defaultIo(), path) catch {}; // failure ignored: the temp file is already gone, which is the outcome this wanted
         gpa.free(path);
     }
     s.spilled_assets.clearRetainingCapacity();
@@ -14546,7 +14870,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                             session.fluid_base_meshes.put(gpa, model.graph_index, base) catch {
                                 render.Renderer.destroyModelMesh(base);
                             };
-                            reserveFrameStage(session, fluid.particles.len * 3);
+                            reserveFrameStage(session, model.graph_index, fluid.particles.len * 3);
                         } else |_| {
                             var f = fluid;
                             f.deinit();
@@ -14583,7 +14907,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                             session.particle_base_meshes.put(gpa, model.graph_index, base) catch {
                                 render.Renderer.destroyModelMesh(base);
                             };
-                            reserveFrameStage(session, sys.renderCount() * 3);
+                            reserveFrameStage(session, model.graph_index, sys.renderCount() * 3);
                         } else |_| {
                             var s2 = sys;
                             s2.deinit();
@@ -14599,7 +14923,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                             session.particle_ribbon_meshes.put(gpa, model.graph_index, mesh) catch {
                                 render.Renderer.destroyParticleMesh(mesh);
                             };
-                            reserveFrameStage(session, sys.ribbonVertexCount() * 3);
+                            reserveFrameStage(session, model.graph_index, sys.ribbonVertexCount() * 3);
                         } else |_| {
                             var s2 = sys;
                             s2.deinit();
@@ -14616,7 +14940,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                             session.particle_meshes.put(gpa, model.graph_index, mesh) catch {
                                 render.Renderer.destroyParticleMesh(mesh);
                             };
-                            reserveFrameStage(session, if (faded) @as(usize, vertex_count) * 12 else @as(usize, vertex_count) * 3);
+                            reserveFrameStage(session, model.graph_index, if (faded) @as(usize, vertex_count) * 12 else @as(usize, vertex_count) * 3);
                             if (pf.sprite) |stem| loadParticleSprite(session, gpa, bundle_path, model.graph_index, stem);
                         } else |_| {
                             var s2 = sys;
@@ -14649,7 +14973,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                                         break :register false;
                                     };
                                     session.hair_vcount.put(gpa, model.graph_index, hair.strands * hair.verts) catch noteOom(session, model.graph_index);
-                                    reserveFrameStage(session, @as(usize, hair.strands) * hair.verts * 3);
+                                    reserveFrameStage(session, model.graph_index, @as(usize, hair.strands) * hair.verts * 3);
                                     break :register true;
                                 };
                                 if (!registered) render.Renderer.destroyHairMesh(mesh);
@@ -14682,7 +15006,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                                         break :register false;
                                     };
                                     session.cloth_cols.put(gpa, model.graph_index, cloth.cols * cloth.rows) catch noteOom(session, model.graph_index);
-                                    reserveFrameStage(session, @as(usize, cloth.cols) * cloth.rows * 3);
+                                    reserveFrameStage(session, model.graph_index, @as(usize, cloth.cols) * cloth.rows * 3);
                                     break :register true;
                                 };
                                 if (!registered) render.Renderer.destroyClothMesh(mesh);
@@ -14716,7 +15040,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                                             break :register false;
                                         };
                                         session.cloth_cols.put(gpa, model.graph_index, @intCast(sphere.verts.len)) catch noteOom(session, model.graph_index);
-                                        reserveFrameStage(session, sphere.verts.len * 3);
+                                        reserveFrameStage(session, model.graph_index, sphere.verts.len * 3);
                                         break :register true;
                                     };
                                     if (!registered) render.Renderer.destroyClothMesh(mesh);
@@ -14798,26 +15122,30 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                     var link: u32 = 1;
                     while (link < segments) : (link += 1) {
                         const pos: [3]f32 = .{ prev_pos[0], prev_pos[1] - seg_len, prev_pos[2] };
-                        const proxy = world.addBody(.sphere, pos, .{ 0.02, 0, 0 }, .dynamic) catch break;
-                        world.constrainSpring(prev, proxy, .{ 0, 0, 0 }, .{ 0, 0, 0 }, seg_len, body.jiggle_stiffness, body.jiggle_damping) catch {};
+                        const proxy = world.addBody(.sphere, pos, .{ 0.02, 0, 0 }, .dynamic) catch {
+                            noteNode(session, model.graph_index, .degraded, .constraint_failed);
+                            break;
+                        };
+                        noteConstraint(session, model.graph_index, world.constrainSpring(prev, proxy, .{ 0, 0, 0 }, .{ 0, 0, 0 }, seg_len, body.jiggle_stiffness, body.jiggle_damping));
                         prev = proxy;
                         prev_pos = pos;
                     }
-                    world.constrainSpring(prev, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }, seg_len, body.jiggle_stiffness, body.jiggle_damping) catch {};
+                    noteConstraint(session, model.graph_index, world.constrainSpring(prev, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }, seg_len, body.jiggle_stiffness, body.jiggle_damping));
                     break;
                 }
-                switch (body.joint) {
-                    .distance => world.constrainDistance(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }, 0.0, body.chain_length) catch {},
-                    .point => world.constrainPoint(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }) catch {},
-                    .fixed => world.constrainFixed(anchor, child) catch {},
-                    .hinge => {
+                const joined = switch (body.joint) {
+                    .distance => world.constrainDistance(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }, 0.0, body.chain_length),
+                    .point => world.constrainPoint(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }),
+                    .fixed => world.constrainFixed(anchor, child),
+                    .hinge => hinge: {
                         // Hinge about z at the anchor's world position, so the
                         // child swings in the anchor's xy plane only.
                         const pivot = if (anchor_model.physics) |ap| ap.position else .{ 0, 0, 0 };
-                        world.constrainHinge(anchor, child, pivot, .{ 0, 0, 1 }) catch {};
+                        break :hinge world.constrainHinge(anchor, child, pivot, .{ 0, 0, 1 });
                     },
-                    .spring => world.constrainSpring(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }, body.chain_length, 1.2, 0.6) catch {},
-                }
+                    .spring => world.constrainSpring(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }, body.chain_length, 1.2, 0.6),
+                };
+                noteConstraint(session, model.graph_index, joined);
                 break;
             }
         }
@@ -15120,16 +15448,15 @@ pub export fn goss_session_activate_lens_from_directory(session: ?*Session, bund
 /// full-size target per capability ever touched: 8 MB each at 1080p, 33 MB at
 /// 4K. Nulling the size caches is what makes the next lens recreate them.
 fn releaseLensTargets(s: *Session) void {
+    // The pooled scratch targets are not the session's to destroy; a frame gives
+    // its slots back at the end of every frame already.
+    clearScratchTargets(s);
     const targets = [_]*?render.Renderer.OffscreenTarget{
         &s.prev_frame_target,
-        &s.occluder_frame_target,
-        &s.splat_scene_target,
         &s.cutout_sticker_target,
-        &s.cutout_source_target,
         &s.inpaint_fresh_target,
         &s.inpaint_prev_target,
         &s.inpaint_coherent_target,
-        &s.hair_matte_target,
     };
     for (targets) |slot| {
         if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);

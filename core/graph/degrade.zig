@@ -73,6 +73,10 @@ pub const Inputs = struct {
     frame_time_us: u32,
     /// Fed by the SDK from the platform thermal API.
     thermal: ThermalState,
+    /// A bounded pool turned a frame-path request away. The frame drew without
+    /// that capability, so the level has to come down or it will keep doing so:
+    /// the pools are fixed, and the only thing that shrinks demand is a rung.
+    resource_pressure: bool = false,
 };
 
 pub const Config = struct {
@@ -123,9 +127,11 @@ pub const Controller = struct {
 
         const degrade_threshold = c.config.budget_us / 100 * c.config.degrade_pct;
         const recover_threshold = c.config.budget_us / 100 * c.config.recover_pct;
-        const over = inputs.frame_time_us > degrade_threshold or
+        const over = inputs.resource_pressure or
+            inputs.frame_time_us > degrade_threshold or
             (inputs.thermal == .serious and inputs.frame_time_us > recover_threshold);
-        const under = inputs.frame_time_us < recover_threshold and inputs.thermal == .nominal;
+        const under = !inputs.resource_pressure and
+            inputs.frame_time_us < recover_threshold and inputs.thermal == .nominal;
 
         if (over) {
             c.over_streak += 1;
@@ -270,4 +276,24 @@ test "a stride runs one frame in n and a zero stride never runs" {
     try t.expect(Plan.runs(2, 2));
     try t.expect(!Plan.runs(0, 0));
     try t.expect(!Plan.runs(0, 9));
+}
+
+test "pool exhaustion degrades a frame that is inside its budget" {
+    var c = Controller.init(.{ .budget_us = 16000, .degrade_dwell = 3 });
+    // Well inside budget and cool: without pressure this would be recovering.
+    for (0..2) |_| try t.expect(c.step(.{ .frame_time_us = 4000, .thermal = .nominal, .resource_pressure = true }) == null);
+    const moved = c.step(.{ .frame_time_us = 4000, .thermal = .nominal, .resource_pressure = true }) orelse return error.NoTransition;
+    try t.expectEqual(Level.full, moved.from);
+    try t.expectEqual(Level.reduced_ml_cadence, moved.to);
+}
+
+test "pressure blocks recovery even on comfortable frames" {
+    var c = Controller.init(.{ .budget_us = 16000, .recover_dwell = 2, .degrade_dwell = 1000 });
+    c.level = .segmentation_off;
+    for (0..8) |_| _ = c.step(.{ .frame_time_us = 1000, .thermal = .nominal, .resource_pressure = true });
+    try t.expectEqual(Level.segmentation_off, c.level);
+    // With the pressure gone the same frames earn the rung back.
+    _ = c.step(.{ .frame_time_us = 1000, .thermal = .nominal });
+    _ = c.step(.{ .frame_time_us = 1000, .thermal = .nominal });
+    try t.expectEqual(Level.reduced_ml_cadence, c.level);
 }
