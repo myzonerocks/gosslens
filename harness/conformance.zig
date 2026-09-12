@@ -16478,14 +16478,10 @@ fn proveLensTargetsRelease(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 }
 
 
-/// Proves the texture pool is doing the work, not merely existing. Two lenses
-/// needing different capability targets run in turn; the pool must hand out
-/// slots, reach a peak, and end with none live, which is what sharing a target
-/// between capabilities that never meet looks like from outside.
-/// Best effort is the lens's claim, not the engine's assumption: a node that
-/// loses a resource it cannot draw without fails the activation, unless the
-/// manifest marked that node optional, in which case the lens is ready and the
-/// node is degraded. Both halves, over one bundle with its shader binary hidden.
+/// Best effort is the lens's claim, not the engine's assumption: a node that loses
+/// a resource it cannot draw without fails the activation, unless the manifest
+/// marked it optional, in which case the lens is ready and the node degraded.
+/// Both halves, over one bundle with its shader binary hidden.
 fn proveOptionalNodeDeclaresBestEffort(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const bundle = ".lens-packages/hair-matte";
     const cwd = std.Io.Dir.cwd();
@@ -16592,6 +16588,10 @@ fn markFirstShaderPassOptional(gpa: std.mem.Allocator, manifest: []const u8) ![]
     return out;
 }
 
+/// Proves the texture pool is doing the work, not merely existing. Two lenses
+/// needing different capability targets run in turn; the pool must hand out slots,
+/// reach a peak, and end with none live, which is what sharing a target between
+/// capabilities that never meet looks like from outside.
 fn provePoolServesScratchTargets(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);

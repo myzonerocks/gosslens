@@ -1360,12 +1360,10 @@ export class GossSession {
   /// A lens built entirely from beauty.* nodes (beauty-baseline, say)
   /// activates and runs for real regardless, since those go through
   /// applyWebBeautyChain's own embedded shaders, not a per-lens one.
-  /// Activates a lens. On the WebGPU build this suspends, like the renderer init
-  /// and the capture readback: it creates shader programs and textures that reach
-  /// Dawn's async device work, so the module unwinds part way. Not awaiting left
-  /// it suspended and the next render reentered it, which killed the tab.
-  /// Resolves false when the lens is live but a node the manifest did not mark
-  /// optional could not do what it asked; nodeReports says which and why.
+  /// Activates a lens, resolving false when it is live but a node the manifest did
+  /// not mark optional could not do what it asked; nodeReports says which and why.
+  /// On the WebGPU build this suspends and creates work that reaches Dawn, so not
+  /// awaiting left the module suspended and the next render reentered it.
   async activateLens(manifestJson: string): Promise<boolean> {
     const bytes = new TextEncoder().encode(manifestJson);
     const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]);

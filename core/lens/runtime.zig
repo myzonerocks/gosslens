@@ -1932,11 +1932,8 @@ pub const Lens = struct {
         return node.optional;
     }
 
-    /// The manifest id of the node at a graph index, so a diagnostic a caller
-    /// reads names the node its author wrote rather than an internal index.
     /// The graph index of the node with this manifest id, for a caller walking
-    /// manifest nodes rather than spliced ones. Null when the id was not spliced,
-    /// which a diagnostic treats as nothing to record against.
+    /// manifest nodes rather than spliced ones. Null when the id was not spliced.
     pub fn graphIndexFor(self: *const Lens, node_id: []const u8) ?graph.NodeIndex {
         for (self.nodes) |node| {
             if (std.mem.eql(u8, node.node_id, node_id)) return node.graph_index;
@@ -1944,6 +1941,8 @@ pub const Lens = struct {
         return null;
     }
 
+    /// The manifest id of the node at a graph index, so a diagnostic a caller
+    /// reads names the node its author wrote rather than an internal index.
     pub fn nodeIdAt(self: *const Lens, graph_index: graph.NodeIndex) ?[]const u8 {
         const node = self.findNode(graph_index) orelse return null;
         if (node.node_id.len == 0) return null;
