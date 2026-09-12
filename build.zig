@@ -439,6 +439,23 @@ pub fn build(b: *std.Build) void {
     }
 
     const media_core_tests = b.addTest(.{ .root_module = mediaCoreModule(b, target, optimize, math_module) });
+
+    // The media harness: the checks that belong to the contracts rather than to a
+    // rendered frame, so they need no window and no gpu. What needs a real
+    // composite stays in conformance beside the other rendered proofs.
+    const media_harness = b.addExecutable(.{
+        .name = "gosslens-media-harness",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("harness/media.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "media", .module = mediaCoreModule(b, target, optimize, math_module) }},
+        }),
+    });
+    const media_harness_step = b.step("media-harness", "Run the media contract harness");
+    const run_media_harness = b.addRunArtifact(media_harness);
+    media_harness_step.dependOn(&run_media_harness.step);
+    ci_step.dependOn(&run_media_harness.step);
     const quiet_tests = b.addTest(.{ .root_module = quietModule(b, target, optimize) });
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const api_check_tests = b.addTest(.{ .root_module = api_check_module });

@@ -12545,6 +12545,93 @@ fn paintSweepFrame(rgba: []u8, w: u32, h: u32, i: u32, n: u32) void {
     }
 }
 
+/// The CPU reference conversion and the GPU's agree within a stated tolerance, for
+/// every standard and range pair the camera path accepts. This checks the uniform
+/// plumbing, not the arithmetic: a matrix transposed on its way into the shader
+/// converts every frame wrong and a test of the matrix alone would not notice.
+fn proveColorMatchesOnBothPaths(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const w: u32 = 64;
+    const h: u32 = 64;
+    const cases = [_]struct { name: []const u8, standard: u32, range: u32, info: abi.media.ColorInfo }{
+        .{ .name = "bt709 video", .standard = 1, .range = 0, .info = .{ .matrix = .bt709, .range = .video } },
+        .{ .name = "bt709 full", .standard = 1, .range = 1, .info = .{ .matrix = .bt709, .range = .full } },
+        .{ .name = "bt601 video", .standard = 0, .range = 0, .info = .{ .matrix = .bt601, .range = .video } },
+        .{ .name = "bt601 full", .standard = 0, .range = 1, .info = .{ .matrix = .bt601, .range = .full } },
+    };
+    // Eight bits of chroma tolerance: the GPU samples a half-resolution chroma
+    // plane with bilinear filtering where the reference reads the exact sample,
+    // so a flat field is comparable and a gradient is not. The fields below are
+    // flat per tile for that reason, and the number is stated rather than tuned
+    // until it passed.
+    const tolerance: u8 = 8;
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const y_plane = try gpa.alloc(u8, @as(usize, w) * h);
+    defer gpa.free(y_plane);
+    const uv_plane = try gpa.alloc(u8, @as(usize, w) * h / 2);
+    defer gpa.free(uv_plane);
+    const read_back = try gpa.alloc(u8, @as(usize, w) * h * 4);
+    defer gpa.free(read_back);
+
+    for (cases) |case| {
+        // One flat field per case, off-neutral so the chroma terms actually
+        // contribute: a grey field would pass under a wrong matrix.
+        const y: u8 = 140;
+        const cb: u8 = 90;
+        const cr: u8 = 180;
+        @memset(y_plane, y);
+        var i: usize = 0;
+        while (i < uv_plane.len) : (i += 2) {
+            uv_plane[i] = cb;
+            uv_plane[i + 1] = cr;
+        }
+
+        const desc: abi.FrameDesc = .{
+            .width = w,
+            .height = h,
+            .pixel_format = 0,
+            .color_standard = case.standard,
+            .color_range = case.range,
+            .flags = 0,
+            .timestamp_us = 33_333,
+        };
+        if (abi.goss_session_submit_frame_copy(session, &desc, y_plane.ptr, w, uv_plane.ptr, w) != .ok) {
+            std.debug.print("conformance: FAIL the colour proof could not submit {s}\n", .{case.name});
+            return false;
+        }
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+
+        var out_w: u32 = 0;
+        var out_h: u32 = 0;
+        if (abi.goss_engine_capture_live_frame(engine, session, 4, read_back.ptr, read_back.len, &out_w, &out_h) != .ok) {
+            std.debug.print("conformance: FAIL the colour proof could not read the composited frame for {s}\n", .{case.name});
+            return false;
+        }
+
+        const want = abi.media.yuvToRgb8(case.info, y, cb, cr);
+        // Sample the middle, away from any edge the sampler clamps differently.
+        const at = ((@as(usize, out_h) / 2) * out_w + out_w / 2) * 4;
+        if (at + 3 >= read_back.len) return false;
+        const got = [3]u8{ read_back[at], read_back[at + 1], read_back[at + 2] };
+        var worst: u8 = 0;
+        for (0..3) |ch| {
+            const d = if (got[ch] > want[ch]) got[ch] - want[ch] else want[ch] - got[ch];
+            if (d > worst) worst = d;
+        }
+        if (worst > tolerance) {
+            std.debug.print("conformance: FAIL {s} differs by {d}: gpu {d},{d},{d} against cpu {d},{d},{d}\n", .{ case.name, worst, got[0], got[1], got[2], want[0], want[1], want[2] });
+            return false;
+        }
+    }
+
+    std.debug.print("conformance: PROOF the cpu and gpu colour paths agree within {d} of each other across bt601 and bt709 in both ranges\n", .{tolerance});
+    return true;
+}
+
 /// A clip drives the graph with no camera. This is what "video" in the North Star
 /// meant and did not do: before the clip source existed the engine opened the file
 /// itself, drew it as a sprite at an authored rect, and clocked it off a camera
@@ -23074,6 +23161,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("pause leaves no gap");
     if (!try proveClipDrivesTheGraph(gpa, engine)) return 1;
     watchHold("clip drives the graph");
+    if (!try proveColorMatchesOnBothPaths(gpa, engine)) return 1;
+    watchHold("colour matches on both paths");
     watchHold("pool serves scratch targets");
     return 0;
 }
