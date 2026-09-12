@@ -226,6 +226,7 @@ test "height is measured against the floor, and free area against what is on it"
 }
 
 pub const anchors = @import("anchors.zig");
+pub const measure = @import("measure.zig");
 pub const Anchor = anchors.Anchor;
 pub const AnchorStore = anchors.Store;
 

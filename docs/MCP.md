@@ -1,13 +1,12 @@
 # The MCP server
 
-Agents already have brains that understand images. What they lack is a way to
-reach a live camera, a clip or a screen, and to act back into the frame. This
-server is that reach: the engine as tools a model can call, over JSON-RPC on
-stdin and stdout.
+An MCP server over the engine's C ABI. It exposes the session as tools a model
+can call: open a source, read what the engine sees, read what the frame says,
+search the memory plane, and draw back into the frame.
 
-It is one static binary. No runtime to install, no SDK in between, and it speaks
-the protocol itself, because the point of a frozen C ABI is that a thin thing
-can sit on it.
+One static binary speaking JSON-RPC on stdin and stdout. It implements the
+protocol directly rather than through an SDK, so there is no runtime to install
+and nothing between the tools and the ABI.
 
 ```sh
 zig build            # builds zig-out/bin/gosslens-mcp

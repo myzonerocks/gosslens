@@ -1,10 +1,10 @@
-//! The MCP server: the engine as tools an agent can call. Agents already have
-//! brains that understand images; what they lack is a way to reach a live camera,
-//! a clip or a screen and to act back into the frame. This is that reach, over
-//! JSON-RPC on stdin and stdout, as one static binary with no runtime to install.
+//! The MCP protocol surface: the tool list, the server info, and the result and
+//! error shapes a client reads. One static binary speaking JSON-RPC on stdin and
+//! stdout, implementing the protocol directly rather than through an SDK, so
+//! there is no runtime to install and nothing between the tools and the ABI.
 //!
-//! It speaks the protocol itself rather than through an SDK, because the whole
-//! point of a frozen C ABI is that a thin thing can sit on it.
+//! The stdio loop lives in main.zig; these shapes are here so they are testable
+//! without a process.
 
 const std = @import("std");
 
@@ -123,7 +123,7 @@ pub fn writeServerInfo(w: *std.Io.Writer, major: u16, minor: u16) !void {
         .{ protocol_version, server_name, major, minor },
     );
     try writeJsonString(w,
-        \\Real-time visual plumbing. Open a camera, a clip or a screen, read what the engine sees as one record, ask what the frame says, search what it remembered, and draw back into the frame. Everything runs on this device; nothing here sends a frame anywhere.
+        \\Tools over a gosslens session. Open a camera, a clip or a screen; read what the engine sees as one record; read what the frame says; search the memory plane; draw back into the frame. Everything runs on this device and no tool here sends a frame anywhere. A session's scope governs what each tool will answer.
     );
     try w.writeAll("}");
 }
@@ -177,9 +177,10 @@ test "the server announces the version it speaks and the abi it is" {
     try testing.expect(std.mem.indexOf(u8, text, protocol_version) != null);
     try testing.expect(std.mem.indexOf(u8, text, "\"tools\":{}") != null);
     try testing.expect(std.mem.indexOf(u8, text, "gosslens") != null);
-    // The instructions say what this is, which is the one thing a model reads
-    // before it decides whether to use any of it.
-    try testing.expect(std.mem.indexOf(u8, text, "visual plumbing") != null);
+    // The instructions say what the tools do and where they run, which is what a
+    // model reads before deciding whether to use any of them.
+    try testing.expect(std.mem.indexOf(u8, text, "Tools over a gosslens session") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "no tool here sends a frame anywhere") != null);
 }
 
 test "a recognised sign with a quote in it stays valid json" {

@@ -373,3 +373,19 @@ test "a string carries its own length, so a zero byte cannot truncate a record" 
     try t.expectEqual(@as(u16, 3), std.mem.readInt(u16, lens.payload[0..2], .little));
     try t.expectEqualSlices(u8, "a\x00b", lens.payload[2..5]);
 }
+
+test "the record's own header is the one the format document states" {
+    // docs/PERCEPTION-FORMAT.md is the public contract and this is what keeps it
+    // honest: a reader implemented from that table must land on these bytes.
+    var buf: [64]u8 = undefined;
+    var w = Writer.init(&buf, 0x1122334455667788);
+    const n = try w.finish();
+    try t.expectEqual(@as(usize, 20), n);
+    try t.expectEqualSlices(u8, "GSP1", buf[0..4]);
+    try t.expectEqual(@as(u16, 1), std.mem.readInt(u16, buf[4..6], .little));
+    try t.expectEqual(@as(u16, 0), std.mem.readInt(u16, buf[6..8], .little));
+    // Offset eight is the whole record in bytes, so a reader knows where it
+    // ends without walking it: the header alone is twenty.
+    try t.expectEqual(@as(u32, 20), std.mem.readInt(u32, buf[8..12], .little));
+    try t.expectEqual(@as(i64, 0x1122334455667788), std.mem.readInt(i64, buf[12..20], .little));
+}

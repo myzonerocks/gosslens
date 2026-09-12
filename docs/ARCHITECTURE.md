@@ -196,6 +196,40 @@ container, importer, scaler, resampler, or streaming feature is implemented
 through a permissive component, a platform API, or a narrow Gosslens-owned
 piece without changing this rule.
 
+## The agent rail
+
+What an agent needs sits on the same seams, not beside them.
+
+- **The perception snapshot** is one versioned TLV record (`core/perception/`).
+  The JSON form is projected from the binary record rather than written a second
+  time, so the two cannot drift, and the layout is declared data
+  (`core/perception/schema.zig`) that a baseline gate holds still. Unknown tags
+  are stepped over by length, so an older consumer reads a newer record.
+- **Events** ride a bounded ring that drops the oldest and reports how many, and
+  a replay log names the first divergence rather than the fact of one.
+- **Frame egress** checks the budget before any trigger fires, scores change from
+  the mean plus a structural term, and redacts in normalized space.
+- **Annotations** are addressed by id, so moving one every frame leaks no entry,
+  and each carries a lifetime and says what happens when its track goes.
+- **What the frame says** comes from a detector and a recogniser on the engine's
+  own ONNX rail (`core/text/`, `adapters/tracking/text_infer.zig`). The
+  probability map becomes oriented quadrilaterals from each blob's second
+  moments; a region unwarps to an upright crop; a region whose rectified pixels
+  have not changed keeps its reading, so a static sign costs the detector alone.
+- **The memory plane** (`core/memory/`) is a navigable graph over embeddings with
+  the exact search beside it as the oracle its recall is measured against, a
+  bounded event log whose every bound retires the oldest rather than refusing the
+  newest, and keyframe selection that measures novelty against what is already
+  remembered rather than against the previous frame.
+- **Screens** (`core/screen/`) carry a scale factor and a desktop origin, so a
+  normalized point an agent sends lands on a real pixel and a point off the
+  surface is refused rather than answered.
+- **Scope** (`core/perception/scope.zig`) is two words: the sections a caller may
+  read and the verbs it may act with. A read out of scope is dropped from the
+  record; a verb out of scope is refused.
+- **The MCP server** (`tools/mcp/`) is one static binary over the same C ABI,
+  speaking JSON-RPC on stdio, so the whole rail is tools a model can call.
+
 ## Dependency licenses
 
 Gosslens is licensed under Apache-2.0. Dependencies must use a permissive

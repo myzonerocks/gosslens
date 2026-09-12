@@ -102,6 +102,21 @@ is in one place.
 - [x] An on-device media library: the engine primitives ship, the host composes the archive on them. Semantic search is exact cosine k-nearest-neighbour over embedding vectors a bring-your-own model produced (`goss_engine_media_search`), so visual/object/face/location/text search all ride whichever OSS, commercial, or custom embedder the host runs; the encrypted local vault seals and opens a media blob with authenticated ChaCha20-Poly1305 under a host-held key (`goss_seal_media`/`goss_open_media`), so nothing on disk is readable without it; and computational burst capture picks the sharp, eyes-open frame of a burst by sharpness blended with a host openness score (`goss_engine_best_take`), the best-take fusion, with add-me compositing riding the shipped segmentation matte and placement primitives. Genmoji and per-user concept personalization are the diffusion bring-your-own-model slot. Proven by proveMediaLibrary and the media-library module tests
 - [x] An authoring studio: the engine ships the format and the runtime the studio is built on; the studio surfaces are host tooling over them. The lens format is published as a documented, forkable standard ([LENS-FORMAT.md](LENS-FORMAT.md)) whose reference parser ([core/lens/manifest.zig](../core/lens/manifest.zig)) fails closed and is fuzzed - a valid manifest is mutated deterministically thousands of times and re-parsed, as a leak-checked module test and the proveManifestFuzz conformance proof - alongside the byte-identical generative and tracking conformance the whole harness already enforces. The runtime is the embeddable player, brand-neutral by mandate so there is no branding to remove, reached through the one ABI the SDKs wrap ([API.md](API.md)). A visual editor (scene tree, timeline, node graph, material editor, live preview, asset library, profiler, prefabs) and a template library are host applications over the inspectable GLF and the live-preview render ABI, outside the engine's surface. 3D content imports through the shipped glTF model path (`model.gltf`); FBX, USDZ, Spark and Unity scenes reach it through their standard glTF export, the runtime interchange every DCC tool writes
 
+## The agent rail
+
+What an agent needs that a lens author does not. The perception snapshot as one
+versioned record and the same record as JSON; a bounded event stream with honest
+drop counts; budgeted frame egress that costs nothing in a still room;
+annotations an agent draws back into the frame, addressed by id and carrying
+their own lifetimes. What the frame says, from a detector and a recogniser on the
+engine's own model rail. A memory plane that remembers what was worth keeping and
+finds it again. Scope, so a host decides what a caller may see and do. An MCP
+server, so the whole of it is tools a model can call.
+
+Still open: the platform screen-capture backends, the sealed index behind the
+host's key wired through the session, shared anchors across two devices, and the
+perception formats tracked as a forkable specification rather than only as code.
+
 ## Always on
 
 Leak gates in tests and in running binaries, the license gate over vendored

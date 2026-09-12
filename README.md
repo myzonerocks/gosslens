@@ -62,10 +62,13 @@ or the [C SDK](sdk/c/README.md) for any other language with a C FFI.
 
 ## What you get
 
+- **For agents** - one versioned record of everything the engine sees, an event stream, budgeted frame egress, and annotations an agent draws back into the frame. An [MCP server](docs/MCP.md) makes all of it tools a model can call.
+- **What the frame says** - text detection and recognition on the engine's own ONNX rail: oriented regions, reading order, and a track id that survives a frame.
+- **Memory** - an on-device index over embeddings with the keyframe selection that decides what was worth remembering, and the search that finds it again.
 - **Beauty and makeup** - smooth, whiten, reshape, lipstick, and blush, each a live 0-to-1 control.
 - **Tracking** - multi-face, hands with gestures, and full-body pose, plus selfie segmentation for virtual backgrounds.
 - **Lenses** - the `.glens` format: scripted triggers, shader passes, glTF models, and physics, authored once and run on every platform.
-- **Your own models** - a lens bundles a TFLite or ONNX net and binds its outputs to parameters, masks, depth, or a drawn image; the host stages models in memory and reads tensors back.
+- **Your own models** - a lens bundles a TFLite or ONNX net and binds its outputs to parameters, masks, depth, or a drawn image; the ONNX engine is written from scratch here, with quantization, control flow, and inference that allocates nothing after load.
 - **World and AR** - anchor content in space from ARKit, ARCore, or WebXR frames, and raycast a tap onto a scanned world mesh.
 - **Capture** - photos, video, and multi-source compositing through each platform's native media APIs.
 

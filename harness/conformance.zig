@@ -4242,6 +4242,177 @@ fn proveTextRail(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+
+/// The memory plane through the real ABI: remember, search, replace, forget,
+/// save, load. Recall is asserted against the exact answer on the same corpus,
+/// because an approximate index nobody measured is a guess, and the saved file
+/// must answer the same query after a round trip or persistence is decoration.
+fn proveMemoryPlane(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const dim: u32 = 16;
+    const total: usize = 400;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_memory_open(session, dim, 1024) != .ok) {
+        std.debug.print("conformance: FAIL the memory plane would not open\n", .{});
+        return false;
+    }
+
+    // A fixed corpus, so the recall number is the same on every run and on every
+    // target rather than a different number each time nobody can compare.
+    var prng = std.Random.DefaultPrng.init(0x13E5717);
+    const random = prng.random();
+    const corpus = try gpa.alloc(f32, total * dim);
+    defer gpa.free(corpus);
+    for (0..total) |i| {
+        const v = corpus[i * dim ..][0..dim];
+        for (v) |*x| x.* = random.float(f32) * 2 - 1;
+        normalizeVector(v);
+        if (abi.goss_session_memory_remember(session, @intCast(i + 1), v.ptr, dim) != .ok) {
+            std.debug.print("conformance: FAIL the memory plane refused entry {d}\n", .{i});
+            return false;
+        }
+    }
+
+    var live: u32 = 0;
+    var bytes: u64 = 0;
+    _ = abi.goss_session_memory_stats(session, &live, &bytes);
+    if (live != total or bytes == 0) {
+        std.debug.print("conformance: FAIL the memory holds {d} of {d} in {d} bytes\n", .{ live, total, bytes });
+        return false;
+    }
+
+    // Recall at one against the exact answer, computed here rather than taken
+    // from the index that is being tested.
+    const queries: usize = 40;
+    var hits: usize = 0;
+    for (0..queries) |_| {
+        var query: [16]f32 = undefined;
+        for (&query) |*x| x.* = random.float(f32) * 2 - 1;
+        normalizeVector(&query);
+
+        var best_id: u64 = 0;
+        var best_score: f32 = -std.math.floatMax(f32);
+        for (0..total) |i| {
+            var dot: f32 = 0;
+            for (corpus[i * dim ..][0..dim], query) |a, b| dot += a * b;
+            if (dot > best_score) {
+                best_score = dot;
+                best_id = @intCast(i + 1);
+            }
+        }
+
+        var ids: [1]u64 = undefined;
+        var scores: [1]f32 = undefined;
+        var count: u32 = 0;
+        if (abi.goss_session_memory_search(session, &query, dim, 1, &ids, &scores, &count) != .ok or count != 1) {
+            std.debug.print("conformance: FAIL the memory plane would not answer a query\n", .{});
+            return false;
+        }
+        if (ids[0] == best_id) hits += 1;
+    }
+    const recall = hits * 100 / queries;
+    if (recall < 85) {
+        std.debug.print("conformance: FAIL the memory plane recalls {d} percent, under the bar of 85\n", .{recall});
+        return false;
+    }
+
+    // Replacing by id does not duplicate, and forgetting removes.
+    var again: [16]f32 = @splat(0);
+    again[0] = 1;
+    _ = abi.goss_session_memory_remember(session, 1, &again, dim);
+    _ = abi.goss_session_memory_stats(session, &live, &bytes);
+    if (live != total) {
+        std.debug.print("conformance: FAIL replacing an id changed the count to {d}\n", .{live});
+        return false;
+    }
+    _ = abi.goss_session_memory_forget(session, 1);
+    _ = abi.goss_session_memory_stats(session, &live, &bytes);
+    if (live != total - 1) {
+        std.debug.print("conformance: FAIL forgetting left {d} of {d}\n", .{ live, total - 1 });
+        return false;
+    }
+
+    // A saved memory answers the same query after a round trip, which is the
+    // only thing persistence is for.
+    var needed: usize = 0;
+    _ = abi.goss_session_memory_save(session, null, 0, &needed);
+    const saved = try gpa.alloc(u8, needed);
+    defer gpa.free(saved);
+    if (abi.goss_session_memory_save(session, saved.ptr, saved.len, &needed) != .ok) {
+        std.debug.print("conformance: FAIL the memory would not save\n", .{});
+        return false;
+    }
+
+    var query: [16]f32 = undefined;
+    for (&query) |*x| x.* = random.float(f32) * 2 - 1;
+    normalizeVector(&query);
+    var before: [4]u64 = undefined;
+    var before_count: u32 = 0;
+    _ = abi.goss_session_memory_search(session, &query, dim, 4, &before, null, &before_count);
+
+    if (abi.goss_session_memory_load(session, saved.ptr, saved.len) != .ok) {
+        std.debug.print("conformance: FAIL the memory would not load what it saved\n", .{});
+        return false;
+    }
+    var after: [4]u64 = undefined;
+    var after_count: u32 = 0;
+    _ = abi.goss_session_memory_search(session, &query, dim, 4, &after, null, &after_count);
+    if (before_count != after_count) {
+        std.debug.print("conformance: FAIL the round trip answered {d} where it answered {d}\n", .{ after_count, before_count });
+        return false;
+    }
+    for (0..before_count) |i| {
+        if (before[i] != after[i]) {
+            std.debug.print("conformance: FAIL the round trip ranked {d} where it ranked {d}\n", .{ after[i], before[i] });
+            return false;
+        }
+    }
+    // The forgotten id stays forgotten across the trip.
+    for (after[0..after_count]) |id| {
+        if (id == 1) {
+            std.debug.print("conformance: FAIL a forgotten entry came back from the file\n", .{});
+            return false;
+        }
+    }
+
+    // A file that is not one is refused rather than loaded as something.
+    var broken = try gpa.dupe(u8, saved);
+    defer gpa.free(broken);
+    broken[0] = 'X';
+    if (abi.goss_session_memory_load(session, broken.ptr, broken.len) == .ok) {
+        std.debug.print("conformance: FAIL a tampered memory file loaded\n", .{});
+        return false;
+    }
+
+    // Scope governs it: with the verbs withheld, the same calls are refused.
+    _ = abi.goss_session_set_scope(session, 0xFFFFFFFF, 0);
+    if (abi.goss_session_memory_search(session, &query, dim, 1, &after, null, &after_count) == .ok) {
+        std.debug.print("conformance: FAIL a search ran with the verb out of scope\n", .{});
+        return false;
+    }
+    if (abi.goss_session_memory_remember(session, 9999, &again, dim) == .ok) {
+        std.debug.print("conformance: FAIL a write ran with the verb out of scope\n", .{});
+        return false;
+    }
+    _ = abi.goss_session_set_scope(session, 0xFFFFFFFF, 0xFFFFFFFF);
+
+    std.debug.print(
+        "conformance: PROOF the memory plane through the real ABI: {d} entries in {d} bytes, {d} percent recall against the exact answer, a round trip that ranks identically, a tampered file refused, and both verbs refused out of scope\n",
+        .{ total, bytes, recall },
+    );
+    return true;
+}
+
+fn normalizeVector(v: []f32) void {
+    var acc: f32 = 0;
+    for (v) |x| acc += x * x;
+    if (acc <= 0) return;
+    const inv = 1.0 / @sqrt(acc);
+    for (v) |*x| x.* *= inv;
+}
+
 /// Writes a lens bundle whose ml.infer node runs a bundled author model, the
 /// way an author ships one. It binds the segmenter mask center (256x256, so
 /// 128*256+128 - foreground on a centered portrait, background on a blank frame)
@@ -22726,6 +22897,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     // The text rail alone, so a change to it is proven in a minute rather than
     // behind the whole suite, the same way the lifecycle proof owns the process.
     const text_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--text") else false;
+    const memory_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--memory") else false;
 
     if (c.glfwInit() == c.GLFW_FALSE) return error.GlfwInit;
     defer c.glfwTerminate();
@@ -22738,6 +22910,13 @@ pub fn main(init_args: std.process.Init) !u8 {
     // bringing renderers up and down has to own the process to say anything.
     if (lifecycle_mode) {
         return if (try proveRendererLifecycle(gpa, window)) 0 else 1;
+    }
+
+    if (memory_mode) {
+        var counter = CountingAllocator{ .backing = gpa };
+        const engine = try abi.createEngine(counter.allocator(), .{ .texture_pool_capacity = 4, .staging_pool_capacity = 4 });
+        defer abi.destroyEngine(engine);
+        return if (try proveMemoryPlane(gpa, engine)) 0 else 1;
     }
 
     if (text_mode) {
@@ -23219,6 +23398,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("color managed capture");
     if (!try proveMlInfer(gpa, engine)) return 1;
     watchHold("ml infer");
+    if (!try proveMemoryPlane(gpa, engine)) return 1;
+    watchHold("memory plane");
     if (!try proveModelZoo(gpa, engine)) return 1;
     watchHold("model zoo");
     if (!try proveTextRail(gpa, engine)) return 1;
