@@ -8487,13 +8487,9 @@ pub export fn goss_session_clip_step(session: ?*Session, clip: u32, frames: i32)
     return goss_session_clip_submit_frame(session, clip, 0);
 }
 
-/// What this build's media backend declares it encodes. A host reads this instead
-/// of assuming from the platform, which is what made the two-boolean contract a
-/// problem in the first place.
 /// One versioned record of what the engine currently sees, written into the
-/// caller's buffer. Selecting sections matters: an agent polling every frame
-/// usually wants two of the twelve, and writing all of them to be ignored is the
-/// cost this avoids. A short buffer answers the size it needed rather than a
+/// caller's buffer. Selection matters: an agent polling every frame usually wants
+/// two sections, and a short buffer answers the size it needed rather than a
 /// partial record, so a caller sizes once.
 pub export fn goss_session_perception_snapshot(session: ?*Session, select: u32, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
     const s = session orelse return .invalid_argument;
@@ -8662,16 +8658,9 @@ pub export fn goss_session_perception_snapshot(session: ?*Session, select: u32, 
     return .ok;
 }
 
-/// The same record as JSON, for the agent gateways that speak it. Projected from
-/// the binary form rather than written a second time from the session: one
-/// producer of the facts and one projection of it, so the two cannot drift.
-/// Drains the session's event ring in order. The drop count says whether anything
-/// was missed since the last drain, and is cleared by the read, so a consumer sees
-/// each drop once rather than the same number for ever.
-/// A luma grid of the frame, read from the thumbnail the engine already keeps for
-/// its own white balance. Comparing a grid rather than the frame is the whole
-/// reason a still room is cheap: a full comparison at 1080p costs more than the
-/// encode it is avoiding, and the thumbnail is already there.
+/// A luma grid of the frame, from the thumbnail the engine already keeps for its
+/// own white balance. Comparing a grid rather than the frame is why a still room
+/// is cheap: a full comparison at 1080p costs more than the encode it avoids.
 fn sampleLumaGrid(s: *Session, out: []u8, side: usize) bool {
     @memset(out, 0);
     // No thumbnail means no pixels to compare. Answering that plainly is the

@@ -316,11 +316,10 @@ pub const Engine = struct {
             .optimization = stats,
         };
 
-        // One measuring run sizes the buffer every later frame uses. A model
-        // exported with symbolic spatial dims cannot be measured yet: it has no
-        // shape until a caller declares one, so the plan waits rather than the
-        // load failing. A bound refusal still fails here, because that is a
-        // decision and not a missing fact.
+        // One measuring run sizes the buffer every later frame uses. A model with
+        // symbolic spatial dims has no shape until a caller declares one, so the
+        // plan waits rather than the load failing. A bound refusal still fails
+        // here: that is a decision, not a missing fact.
         engine.measureAndPlan() catch |err| switch (err) {
             error.TensorShapeMismatch, error.TensorMissing, error.InvokeFailed, error.UnsupportedOp => {},
             else => |e| return e,
@@ -711,11 +710,10 @@ fn parseInitializerTensor(arena: std.mem.Allocator, bytes: []const u8) Error!Ten
                 const raw_dtype = std.math.cast(i32, try r.readVarint()) orelse return error.ModelRejected;
                 dtype = @enumFromInt(raw_dtype);
             } else try r.skip(tag.wire),
-            // TensorProto field 5 is int32_data and field 6 is string_data. The
-            // reader had them one apart, so every quantized weight written as
-            // int32_data was skipped and the model refused as malformed. A
-            // repeated scalar may also be written one value per tag rather than
-            // packed, and both forms are read here.
+            // TensorProto field 5 is int32_data and 6 is string_data; the reader
+            // had them one apart, so a quantized weight written there was skipped
+            // and the model refused as malformed. A repeated scalar may also be
+            // written one value per tag, and both forms are read.
             4 => if (tag.wire == .len) {
                 float_data = try r.readLen();
             } else if (tag.wire == .i32) {
@@ -1267,10 +1265,9 @@ pub fn matmul2d(ra: std.mem.Allocator, a: []const f32, b: []const f32, m: usize,
 }
 
 /// ONNX MatMul in full: the trailing two axes multiply, every axis before them
-/// is a batch axis that broadcasts, and a 1-D operand is promoted for the
-/// multiply and demoted after. Rank two alone was enough for a feed-forward net
-/// and is enough for no transformer at all, where every attention matmul is
-/// batched over heads.
+/// broadcasts, and a 1-D operand is promoted then demoted. Rank two alone was
+/// enough for a feed-forward net and enough for no transformer at all, where
+/// every attention matmul is batched over heads.
 pub fn matmul(ra: std.mem.Allocator, a: Tensor, b: Tensor) Error!Tensor {
     if (a.dims.len == 0 or b.dims.len == 0) return error.TensorShapeMismatch;
 

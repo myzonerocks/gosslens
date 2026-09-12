@@ -2400,11 +2400,6 @@ fn buildQuickjsLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     return b.addLibrary(.{ .name = "quickjs", .linkage = .static, .root_module = module });
 }
 
-/// The media contracts the core owns: codec, container, packet, clock and the
-/// backend registry. Pure, no vendor and no platform, so it compiles for every
-/// target and an adapter implements it rather than defining it.
-/// The perception record's format: versioned, self-describing, and pure, so a
-/// consumer can be written against it without a renderer.
 /// Spatial semantics: what a plane is, and the placement questions asked of it.
 fn spatialModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     const key = b.fmt("goss-spatial-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
@@ -2483,12 +2478,9 @@ fn textModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     });
 }
 
-/// The text pipeline: the two models plus the geometry between them. It takes
-/// the same memoized ml_engine the byo-ml rail uses, so one compile never pulls
-/// in two modules over the same file.
 /// The text pipeline takes the compile's own ml_infer rather than building a
-/// second module over the engine file, which is the collision this repo has hit
-/// before: two modules over one file collide the moment a compile pulls in both.
+/// second module over the engine file: two modules over one file collide the
+/// moment a compile pulls in both, which this repo has hit before.
 fn textInferModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ml_infer_mod: *std.Build.Module) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path("adapters/tracking/text_infer.zig"),
