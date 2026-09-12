@@ -11424,7 +11424,10 @@ fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: 
 
     const tag = render.Renderer.currentShaderProfileTag() catch |err| {
         std.log.info("gosslens: every shader.pass left inert - no shader profile for this backend ({t})", .{err});
-        for (passes) |pass| noteResourceFailure(session, pass.graph_index, pass.optional, .capability_unavailable);
+        // A degrade whatever the lens declared, the same call as the worker
+        // budget: no profile is this build's situation, not a defect in the lens,
+        // and a headless build has none at all.
+        for (passes) |pass| noteNode(session, pass.graph_index, .degraded, .capability_unavailable);
         return;
     };
     for (passes) |pass| {
