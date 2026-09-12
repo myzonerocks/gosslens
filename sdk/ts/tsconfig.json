@@ -13,8 +13,7 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "allowImportingTsExtensions": true
+    "forceConsistentCasingInFileNames": true
   },
-  "include": ["src", "test", "demo"]
+  "include": ["src", "test"]
 }

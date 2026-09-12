@@ -24,7 +24,7 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.demo.json",
     "test": "bun test ./test",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepublishOnly": "bun run build"
