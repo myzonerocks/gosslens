@@ -285,6 +285,11 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_set_beauty_makeup_texture(goss_session *session, int32_t effect, const uint8_t *rgba, uint32_t width, uint32_t height)",
     "goss_status goss_session_set_face_landmarks(goss_session *session, const float *points, uint32_t point_count)",
     "goss_status goss_session_submit_frame_rgba_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride)",
+    "goss_status goss_session_open_clip(goss_session *session, const uint8_t *path, size_t path_len, uint32_t *out_clip)",
+    "goss_status goss_session_clip_submit_frame(goss_session *session, uint32_t clip, int64_t timestamp_us)",
+    "goss_status goss_session_clip_seek(goss_session *session, uint32_t clip, int64_t target_us)",
+    "goss_status goss_session_clip_info(goss_session *session, uint32_t clip, goss_clip_info *out_info)",
+    "goss_status goss_session_close_clip(goss_session *session, uint32_t clip)",
     "goss_status goss_session_beautify_frame(goss_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out)",
     "goss_status goss_session_activate_lens(goss_session *session, const uint8_t *manifest_json, size_t manifest_len)",
     "goss_status goss_session_activate_lens_from_directory(goss_session *session, const uint8_t *bundle_path, size_t bundle_path_len)",
@@ -360,6 +365,19 @@ pub const RecordingReport = extern struct {
     dropped: u64,
     /// Whether the recording is paused right now.
     paused: u32,
+};
+
+/// What an opened clip is and where it is. A host scrubbing a timeline reads this
+/// rather than guessing from a frame count and a manifest's fps, which is what the
+/// video.texture node had to do.
+pub const ClipInfo = extern struct {
+    width: u32,
+    height: u32,
+    duration_us: i64,
+    /// The presentation time of the frame most recently submitted.
+    position_us: i64,
+    /// 1 once the stream has ended and no seek has reopened it.
+    ended: u32,
 };
 
 pub const Status = enum(c_int) {
@@ -1233,6 +1251,11 @@ pub const Session = struct {
     script_param_names: []const [:0]const u8 = &.{},
     /// Whether the script has had its onInit and onTurnOn handlers called yet,
     /// so those fire exactly once on the first tick after activation.
+    /// Clips a host opened on this session. An imported clip is a source of
+    /// frames the graph consumes exactly as it consumes the camera's, so a lens
+    /// cannot tell them apart and a clip can drive a session with no camera at
+    /// all, which is what "video" in the North Star meant and did not do.
+    clips: std.ArrayListUnmanaged(?Clip) = .empty,
     script_inited: bool = false,
     /// Script handlers that threw, counted so a faulting script is visible.
     script_faults: u32 = 0,
@@ -5226,6 +5249,12 @@ pub fn destroySession(session: *Session) void {
     }
     if (session.engine.recording_session == session) _ = finishRecording(session.engine);
     teardownScript(session);
+    // Every clip a host opened, closed here whether or not the host closed it: a
+    // decoder and its reused decode buffer are the session's to release.
+    for (session.clips.items) |*slot| {
+        if (slot.*) |*c_| c_.deinit(session.engine.gpa);
+    }
+    session.clips.deinit(session.engine.gpa);
     destroySounds(session);
     destroyShaderPrograms(session);
     session.shader_programs.deinit(session.engine.gpa);
@@ -8036,6 +8065,123 @@ pub export fn goss_session_submit_frame_rgba_copy(session: ?*Session, desc: ?*co
     s.current = .{ .desc = d.*, .owns_textures = false, .preview = .{ .bgra = .{ .texture = texture } } };
     s.copied_frames += 1;
     return .ok;
+}
+
+/// Opens a clip as a source of frames for this session. The engine decodes it and
+/// the host decides when each frame lands, so the graph is driven by the clip
+/// rather than the clip being decorated onto a camera feed.
+pub export fn goss_session_open_clip(session: ?*Session, path: ?[*]const u8, path_len: usize, out_clip: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    const p = path orelse return .invalid_argument;
+    const out = out_clip orelse return .invalid_argument;
+    if (path_len == 0) return .invalid_argument;
+    if (!video.supported) return .unsupported;
+    const gpa = s.engine.gpa;
+
+    var decoder = video.Decoder.open(p[0..path_len]) orelse return .invalid_argument;
+    errdefer decoder.close();
+    if (!validDims(decoder.width, decoder.height)) return .unsupported;
+    const bgra = gpa.alloc(u8, @as(usize, decoder.width) * decoder.height * 4) catch return .out_of_memory;
+    errdefer gpa.free(bgra);
+
+    // A slot freed by a close is reused, so opening and closing clips in a loop
+    // does not grow the table.
+    for (s.clips.items, 0..) |slot, i| {
+        if (slot != null) continue;
+        s.clips.items[i] = .{ .decoder = decoder, .bgra = bgra };
+        out.* = @intCast(i);
+        return .ok;
+    }
+    s.clips.append(gpa, .{ .decoder = decoder, .bgra = bgra }) catch return .out_of_memory;
+    out.* = @intCast(s.clips.items.len - 1);
+    return .ok;
+}
+
+fn clipAt(s: *Session, index: u32) ?*Clip {
+    if (index >= s.clips.items.len) return null;
+    if (s.clips.items[index]) |*c_| return c_;
+    return null;
+}
+
+/// Decodes the clip's next frame and submits it as this session's frame, through
+/// the same path a camera's bytes take: the graph sees one frame and cannot tell
+/// where it came from. Answers `again` at the end of a stream so a host loops by
+/// seeking rather than by reopening.
+pub export fn goss_session_clip_submit_frame(session: ?*Session, clip: u32, timestamp_us: i64) Status {
+    const s = session orelse return .invalid_argument;
+    const c_ = clipAt(s, clip) orelse return .invalid_argument;
+    const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
+    if (c_.ended) return .again;
+
+    switch (c_.decoder.read(c_.bgra)) {
+        .frame => {},
+        .end => {
+            c_.ended = true;
+            return .again;
+        },
+        .failed => return .invalid_argument,
+    }
+    const w = c_.decoder.last_width;
+    const h = c_.decoder.last_height;
+    if (!validDims(w, h)) return .unsupported;
+
+    releaseCurrentFrame(s);
+    const texture = r.uploadRgba(@intCast(w), @intCast(h), render.c.BGFX_TEXTURE_FORMAT_BGRA8, c_.bgra.ptr, 0) catch return .out_of_memory;
+    // The clip's own presentation time is the frame's timestamp unless the host
+    // names one, so a clip played back untouched carries the times it was authored
+    // with and everything clocked off the frame follows the clip.
+    const stamp = if (timestamp_us != 0) timestamp_us else c_.decoder.last_pts_us;
+    s.current = .{
+        .desc = .{
+            .width = w,
+            .height = h,
+            .pixel_format = pixel_format_bgra8,
+            .color_standard = 1,
+            .color_range = 1,
+            .flags = 0,
+            .timestamp_us = stamp,
+        },
+        .owns_textures = false,
+        .preview = .{ .bgra = .{ .texture = texture } },
+    };
+    s.copied_frames += 1;
+    return .ok;
+}
+
+/// Moves the clip to the keyframe at or before a time. Refused past the end
+/// rather than clamped, because a clamped seek returns the wrong frame silently.
+pub export fn goss_session_clip_seek(session: ?*Session, clip: u32, target_us: i64) Status {
+    const s = session orelse return .invalid_argument;
+    const c_ = clipAt(s, clip) orelse return .invalid_argument;
+    if (!c_.decoder.seek(target_us)) return .invalid_argument;
+    c_.ended = false;
+    return .ok;
+}
+
+pub export fn goss_session_clip_info(session: ?*Session, clip: u32, out_info: ?*ClipInfo) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_info orelse return .invalid_argument;
+    const c_ = clipAt(s, clip) orelse return .invalid_argument;
+    out.* = .{
+        .width = c_.decoder.width,
+        .height = c_.decoder.height,
+        .duration_us = c_.decoder.duration_us,
+        .position_us = c_.decoder.last_pts_us,
+        .ended = if (c_.ended) 1 else 0,
+    };
+    return .ok;
+}
+
+pub export fn goss_session_close_clip(session: ?*Session, clip: u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (clip >= s.clips.items.len) return .invalid_argument;
+    if (s.clips.items[clip]) |*c_| {
+        var held = c_.*;
+        held.deinit(s.engine.gpa);
+        s.clips.items[clip] = null;
+        return .ok;
+    }
+    return .invalid_argument;
 }
 
 /// Zero-copy camera submission for platforms delivering hardware buffers.
@@ -12210,6 +12356,19 @@ const SpriteAnim = struct {
                 break :blk if (p < count) @intCast(p) else @intCast(period - p);
             },
         };
+    }
+};
+
+/// One clip a host opened as a source. The decode buffer is grown once and reused,
+/// so submitting a frame allocates nothing after the first.
+const Clip = struct {
+    decoder: video.Decoder,
+    bgra: []u8,
+    ended: bool = false,
+
+    fn deinit(self: *Clip, gpa: std.mem.Allocator) void {
+        self.decoder.close();
+        if (self.bgra.len != 0) gpa.free(self.bgra);
     }
 };
 

@@ -318,6 +318,46 @@ public final class GossSession: @unchecked Sendable {
         }
     }
 
+    // MARK: - Clips
+
+    /// Opens a clip as a source of frames for this session. The engine decodes it
+    /// and this session decides when each frame lands, so the graph is driven by
+    /// the clip rather than the clip decorating a camera feed.
+    public func openClip(path: String) throws -> UInt32 {
+        let bytes = Array(path.utf8)
+        var clip: UInt32 = 0
+        try bytes.withUnsafeBufferPointer { buffer in
+            try checked(goss_session_open_clip(handle, buffer.baseAddress, buffer.count, &clip))
+        }
+        return clip
+    }
+
+    /// Decodes the clip's next frame and submits it as this session's frame.
+    /// Returns false at the end of the stream, where a caller loops by seeking.
+    /// Pass 0 to carry the clip's own presentation time.
+    @discardableResult
+    public func clipSubmitFrame(_ clip: UInt32, timestampUs: Int64 = 0) throws -> Bool {
+        let raw = goss_session_clip_submit_frame(handle, clip, timestampUs)
+        if raw == GOSS_AGAIN { return false }
+        try checked(raw)
+        return true
+    }
+
+    /// The keyframe at or before a time. Throws past the end rather than clamping.
+    public func clipSeek(_ clip: UInt32, targetUs: Int64) throws {
+        try checked(goss_session_clip_seek(handle, clip, targetUs))
+    }
+
+    public func clipInfo(_ clip: UInt32) throws -> GossClipInfo {
+        var raw = goss_clip_info()
+        try checked(goss_session_clip_info(handle, clip, &raw))
+        return GossClipInfo(raw)
+    }
+
+    public func closeClip(_ clip: UInt32) throws {
+        try checked(goss_session_close_clip(handle, clip))
+    }
+
     // MARK: - Beauty
 
     public func enableBeauty(resourceDir: String) throws {

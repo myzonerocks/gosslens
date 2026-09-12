@@ -40,6 +40,11 @@ const no_ts_wrapper = [_]Exception{
     .{ .op = "goss_session_activate_lens_from_directory", .why = "no filesystem in the page; a bundle stages in through provide_lens_asset" },
     .{ .op = "goss_session_submit_hardware_buffer", .why = "no platform hardware buffer in a browser" },
     .{ .op = "goss_session_submit_source_hardware_buffer", .why = "no platform hardware buffer in a browser; a page source arrives as a texture" },
+    .{ .op = "goss_session_open_clip", .why = "a page decodes with WebCodecs or a video element and submits the frames it already has" },
+    .{ .op = "goss_session_clip_submit_frame", .why = "paired with open_clip" },
+    .{ .op = "goss_session_clip_seek", .why = "paired with open_clip; a page seeks its own video element" },
+    .{ .op = "goss_session_clip_info", .why = "paired with open_clip" },
+    .{ .op = "goss_session_close_clip", .why = "paired with open_clip" },
 };
 
 const Exception = struct { op: []const u8, why: []const u8 };

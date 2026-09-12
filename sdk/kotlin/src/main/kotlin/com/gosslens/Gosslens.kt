@@ -23,6 +23,15 @@ enum class Interruption(val raw: Int) {
     PAUSE(0), CAMERA_LOST(1), AUDIO_ROUTE(2), BACKGROUNDED(3), THERMAL(4);
 }
 
+/** What an opened clip is and where it is. */
+data class ClipInfo(
+    val width: Int,
+    val height: Int,
+    val durationUs: Long,
+    val positionUs: Long,
+    val ended: Boolean,
+)
+
 /** What one recording has done. */
 data class RecordingReport(
     val durationUs: Long,
@@ -102,6 +111,11 @@ object Gosslens {
     internal external fun nativeCaptureStill(engine: Long, session: Long, width: Int, height: Int, supersample: Int, format: Int, quality: Int, colorSpace: Int, bitDepth: Int, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
     internal external fun nativeRecordingStart(engine: Long, session: Long, pathBuffer: ByteBuffer, pathLen: Int, width: Int, height: Int, bitrate: Int, codec: Int, realtime: Int): Int
     internal external fun nativeRecordingStop(engine: Long): Int
+    internal external fun nativeOpenClip(session: Long, path: ByteBuffer, pathLen: Int): Int
+    internal external fun nativeClipSubmitFrame(session: Long, clip: Int, timestampUs: Long): Int
+    internal external fun nativeClipSeek(session: Long, clip: Int, targetUs: Long): Int
+    internal external fun nativeClipInfo(session: Long, clip: Int, out: ByteBuffer): Int
+    internal external fun nativeCloseClip(session: Long, clip: Int): Int
     internal external fun nativeRecordingPause(engine: Long): Int
     internal external fun nativeRecordingResume(engine: Long): Int
     internal external fun nativeReportInterruption(session: Long, kind: Int): Int
@@ -806,6 +820,38 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     /** Stops the recording, flushing in-flight frames and finalizing
      * the file. */
     fun stopRecording(): Boolean = Gosslens.nativeRecordingStop(handle) == 0
+
+    /**
+     * Opens a clip as a source of frames for this session, returning its handle or
+     * null. The engine decodes; this session decides when each frame lands, so the
+     * graph is driven by the clip rather than the clip decorating a camera feed.
+     */
+    fun openClip(path: String): Int? {
+        val bytes = path.toByteArray(Charsets.UTF_8)
+        val buffer = ByteBuffer.allocateDirect(bytes.size)
+        buffer.put(bytes)
+        buffer.rewind()
+        val clip = Gosslens.nativeOpenClip(handle, buffer, bytes.size)
+        return if (clip < 0) null else clip
+    }
+
+    /** False at the end of the stream; loop by seeking rather than reopening. */
+    fun clipSubmitFrame(clip: Int, timestampUs: Long = 0): Boolean =
+        Gosslens.nativeClipSubmitFrame(handle, clip, timestampUs) == 0
+
+    fun clipSeek(clip: Int, targetUs: Long): Boolean =
+        Gosslens.nativeClipSeek(handle, clip, targetUs) == 0
+
+    fun clipInfo(clip: Int): ClipInfo? {
+        // Two u32, two i64, one u32, padded: the struct's own layout.
+        val buf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeClipInfo(handle, clip, buf) != 0) return null
+        val w = buf.asIntBuffer()
+        val q = buf.duplicate().order(ByteOrder.nativeOrder()).asLongBuffer()
+        return ClipInfo(w.get(0), w.get(1), q.get(1), q.get(2), w.get(6) != 0)
+    }
+
+    fun closeClip(clip: Int): Boolean = Gosslens.nativeCloseClip(handle, clip) == 0
 
     /**
      * Holds the recording clock. Frames submitted while paused are not written and

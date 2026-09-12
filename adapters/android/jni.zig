@@ -1173,6 +1173,43 @@ export fn Java_com_gosslens_Gosslens_nativeRecordingStop(env: *JniEnv, cls: jobj
     return @intFromEnum(abi.goss_engine_recording_stop(engineFromHandle(engine)));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeOpenClip(env: *JniEnv, cls: jobject, session: i64, path: jobject, path_len: i32) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, path) orelse return -1;
+    var clip: u32 = 0;
+    if (abi.goss_session_open_clip(sessionFromHandle(session), bytes, @intCast(@max(path_len, 0)), &clip) != .ok) return -1;
+    return @intCast(clip);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeClipSubmitFrame(env: *JniEnv, cls: jobject, session: i64, clip: i32, timestamp_us: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_clip_submit_frame(sessionFromHandle(session), @intCast(@max(clip, 0)), timestamp_us));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeClipSeek(env: *JniEnv, cls: jobject, session: i64, clip: i32, target_us: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_clip_seek(sessionFromHandle(session), @intCast(@max(clip, 0)), target_us));
+}
+
+/// The clip info as a raw struct in a direct buffer, the same crossing the engine
+/// and session reports take.
+export fn Java_com_gosslens_Gosslens_nativeClipInfo(env: *JniEnv, cls: jobject, session: i64, clip: i32, out_buffer: jobject) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var info: abi.ClipInfo = undefined;
+    const status = abi.goss_session_clip_info(sessionFromHandle(session), @intCast(@max(clip, 0)), &info);
+    if (status == .ok) @memcpy(out_bytes[0..@sizeOf(abi.ClipInfo)], std.mem.asBytes(&info));
+    return @intFromEnum(status);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeCloseClip(env: *JniEnv, cls: jobject, session: i64, clip: i32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_close_clip(sessionFromHandle(session), @intCast(@max(clip, 0))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeRecordingPause(env: *JniEnv, cls: jobject, engine: i64) i32 {
     _ = env;
     _ = cls;

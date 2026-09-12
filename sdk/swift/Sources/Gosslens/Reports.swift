@@ -131,3 +131,21 @@ extension GossSession {
         try checked(goss_session_report_interruption(handle, goss_interruption(rawValue: kind.rawValue)))
     }
 }
+
+/// What an opened clip is and where it is, so a caller scrubbing a timeline reads
+/// it rather than guessing from a frame count and an authored frame rate.
+public struct GossClipInfo: Sendable {
+    public var width: UInt32
+    public var height: UInt32
+    public var durationUs: Int64
+    public var positionUs: Int64
+    public var ended: Bool
+
+    init(_ raw: goss_clip_info) {
+        width = raw.width
+        height = raw.height
+        durationUs = raw.duration_us
+        positionUs = raw.position_us
+        ended = raw.ended != 0
+    }
+}

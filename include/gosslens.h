@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 119u
+#define GOSS_ABI_MINOR 124u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -1046,6 +1046,35 @@ goss_status goss_session_set_segmentation_class_mask(goss_session *session, uint
  * shape as goss_session_submit_frame_copy, one interleaved plane instead
  * of NV12's two. */
 goss_status goss_session_submit_frame_rgba_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride);
+
+/* What an opened clip is and where it is, so a host scrubbing a timeline reads it
+ * rather than guessing from a frame count and an authored frame rate. */
+typedef struct goss_clip_info {
+    uint32_t width;
+    uint32_t height;
+    int64_t duration_us;
+    int64_t position_us;  /* presentation time of the frame last submitted */
+    uint32_t ended;       /* 1 once the stream ended and no seek reopened it */
+} goss_clip_info;
+
+/* Graph thread. Opens a clip as a source of frames for this session. The engine
+ * decodes it and the host decides when each frame lands, so the graph is driven by
+ * the clip rather than the clip being decorated onto a camera feed. */
+goss_status goss_session_open_clip(goss_session *session, const uint8_t *path, size_t path_len, uint32_t *out_clip);
+
+/* Graph thread. Decodes the clip's next frame and submits it as this session's
+ * frame, through the same path a camera's bytes take, so the graph cannot tell
+ * where it came from and a session needs no camera at all. Pass 0 for
+ * timestamp_us to carry the clip's own presentation time. GOSS_AGAIN at the end of
+ * the stream, so a host loops by seeking rather than reopening. */
+goss_status goss_session_clip_submit_frame(goss_session *session, uint32_t clip, int64_t timestamp_us);
+
+/* Graph thread. Moves to the keyframe at or before a time. Refused past the end
+ * rather than clamped: a clamped seek returns the wrong frame silently. */
+goss_status goss_session_clip_seek(goss_session *session, uint32_t clip, int64_t target_us);
+
+goss_status goss_session_clip_info(goss_session *session, uint32_t clip, goss_clip_info *out_info);
+goss_status goss_session_close_clip(goss_session *session, uint32_t clip);
 
 /* Graph thread. Multi-source composition (Duet, Stitch, live grids). Register a
  * named RGBA source with define_source, feed it with submit_source_frame_rgba_copy,

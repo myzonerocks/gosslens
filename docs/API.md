@@ -223,6 +223,11 @@ the capability is present on all three platforms; only the mechanism differs.
 | `goss_session_submit_frame_copy` | `submitFrameCopy(y, yStride, uv, uvStride, width, height, rotationDegrees, mirrored, colorStandard, colorRange, timestampUs)` | platforms that expose this copy path |
 | `goss_session_submit_hardware_buffer` | `submitHardwareBuffer(buffer, width, height, rotationDegrees, mirrored, timestampUs)` | Android |
 | `goss_session_submit_frame_rgba_copy` | `submitFrameRgbaCopy(rgba, stride, width, height, pixelFormat, rotationDegrees, mirrored, timestampUs)` | copy-path SDKs |
+| `goss_session_open_clip` | `openClip(path)`, opens a clip as a source of frames for the session. The engine decodes; the host decides when each frame lands | native SDKs |
+| `goss_session_clip_submit_frame` | `clipSubmitFrame(clip, timestampUs)`, decodes the next frame and submits it as the session's frame through the same path a camera's bytes take, so the graph cannot tell them apart and a session needs no camera. `GOSS_AGAIN` at the end of the stream | native SDKs |
+| `goss_session_clip_seek` | `clipSeek(clip, targetUs)`, the keyframe at or before a time, refused past the end rather than clamped | native SDKs |
+| `goss_session_clip_info` | `clipInfo(clip)`, the clip's size, duration, the position last submitted, and whether it ended | native SDKs |
+| `goss_session_close_clip` | `closeClip(clip)` | native SDKs |
 
 ### Events and degradation
 
