@@ -20,6 +20,14 @@ pub fn decode(gpa: std.mem.Allocator, png_bytes: []const u8) DecodeError!Image {
 
 pub const ConvertError = error{ OutOfMemory, ConversionFailed };
 
+/// The conversion the kit does through libyuv where it is compiled in. Here it
+/// refuses, so a caller learns the target has no converter instead of reading a
+/// plane nothing wrote.
+pub fn rgbaToNv12(gpa: std.mem.Allocator, rgba: []const u8, width: u32, height: u32, y_out: []u8, uv_out: []u8) ConvertError!void {
+    _ = .{ gpa, rgba, width, height, y_out, uv_out };
+    return error.ConversionFailed;
+}
+
 pub fn downsampleBox(src: []const u8, src_width: u32, src_height: u32, dst: []u8, dst_width: u32, dst_height: u32) ConvertError!void {
     _ = src;
     _ = src_width;

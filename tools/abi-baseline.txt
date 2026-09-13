@@ -1,4 +1,4 @@
-abi 0.115
+abi 0.176
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -30,7 +30,7 @@ type face.Result size=5968 align=8
   field frame_serial offset=0 size=8
   field timestamp_us offset=8 size=8
   field presence offset=16 size=4
-  field landmark_count_out offset=20 size=4
+  field landmark_count offset=20 size=4
   field landmarks offset=24 size=5736
   field blendshapes offset=5760 size=208
 type hand.Result size=560 align=8
@@ -43,7 +43,7 @@ type pose.Result size=688 align=8
   field frame_serial offset=0 size=8
   field timestamp_us offset=8 size=8
   field presence offset=16 size=4
-  field landmark_count_out offset=20 size=4
+  field landmark_count offset=20 size=4
   field landmarks offset=24 size=396
   field visibilities offset=420 size=132
   field presences offset=552 size=132
@@ -125,7 +125,7 @@ type abi.EngineReport size=80 align=8
   field bgfx_live_bytes offset=56 size=8
   field bgfx_alloc_calls_last_frame offset=64 size=8
   field bgfx_bytes_last_frame offset=72 size=8
-type abi.SessionReport size=80 align=8
+type abi.SessionReport size=88 align=8
   field frames_submitted offset=0 size=8
   field frames_rendered offset=8 size=8
   field degrade_level offset=16 size=4
@@ -138,7 +138,142 @@ type abi.SessionReport size=80 align=8
   field nodes_degraded offset=64 size=4
   field node_reports_lost offset=68 size=4
   field script_faults offset=72 size=4
+  field ml_plan_growths offset=76 size=4
+  field ml_plan_bytes offset=80 size=8
+type abi.AnnotationDesc size=64 align=8
+  field id offset=0 size=4
+  field kind offset=4 size=4
+  field space offset=8 size=4
+  field rect offset=12 size=16
+  field track_id offset=28 size=4
+  field colour offset=32 size=4
+  field z offset=36 size=4
+  field opacity offset=40 size=4
+  field lifetime_kind offset=44 size=4
+  field lifetime_value offset=48 size=8
+  field on_lost offset=56 size=4
+  field value offset=60 size=4
+type abi.CaptureConfig size=28 align=4
+  field width offset=0 size=4
+  field height offset=4 size=4
+  field supersample offset=8 size=4
+  field format offset=12 size=4
+  field quality offset=16 size=4
+  field color_space offset=20 size=4
+  field bit_depth offset=24 size=4
+type abi.ClipInfo size=32 align=8
+  field width offset=0 size=4
+  field height offset=4 size=4
+  field duration_us offset=8 size=8
+  field position_us offset=16 size=8
+  field ended offset=24 size=4
+type abi.EgressConfig size=48 align=8
+  field target_long_edge offset=0 size=4
+  field format offset=4 size=4
+  field quality offset=8 size=4
+  field max_fps offset=12 size=4
+  field max_bytes_per_second offset=16 size=8
+  field source offset=24 size=4
+  field trigger offset=28 size=4
+  field change_threshold offset=32 size=4
+  field keyframe_interval_us offset=40 size=8
+type abi.EgressDecision size=40 align=8
+  field send offset=0 size=4
+  field reason offset=4 size=4
+  field change_score offset=8 size=4
+  field since_last_us offset=16 size=8
+  field sent_total offset=24 size=8
+  field held_total offset=32 size=8
+type abi.Event size=40 align=8
+  field kind offset=0 size=4
+  field sequence offset=8 size=8
+  field timestamp_us offset=16 size=8
+  field a offset=24 size=4
+  field b offset=28 size=4
+  field value offset=32 size=4
+type abi.Footprint size=12 align=4
+  field width offset=0 size=4
+  field depth offset=4 size=4
+  field height offset=8 size=4
+type abi.MediaCapabilities size=32 align=4
+  field video_codecs offset=0 size=4
+  field audio_codecs offset=4 size=4
+  field containers offset=8 size=4
+  field max_width offset=12 size=4
+  field max_height offset=16 size=4
+  field max_bit_depth offset=20 size=4
+  field hdr offset=24 size=4
+  field zero_copy offset=28 size=4
+type abi.Occupant size=24 align=8
+  field plane_id offset=0 size=8
+  field x offset=8 size=4
+  field z offset=12 size=4
+  field width offset=16 size=4
+  field depth offset=20 size=4
+type abi.Placement size=24 align=8
+  field plane_id offset=0 size=8
+  field position offset=8 size=12
+  field free_fraction offset=20 size=4
+type abi.RecordingConfig size=16 align=4
+  field width offset=0 size=4
+  field height offset=4 size=4
+  field bitrate_bps offset=8 size=4
+  field codec offset=12 size=4
+type abi.RecordingReport size=48 align=8
+  field duration_us offset=0 size=8
+  field clips offset=8 size=4
+  field interruptions offset=12 size=4
+  field drift_us offset=16 size=8
+  field frames offset=24 size=8
+  field dropped offset=32 size=8
+  field paused offset=40 size=4
+type abi.ScreenSurface size=40 align=8
+  field id offset=0 size=8
+  field kind offset=8 size=4
+  field logical_width offset=12 size=4
+  field logical_height offset=16 size=4
+  field origin_x offset=20 size=4
+  field origin_y offset=24 size=4
+  field scale offset=28 size=4
+  field title_len offset=32 size=4
+type abi.SharedLandmark size=24 align=8
+  field id offset=0 size=8
+  field x offset=8 size=4
+  field y offset=12 size=4
+  field z offset=16 size=4
+  field confidence offset=20 size=4
+type abi.TextEntry size=80 align=8
+  field quad offset=0 size=32
+  field confidence offset=32 size=4
+  field origin offset=36 size=4
+  field script offset=40 size=4
+  field direction offset=44 size=4
+  field track_id offset=48 size=4
+  field line offset=52 size=4
+  field paragraph offset=56 size=4
+  field text_len offset=60 size=4
+  field first_seen_us offset=64 size=8
+  field last_seen_us offset=72 size=8
+type abi.WorldAnchor size=72 align=8
+  field id offset=0 size=8
+  field pose offset=8 size=64
+type abi.WorldLight size=8 align=4
+  field ambient_intensity offset=0 size=4
+  field color_temperature_kelvin offset=4 size=4
+type abi.WorldPlane size=88 align=8
+  field id offset=0 size=8
+  field pose offset=8 size=64
+  field extent_x offset=72 size=4
+  field extent_z offset=76 size=4
+  field classification offset=80 size=4
+type abi.WorldState size=144 align=8
+  field tracking_state offset=0 size=4
+  field world_from_camera offset=4 size=64
+  field projection offset=68 size=64
+  field timestamp_us offset=136 size=8
 fn uint32_t goss_abi_version(void)
+fn goss_status goss_abi_check(uint32_t caller_version)
+fn goss_status goss_lens_capabilities_missing(const uint8_t *manifest_json, size_t manifest_len, uint64_t *out_missing)
 fn uint64_t goss_capabilities(void)
 fn void *goss_alloc(size_t size)
 fn void goss_free(void *ptr, size_t size)
@@ -156,10 +291,22 @@ fn goss_status goss_engine_capture_photo_as(goss_engine *engine, goss_session *s
 fn goss_status goss_engine_recording_start(goss_engine *engine, goss_session *session, const uint8_t *path, size_t path_len, const goss_recording_config *config)
 fn goss_status goss_engine_recording_set_realtime(goss_engine *engine, bool realtime)
 fn goss_status goss_engine_recording_stop(goss_engine *engine)
+fn goss_status goss_engine_recording_pause(goss_engine *engine)
+fn goss_status goss_engine_recording_resume(goss_engine *engine)
+fn goss_status goss_session_report_interruption(goss_session *session, goss_interruption kind)
+fn goss_status goss_engine_recording_read_report(goss_engine *engine, goss_recording_report *out_report)
 fn goss_status goss_session_submit_audio(goss_session *session, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t timestamp_us)
 fn goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light)
 fn goss_status goss_session_submit_world_mesh(goss_session *session, const float *vertices, size_t vertex_count, const uint32_t *indices, size_t index_count)
+fn goss_status goss_engine_decode_png(const uint8_t *bytes, size_t len, uint8_t *out_rgba, size_t capacity, uint32_t *out_width, uint32_t *out_height, size_t *out_len)
+fn goss_status goss_session_plane_kind(goss_session *session, uint64_t plane_id, uint32_t *out_kind, uint32_t *out_bearing)
+fn goss_status goss_session_floor_plane(goss_session *session, uint64_t *out_plane_id)
+fn goss_status goss_session_place_on(goss_session *session, const goss_footprint *item, const goss_occupant *occupants, size_t occupant_count, goss_placement *out, size_t capacity, size_t *out_count)
+fn goss_status goss_session_measure_between(goss_session *session, const float *from, float from_accuracy_m, const float *to, float to_accuracy_m, float *out_metres, float *out_sigma, uint32_t *out_known)
+fn goss_status goss_session_shared_landmarks(goss_session *session, goss_shared_landmark *out, size_t capacity, size_t *out_count)
+fn goss_status goss_session_align_shared(goss_session *session, const goss_shared_landmark *theirs, size_t count, float *out_transform, float *out_rms_error, uint32_t *out_matched)
 fn goss_status goss_session_raycast_world_mesh(goss_session *session, const float *origin, const float *direction, float *out_point, float *out_distance)
+fn goss_status goss_session_path_across_world(goss_session *session, const float *start, const float *goal, float *out_points, size_t capacity, size_t *out_count)
 fn goss_status goss_session_hit_test(goss_session *session, float screen_x, float screen_y, float *out_position)
 fn goss_status goss_engine_capture_still(goss_engine *engine, goss_session *session, const goss_capture_config *config, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height)
 fn goss_status goss_engine_capture_live_frame(goss_engine *engine, goss_session *session, uint32_t format, uint8_t *out_data, size_t out_capacity, uint32_t *out_width, uint32_t *out_height)
@@ -283,6 +430,23 @@ fn goss_status goss_session_set_beauty_lut(goss_session *session, int32_t slot, 
 fn goss_status goss_session_set_beauty_makeup_texture(goss_session *session, int32_t effect, const uint8_t *rgba, uint32_t width, uint32_t height)
 fn goss_status goss_session_set_face_landmarks(goss_session *session, const float *points, uint32_t point_count)
 fn goss_status goss_session_submit_frame_rgba_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride)
+fn goss_status goss_session_open_clip(goss_session *session, const uint8_t *path, size_t path_len, uint32_t *out_clip)
+fn goss_status goss_session_clip_submit_frame(goss_session *session, uint32_t clip, int64_t timestamp_us)
+fn goss_status goss_session_clip_seek(goss_session *session, uint32_t clip, int64_t target_us)
+fn goss_status goss_session_clip_info(goss_session *session, uint32_t clip, goss_clip_info *out_info)
+fn goss_status goss_session_close_clip(goss_session *session, uint32_t clip)
+fn goss_status goss_session_clip_step(goss_session *session, uint32_t clip, int32_t frames)
+fn goss_status goss_engine_media_capabilities(goss_engine *engine, goss_media_capabilities *out_caps)
+fn goss_status goss_session_perception_snapshot(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len)
+fn goss_status goss_session_perception_json(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len)
+fn goss_status goss_session_poll_events(goss_session *session, goss_event *out, uint32_t capacity, uint32_t *out_count, uint64_t *out_dropped)
+fn goss_status goss_session_egress_configure(goss_session *session, const goss_egress_config *config)
+fn goss_status goss_session_egress_request(goss_session *session)
+fn goss_status goss_session_egress_decide(goss_session *session, goss_egress_decision *out_decision)
+fn goss_status goss_session_annotate(goss_session *session, const goss_annotation *annotation, const uint8_t *text, size_t text_len)
+fn goss_status goss_session_annotation_remove(goss_session *session, uint32_t id)
+fn goss_status goss_session_annotation_clear(goss_session *session)
+fn goss_status goss_session_annotation_count(goss_session *session, uint32_t *out_count, uint64_t *out_refused)
 fn goss_status goss_session_beautify_frame(goss_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out)
 fn goss_status goss_session_activate_lens(goss_session *session, const uint8_t *manifest_json, size_t manifest_len)
 fn goss_status goss_session_activate_lens_from_directory(goss_session *session, const uint8_t *bundle_path, size_t bundle_path_len)
@@ -315,3 +479,31 @@ fn goss_status goss_session_read_report(goss_session *session, goss_session_repo
 fn goss_status goss_session_node_report_count(goss_session *session, uint32_t *out_count, uint32_t *out_lost)
 fn goss_status goss_session_node_report_at(goss_session *session, uint32_t index, goss_node_report *out_report)
 fn goss_status goss_session_node_report_id(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)
+fn goss_status goss_ml_op_support(const uint8_t *model, size_t model_len, uint8_t *out, size_t capacity, size_t *out_len)
+fn goss_status goss_session_enable_text(goss_session *session, const uint8_t *detector, size_t detector_len, const uint8_t *recognizer, size_t recognizer_len, const uint8_t *dictionary, size_t dictionary_len, uint32_t detect_side)
+fn goss_status goss_session_disable_text(goss_session *session)
+fn goss_status goss_session_text_count(goss_session *session, uint32_t *out_count, uint64_t *out_refused)
+fn goss_status goss_session_text_at(goss_session *session, uint32_t index, goss_text_entry *out_entry)
+fn goss_status goss_session_text_string(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)
+fn goss_status goss_session_memory_open(goss_session *session, uint32_t dim, uint32_t max_entries)
+fn goss_status goss_session_memory_close(goss_session *session)
+fn goss_status goss_session_memory_remember(goss_session *session, uint64_t id, const float *embedding, uint32_t dim)
+fn goss_status goss_session_memory_forget(goss_session *session, uint64_t id)
+fn goss_status goss_session_memory_search(goss_session *session, const float *query, uint32_t dim, uint32_t k, uint64_t *out_ids, float *out_scores, uint32_t *out_count)
+fn goss_status goss_session_memory_stats(goss_session *session, uint32_t *out_count, uint64_t *out_bytes)
+fn goss_status goss_session_memory_save(goss_session *session, uint8_t *out, size_t capacity, size_t *out_len)
+fn goss_status goss_session_memory_load(goss_session *session, const uint8_t *bytes, size_t len)
+fn goss_status goss_session_set_scope(goss_session *session, uint32_t sections, uint32_t verbs)
+fn goss_status goss_scope_verb_name(uint32_t verb, uint8_t *out, size_t capacity, size_t *out_len)
+fn uint32_t goss_scope_verb_count(void)
+fn goss_status goss_session_scope(goss_session *session, uint32_t *out_sections, uint32_t *out_verbs)
+fn goss_status goss_engine_screen_count(goss_engine *engine, uint32_t *out_count)
+fn goss_status goss_engine_screen_at(goss_engine *engine, uint32_t index, goss_screen_surface *out_surface)
+fn goss_status goss_engine_screen_title(goss_engine *engine, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)
+fn goss_status goss_session_open_screen(goss_session *session, uint64_t surface_id, float scale, uint32_t *out_screen)
+fn goss_status goss_session_close_screen(goss_session *session, uint32_t screen)
+fn goss_status goss_session_step_screen(goss_session *session, uint32_t screen, const uint8_t *name, size_t name_len)
+fn goss_status goss_session_screen_point(goss_session *session, uint32_t screen, float x, float y, float *out_logical, float *out_pixel, float *out_desktop)
+fn goss_status goss_session_memory_save_sealed(goss_session *session, const uint8_t *key, const uint8_t *nonce, uint8_t *out, size_t capacity, size_t *out_len)
+fn goss_status goss_session_memory_load_sealed(goss_session *session, const uint8_t *key, const uint8_t *bytes, size_t len)
+fn uint32_t goss_perception_select_all(void)

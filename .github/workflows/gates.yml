@@ -28,6 +28,13 @@ jobs:
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           nix_path: nixpkgs=channel:nixos-unstable
+      - name: pr title shape
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          printf '%s' "$PR_TITLE" > "$RUNNER_TEMP/pr_title.txt"
+          nix develop -c zig build gate -- --pr-title "$RUNNER_TEMP/pr_title.txt"
       - name: pr body shape
         if: github.event_name == 'pull_request'
         env:

@@ -32,7 +32,10 @@ const permitted_top_level = [_][]const u8{ "shaders", "assets", "sounds" };
 const shader_extensions = [_][]const u8{".glsl"};
 // A bring-your-own model rides assets/ like any other file the runtime reads from there, and
 // under the same 32MB per-file bound the loader itself enforces.
-const asset_extensions = [_][]const u8{ ".gltf", ".glb", ".png", ".gif", ".mp4", ".onnx", ".tflite" };
+/// `.claim` is provenance rather than content: one word beside a lookup strip
+/// saying what the look does, which the asset stage holds the pixels to. It ships
+/// with the bundle so the claim travels wherever the asset does.
+const asset_extensions = [_][]const u8{ ".gltf", ".glb", ".png", ".gif", ".mp4", ".onnx", ".tflite", ".claim" };
 const sound_extensions = [_][]const u8{ ".wav", ".mp3", ".flac", ".ogg" };
 
 fn hasAnyExtension(name: []const u8, extensions: []const []const u8) bool {
@@ -312,9 +315,98 @@ fn validateAssets(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Diagnosti
             ok = false;
             continue;
         };
-        gpa.free(decoded.rgba);
+        defer gpa.free(decoded.rgba);
+        if (is_png) {
+            if (!try checkLookupStrip(diags, diag_path, bundle_dir, io, gpa, entry.path, decoded)) ok = false;
+        }
     }
     return ok;
+}
+
+/// Every lookup strip a lut.pass node names must carry a claim, and the claim must
+/// hold. Requiring it is the half that matters: a strip is generated once through a
+/// colour pipeline and trusted ever after, so without this a forgotten claim means
+/// no check at all rather than a failure somebody sees.
+fn requireLookupClaims(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Diagnostics, lens: *const manifest.Manifest, bundle_path: []const u8) !bool {
+    var bundle_dir = std.Io.Dir.cwd().openDir(io, bundle_path, .{ .iterate = true }) catch return true;
+    defer bundle_dir.close(io);
+    var ok = true;
+    for (lens.nodes) |node| {
+        if (!std.mem.eql(u8, node.type, "lut.pass")) continue;
+        var path_buf: [256]u8 = undefined;
+        const claim_path = std.fmt.bufPrint(&path_buf, "assets/{s}.claim", .{node.id}) catch continue;
+        const bytes = bundle_dir.readFileAlloc(io, claim_path, gpa, .limited(1 << 10)) catch {
+            const diag_path = try std.fmt.allocPrint(diags.arena, "/assets/{s}.png", .{node.id});
+            try diags.add(diag_path, "is a lookup strip with no .claim beside it saying what the look does", .{});
+            ok = false;
+            continue;
+        };
+        gpa.free(bytes);
+    }
+    return ok;
+}
+
+/// A lookup strip is a committed image nothing could check: it is generated once
+/// through a colour pipeline and trusted ever after. A sibling `.claim` file names
+/// what the look does, and this holds the pixels to it, so a strip that is blank,
+/// inverted, or quietly the identity fails the build rather than shipping.
+fn checkLookupStrip(
+    diags: *manifest.Diagnostics,
+    diag_path: []const u8,
+    bundle_dir: std.Io.Dir,
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    name: []const u8,
+    decoded: image.Image,
+) !bool {
+    var claim_buf: [256]u8 = undefined;
+    const stem = name[0 .. name.len - ".png".len];
+    const claim_path = std.fmt.bufPrint(&claim_buf, "assets/{s}.claim", .{stem}) catch return true;
+    const claim_bytes = bundle_dir.readFileAlloc(io, claim_path, gpa, .limited(1 << 10)) catch return true;
+    defer gpa.free(claim_bytes);
+    const claim = std.mem.trim(u8, claim_bytes, " \t\r\n");
+
+    // The strip is square, a grid of tiles whose blue channel picks the tile, so a
+    // neutral input addresses the middle of the middle tile.
+    if (decoded.width != decoded.height or decoded.width == 0) {
+        try diags.add(diag_path, "is claimed as a lookup strip but is not square", .{});
+        return false;
+    }
+    // The strip is a cube laid flat: a grid by grid arrangement of tiles that are
+    // themselves grid squared across, so one side is grid cubed. 512 is 8 cubed.
+    const side = decoded.width;
+    var grid: u32 = 2;
+    while (grid * grid * grid < side) grid += 1;
+    if (grid * grid * grid != side) {
+        try diags.add(diag_path, "is claimed as a lookup strip but its side {d} is not a cube", .{side});
+        return false;
+    }
+    const tile = grid * grid;
+    const half = tile / 2;
+    const tx = (half % grid) * tile + half;
+    const ty = (half / grid) * tile + half;
+    const at = (ty * side + tx) * 4;
+    const r = decoded.rgba[at];
+    const g = decoded.rgba[at + 1];
+    const b = decoded.rgba[at + 2];
+
+    const holds = if (std.mem.eql(u8, claim, "warmer"))
+        r > g and g > b
+    else if (std.mem.eql(u8, claim, "cooler"))
+        b > g and g > r
+    else if (std.mem.eql(u8, claim, "brighter"))
+        @as(u16, r) + g + b > 3 * @as(u16, @intCast(half * 255 / (tile - 1)))
+    else if (std.mem.eql(u8, claim, "darker"))
+        @as(u16, r) + g + b < 3 * @as(u16, @intCast(half * 255 / (tile - 1)))
+    else {
+        try diags.add(diag_path, "names a claim '{s}' nothing checks", .{claim});
+        return false;
+    };
+    if (!holds) {
+        try diags.add(diag_path, "claims '{s}' and maps neutral to {d},{d},{d}", .{ claim, r, g, b });
+        return false;
+    }
+    return true;
 }
 
 /// Every .glb/.gltf under assets/ - a model.gltf node's own asset -
@@ -466,6 +558,11 @@ pub fn main(init: std.process.Init) !u8 {
             try report(io, path, diags.list.items, false);
             return 1;
         }
+    }
+
+    if (!try requireLookupClaims(io, gpa, &diags, &lens, path)) {
+        try report(io, path, diags.list.items, false);
+        return 1;
     }
 
     if (!try validateAssets(io, gpa, &diags, path)) {
@@ -952,4 +1049,57 @@ test "the shader-compile stage never crashes or leaks on malformed shader source
         var diags = manifest.Diagnostics{ .arena = diag_arena.allocator() };
         _ = try validateShaders(t.io, t.allocator, &diags, bundle_path, null);
     }
+}
+
+const lut_manifest =
+    \\{
+    \\  "glf": "1.0",
+    \\  "id": "com.example.lut",
+    \\  "version": "1.0.0",
+    \\  "display_name": "Lut",
+    \\  "engine_compat": ">=0.5",
+    \\  "capabilities": [],
+    \\  "parameters": [],
+    \\  "nodes": [
+    \\    {"id": "warm", "type": "lut.pass", "inputs": {"frame": "camera"}, "params": {}}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "a lookup strip with no claim beside it fails" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "manifest.json", .data = lut_manifest });
+    try tmp.dir.createDirPath(t.io, "assets");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "assets/warm.png", .data = &valid_png });
+
+    var path_buf: [64]u8 = undefined;
+    const bundle_path = tmpBundlePath(tmp, &path_buf);
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var diags = manifest.Diagnostics{ .arena = arena.allocator() };
+    var lens = try manifest.parse(t.allocator, &diags, lut_manifest) orelse return error.TestUnexpectedResult;
+    defer lens.deinit();
+
+    try t.expect(!try requireLookupClaims(t.io, t.allocator, &diags, &lens, bundle_path));
+    try t.expect(std.mem.indexOf(u8, diags.list.items[0].message, "no .claim") != null);
+}
+
+test "a claim nothing checks fails rather than passing quietly" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "manifest.json", .data = lut_manifest });
+    try tmp.dir.createDirPath(t.io, "assets");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "assets/warm.png", .data = &valid_png });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "assets/warm.claim", .data = "sideways\n" });
+
+    var path_buf: [64]u8 = undefined;
+    const bundle_path = tmpBundlePath(tmp, &path_buf);
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var diags = manifest.Diagnostics{ .arena = arena.allocator() };
+
+    try t.expect(!try validateAssets(t.io, t.allocator, &diags, bundle_path));
+    try t.expect(std.mem.indexOf(u8, diags.list.items[0].message, "nothing checks") != null);
 }

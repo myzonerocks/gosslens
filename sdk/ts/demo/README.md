@@ -8,8 +8,10 @@
 > from the checkout so it always matches the SDK source.
 
 A browser page with a live camera preview, real-time face tracking, the six
-beauty sliders, post-effect filter lenses, a photo capture, and a virtual
-background driven by the selfie segmenter. It runs the wasm core through a
+beauty sliders, post-effect filter lenses, a photo capture, a virtual
+background driven by the selfie segmenter, and the agent rail: the record, the
+readings, the memory plane, a screen, and an annotation drawn back into the
+frame. It runs the wasm core through a
 real bgfx renderer (WebGPU when the browser has a working adapter, WebGL2
 otherwise). No framework, no bundler beyond a single `bun build`.
 
@@ -30,6 +32,11 @@ whatever is in `src/` is exactly what the demo runs.
   background from the person mask. With no segmenter model present the toggle
   disables itself with a short note.
 - Capture Photo: writes the composited frame to a PNG and shows it.
+- The agent rail, top right: the perception record as JSON, what the frame says,
+  a face remembered into the memory plane and found again by nearest match, a
+  shared screen with the desktop coordinate its centre lands on, a box the engine
+  draws back into the frame for a bounded number of frames, and a scope narrowed in
+  front of you so the refusal names the verb it needs rather than showing a number.
 
 ## One-time setup
 
@@ -77,7 +84,8 @@ down" in the controls bar; it's remembered across reloads.
     bun run prove.ts
 
 Drives the real page in headless Chrome (fake capture device) and checks real
-frame deltas for whiten/smooth/reshape/makeup. It then activates the
+frame deltas for whiten/smooth/reshape/makeup, then taps every button on the agent
+rail and checks each one answered: a panel whose controls say nothing is decoration. It then activates the
 beauty-baseline reference lens and checks its render is non-empty and
 byte-identical across two frames, and confirms live face tracking against a
 corpus portrait. The run only passes if every one of these passes. Same

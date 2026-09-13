@@ -1,6 +1,6 @@
 # Gosslens - Swift SDK
 
-Swift SDK for [Gosslens](../../include/gosslens.h), a camera and AR engine
+Swift SDK for [Gosslens](../../include/gosslens.h), real-time visual plumbing
 behind one C ABI. Wraps it as `GossEngine`, `GossSession`, and `Gosslens`, the same names
 the [Kotlin](../kotlin/README.md) and [TypeScript](../ts/README.md) SDKs use.
 
@@ -25,7 +25,7 @@ For a `Package.swift`, name the oldest version you support and SwiftPM resolves
 forward on its own:
 
 ```swift
-.package(url: "https://github.com/myzonerocks/gosslens", from: "0.12.0")
+.package(url: "https://github.com/myzonerocks/gosslens", from: "0.12.0-alpha.3")
 ```
 
 Two products come with it. `Gosslens` is the Swift SDK every app wants. Add
@@ -453,6 +453,60 @@ try session.setSourceComposite("guest", opacity: 1, key: 2,
 `defineScreenShare` registers a source whose frames letterbox to their cell
 instead of stretching, for a shared screen that keeps its aspect. `removeSource`
 and `clearLayout` tear the composition back down.
+
+## The agent rail
+
+One versioned record of everything the engine sees, what the frame says, what it
+remembers, the screen it is looking at, and the room it is in.
+
+```swift
+// What the engine sees, as one record and as JSON.
+let record = try session.perceptionSnapshot()
+let json = try session.perceptionJson()
+
+// What the frame says, once the text rail is on.
+try session.enableText(detector: detectorBytes, recognizer: recognizerBytes, dictionary: keysBytes)
+for reading in try session.readings() {
+    print(reading.text, reading.quad, reading.trackId)
+}
+
+// What it remembers, and finding it again.
+try session.memoryOpen(dim: 512)
+try session.remember(id: 1, embedding: embedding)
+for match in try session.memorySearch(query, k: 5) { print(match.id, match.score) }
+
+// And sealed under a host key, because an index of embeddings is a record of
+// what a camera saw. The nonce is yours: reusing one under the same key breaks it.
+let sealedBytes = try session.memorySaveSealed(key: key, nonce: nonce)
+try session.memoryLoadSealed(key: key, bytes: sealedBytes)
+
+// A screen as a source, and where a point an agent sent lands.
+let surfaces = try engine.screens()
+let screen = try session.openScreen(surfaceId: surfaces[0].id)
+_ = session.stepScreen(screen)
+let landing = try session.screenPoint(screen, x: 0.5, y: 0.5)
+
+// The room it is in: which surface is the floor, where a cup goes, how far apart
+// two points are with the doubt that comes with them, and what another device's
+// origin is in this one.
+let floor = session.floorPlaneID()
+for spot in session.placeOn(width: 0.1, depth: 0.1, height: 0.12) {
+    print(spot.planeID, spot.position, spot.freeFraction)
+}
+let span = session.measure(from: a, fromAccuracyM: 0.01, to: b, toAccuracyM: 0.01)
+let alignment = session.alignShared(theirLandmarks)
+let route = session.pathAcrossWorld(start: here, goal: there)
+
+// And what this session will answer at all.
+try session.setScope(sections: 0xFFFF_FFFF, verbs: 0)
+```
+
+A read out of scope is dropped from the record rather than failing the call. A verb
+out of scope throws `.outOfScope`, which a host can grant, as against
+`.unsupported`, which no amount of asking changes. The verbs cover the acting
+surface and `GossSession.Verb` names them, so a refusal reads as a sentence. Scope
+only ever narrows: anything inside the session can call `setScope`, so widening
+means a new session. Nothing here sends a frame anywhere.
 
 ## Lives and calls
 

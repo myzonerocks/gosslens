@@ -14,15 +14,31 @@ const stub_frames: u32 = 24;
 
 pub const Read = enum { frame, end, failed };
 
+/// The synthetic clip's frame period, so a seek and a presentation time are exact
+/// rather than invented: this decoder knows its own rate where a real one reads it.
+const stub_frame_us: i64 = 33_333;
+
 pub const Decoder = struct {
     handle: *anyopaque,
     width: u32,
     height: u32,
     cursor: u32,
+    duration_us: i64 = 0,
+    last_pts_us: i64 = 0,
+    last_width: u32 = 0,
+    last_height: u32 = 0,
 
     pub fn open(path: []const u8) ?Decoder {
         _ = path;
-        return .{ .handle = @ptrFromInt(@alignOf(usize)), .width = stub_width, .height = stub_height, .cursor = 0 };
+        return .{
+            .handle = @ptrFromInt(@alignOf(usize)),
+            .width = stub_width,
+            .height = stub_height,
+            .cursor = 0,
+            .duration_us = @as(i64, stub_frames) * stub_frame_us,
+            .last_width = stub_width,
+            .last_height = stub_height,
+        };
     }
 
     /// Paints frame `cursor` as a solid field with a bright band whose
@@ -43,7 +59,16 @@ pub const Decoder = struct {
             }
         }
         self.cursor += 1;
+        self.last_pts_us = @as(i64, self.cursor) * stub_frame_us;
         return .frame;
+    }
+
+    /// Exact here, because a synthetic clip's every frame is a keyframe.
+    pub fn seek(self: *Decoder, target_us: i64) bool {
+        if (target_us < 0 or target_us > self.duration_us) return false;
+        self.cursor = @intCast(@divTrunc(target_us, stub_frame_us));
+        self.last_pts_us = target_us;
+        return true;
     }
 
     pub fn reset(self: *Decoder) bool {

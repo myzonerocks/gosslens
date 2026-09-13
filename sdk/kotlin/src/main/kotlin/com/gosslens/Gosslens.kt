@@ -18,6 +18,96 @@ enum class Thermal(val raw: Int) {
     }
 }
 
+/** What interrupted a recording, as the host saw it. */
+enum class Interruption(val raw: Int) {
+    PAUSE(0), CAMERA_LOST(1), AUDIO_ROUTE(2), BACKGROUNDED(3), THERMAL(4);
+}
+
+/** What this build's media backend declares it encodes. */
+data class MediaCapabilities(
+    val videoCodecs: Int,
+    val audioCodecs: Int,
+    val containers: Int,
+    val maxWidth: Int,
+    val maxHeight: Int,
+    val maxBitDepth: Int,
+    val hdr: Boolean,
+    val zeroCopy: Boolean,
+)
+
+/** One thing an agent draws back into the frame. */
+data class Annotation(
+    val id: Int,
+    val kind: Int,
+    val space: Int = 0,
+    val rect: FloatArray = floatArrayOf(0f, 0f, 0f, 0f),
+    val trackId: Int = 0,
+    val colour: Int = -1,
+    val z: Int = 0,
+    val opacity: Float = 1f,
+    val lifetimeKind: Int = 0,
+    val lifetimeValue: Long = 0,
+    val onLost: Int = 0,
+    val value: Float = 0f,
+    val text: String = "",
+)
+
+/** What the brain sees and what it costs. */
+data class EgressConfig(
+    val targetLongEdge: Int = 0,
+    val format: Int = 0,
+    val quality: Int = 80,
+    val maxFps: Int = 0,
+    val maxBytesPerSecond: Long = 0,
+    val source: Int = 0,
+    val trigger: Int = (1 shl 1) or (1 shl 3),
+    val changeThreshold: Float = 0.02f,
+    val keyframeIntervalUs: Long = 5_000_000,
+)
+
+/** Why a frame was or was not sent, so a gateway can explain itself. */
+data class EgressDecision(
+    val send: Boolean,
+    val reason: Int,
+    val changeScore: Float,
+    val sinceLastUs: Long,
+    val sentTotal: Long,
+    val heldTotal: Long,
+)
+
+/** One thing that happened. What a and b mean is per kind. */
+data class GossEvent(
+    val kind: Int,
+    val sequence: Long,
+    val timestampUs: Long,
+    val a: Int,
+    val b: Int,
+    val value: Float,
+)
+
+/** A drained batch, with what was missed since the last drain. */
+data class EventBatch(val events: List<GossEvent>, val dropped: Long)
+
+/** What an opened clip is and where it is. */
+data class ClipInfo(
+    val width: Int,
+    val height: Int,
+    val durationUs: Long,
+    val positionUs: Long,
+    val ended: Boolean,
+)
+
+/** What one recording has done. */
+data class RecordingReport(
+    val durationUs: Long,
+    val clips: Int,
+    val interruptions: Int,
+    val driftUs: Long,
+    val frames: Long,
+    val dropped: Long,
+    val paused: Boolean,
+)
+
 /** The rungs of the degradation ladder, top to bottom. */
 enum class DegradeLevel(val raw: Int) {
     FULL(0), REDUCED_ML_CADENCE(1), SEGMENTATION_OFF(2), BEAUTY_SIMPLIFIED(3), PASSTHROUGH(4);
@@ -75,6 +165,8 @@ object Gosslens {
     }
 
     internal external fun nativeAbiVersion(): Int
+    internal external fun nativeAbiCheck(callerVersion: Int): Int
+    internal external fun nativeLensCapabilitiesMissing(manifestBuffer: ByteBuffer, manifestLen: Int): Long
     internal external fun nativeCapabilities(): Long
     internal external fun nativeEngineCreate(texturePoolCapacity: Int, stagingPoolCapacity: Int): Long
     internal external fun nativeEngineDestroy(engine: Long)
@@ -86,6 +178,29 @@ object Gosslens {
     internal external fun nativeCaptureStill(engine: Long, session: Long, width: Int, height: Int, supersample: Int, format: Int, quality: Int, colorSpace: Int, bitDepth: Int, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
     internal external fun nativeRecordingStart(engine: Long, session: Long, pathBuffer: ByteBuffer, pathLen: Int, width: Int, height: Int, bitrate: Int, codec: Int, realtime: Int): Int
     internal external fun nativeRecordingStop(engine: Long): Int
+    internal external fun nativeOpenClip(session: Long, path: ByteBuffer, pathLen: Int): Int
+    internal external fun nativeClipSubmitFrame(session: Long, clip: Int, timestampUs: Long): Int
+    internal external fun nativeClipSeek(session: Long, clip: Int, targetUs: Long): Int
+    internal external fun nativeClipInfo(session: Long, clip: Int, out: ByteBuffer): Int
+    internal external fun nativeCloseClip(session: Long, clip: Int): Int
+    internal external fun nativeClipStep(session: Long, clip: Int, frames: Int): Int
+    internal external fun nativeMediaCapabilities(engine: Long, out: ByteBuffer): Int
+    internal external fun nativePerceptionSelectAll(): Int
+
+    internal external fun nativePerceptionSnapshot(session: Long, select: Int, out: ByteBuffer, capacity: Int): Int
+    internal external fun nativePerceptionJson(session: Long, select: Int, out: ByteBuffer, capacity: Int): Int
+    internal external fun nativePollEvents(session: Long, out: ByteBuffer, capacity: Int, dropped: ByteBuffer): Int
+    internal external fun nativeAnnotate(session: Long, desc: ByteBuffer, text: ByteBuffer?, textLen: Int): Int
+    internal external fun nativeAnnotationRemove(session: Long, id: Int): Int
+    internal external fun nativeAnnotationClear(session: Long): Int
+    internal external fun nativeAnnotationCount(session: Long, out: ByteBuffer): Int
+    internal external fun nativeEgressConfigure(session: Long, config: ByteBuffer): Int
+    internal external fun nativeEgressRequest(session: Long): Int
+    internal external fun nativeEgressDecide(session: Long, out: ByteBuffer): Int
+    internal external fun nativeRecordingPause(engine: Long): Int
+    internal external fun nativeRecordingResume(engine: Long): Int
+    internal external fun nativeReportInterruption(session: Long, kind: Int): Int
+    internal external fun nativeRecordingReport(engine: Long, out: ByteBuffer): Int
     internal external fun nativeSubmitWorld(session: Long, stateBuffer: ByteBuffer, planesBuffer: ByteBuffer, planeCount: Int, anchorsBuffer: ByteBuffer, anchorCount: Int, lightBuffer: ByteBuffer): Int
     internal external fun nativeCaptureView(session: Long, guidanceBuffer: ByteBuffer): Int
     internal external fun nativeResetCapture(session: Long): Int
@@ -107,6 +222,62 @@ object Gosslens {
     internal external fun nativeChainReport(session: Long, outBuffer: ByteBuffer): Int
     internal external fun nativeReadReconstruction(session: Long, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
     internal external fun nativeWriteReconstruction(session: Long, buffer: ByteBuffer, count: Int): Int
+    internal external fun nativeMlOpSupport(model: ByteBuffer, modelLen: Int, out: ByteBuffer, capacity: Int): Int
+
+    internal external fun nativeScreenGrant(width: Float, height: Float, density: Float, label: ByteBuffer?, labelLen: Int): Int
+
+    internal external fun nativeScreenRevoke(): Int
+
+    internal external fun nativeScreenFrame(pixels: ByteBuffer, width: Int, height: Int, stride: Int, timestampUs: Long): Int
+
+    internal external fun nativeScreenCount(engine: Long): Int
+
+    internal external fun nativeScreenAt(engine: Long, index: Int, out: ByteBuffer): Int
+
+    internal external fun nativeScreenTitle(engine: Long, index: Int, out: ByteBuffer, capacity: Int): Int
+
+    internal external fun nativeOpenScreen(session: Long, surfaceId: Long, scale: Float): Int
+
+    internal external fun nativeCloseScreen(session: Long, screen: Int): Int
+
+    internal external fun nativeStepScreen(session: Long, screen: Int, name: ByteBuffer?, nameLen: Int): Int
+
+    internal external fun nativeScreenPoint(session: Long, screen: Int, x: Float, y: Float, out: ByteBuffer): Int
+
+    internal external fun nativeSetScope(session: Long, sections: Int, verbs: Int): Int
+
+    internal external fun nativeScope(session: Long): Long
+
+    internal external fun nativeMemoryOpen(session: Long, dim: Int, maxEntries: Int): Int
+
+    internal external fun nativeMemoryClose(session: Long): Int
+
+    internal external fun nativeMemoryRemember(session: Long, id: Long, embedding: ByteBuffer, dim: Int): Int
+
+    internal external fun nativeMemoryForget(session: Long, id: Long): Int
+
+    internal external fun nativeMemorySearch(session: Long, query: ByteBuffer, dim: Int, k: Int, out: ByteBuffer): Int
+
+    internal external fun nativeMemoryStats(session: Long): Long
+
+    internal external fun nativeMemorySave(session: Long, out: ByteBuffer, capacity: Int): Int
+
+    internal external fun nativeMemorySaveSealed(session: Long, key: ByteBuffer, nonce: ByteBuffer, out: ByteBuffer, capacity: Int): Int
+
+    internal external fun nativeMemoryLoadSealed(session: Long, key: ByteBuffer, bytes: ByteBuffer, len: Int): Int
+
+    internal external fun nativeMemoryLoad(session: Long, bytes: ByteBuffer, len: Int): Int
+
+    internal external fun nativeEnableText(session: Long, detector: ByteBuffer, detectorLen: Int, recognizer: ByteBuffer?, recognizerLen: Int, dictionary: ByteBuffer?, dictionaryLen: Int, detectSide: Int): Int
+
+    internal external fun nativeDisableText(session: Long): Int
+
+    internal external fun nativeTextCount(session: Long): Long
+
+    internal external fun nativeTextAt(session: Long, index: Int, out: ByteBuffer): Int
+
+    internal external fun nativeTextString(session: Long, index: Int, out: ByteBuffer, capacity: Int): Int
+
     internal external fun nativeEngineReport(engine: Long, out: ByteBuffer): Int
     internal external fun nativeSessionReport(session: Long, out: ByteBuffer): Int
     internal external fun nativeNodeReports(session: Long, out: ByteBuffer, capacityU32: Int): Int
@@ -214,6 +385,17 @@ object Gosslens {
     internal external fun nativeHitTest(session: Long, screenX: Float, screenY: Float, outBuffer: ByteBuffer): Int
     internal external fun nativeSubmitWorldMesh(session: Long, verticesBuffer: ByteBuffer, vertexCount: Int, indicesBuffer: ByteBuffer, indexCount: Int): Int
     internal external fun nativeRaycastWorldMesh(session: Long, originBuffer: ByteBuffer, directionBuffer: ByteBuffer, pointBuffer: ByteBuffer, distanceBuffer: ByteBuffer): Int
+    internal external fun nativeScopeVerbName(verb: Int, outBuffer: ByteBuffer, capacity: Int, lenBuffer: ByteBuffer): Int
+    internal external fun nativeScopeVerbCount(): Int
+
+    internal external fun nativeDecodePng(inBuffer: ByteBuffer, inLen: Int, outBuffer: ByteBuffer?, capacity: Int, metaBuffer: ByteBuffer): Int
+    internal external fun nativePathAcrossWorld(session: Long, startBuffer: ByteBuffer, goalBuffer: ByteBuffer, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
+    internal external fun nativePlaneKind(session: Long, planeId: Long, outBuffer: ByteBuffer): Int
+    internal external fun nativeFloorPlane(session: Long, outBuffer: ByteBuffer): Int
+    internal external fun nativePlaceOn(session: Long, itemBuffer: ByteBuffer, occupantBuffer: ByteBuffer?, occupantCount: Int, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
+    internal external fun nativeMeasureBetween(session: Long, fromBuffer: ByteBuffer, fromAccuracy: Float, toBuffer: ByteBuffer, toAccuracy: Float, outBuffer: ByteBuffer): Int
+    internal external fun nativeSharedLandmarks(session: Long, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
+    internal external fun nativeAlignShared(session: Long, theirBuffer: ByteBuffer, count: Int, outBuffer: ByteBuffer): Int
     internal external fun nativePullAudio(session: Long, outBuffer: ByteBuffer, frames: Int): Int
     internal external fun nativeMixOutputAudio(session: Long, micBuffer: ByteBuffer?, outBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
     internal external fun nativeSetCameraControls(session: Long, buffer: ByteBuffer): Int
@@ -385,7 +567,36 @@ object Gosslens {
     const val LENS_SIGNALS_BYTES = 232
     const val STATUS_AGAIN = 7
 
+    /** The session's scope does not carry the verb an op needs. A host can grant
+     * this one; STATUS_UNSUPPORTED means no amount of asking will help. */
+    const val STATUS_OUT_OF_SCOPE = 9
+    const val STATUS_UNSUPPORTED = 6
+
+    /** How many verbs this engine build knows, asked of the engine rather than
+     * counted from the enum, so a newer engine behind this wrapper is not misread. */
+    fun verbCount(): Int = nativeScopeVerbCount()
+
     fun abiVersion(): Int = nativeAbiVersion()
+
+    /** The ABI major these bindings were generated against, so the check compares two
+     * independent things: passing the engine its own version back would always match
+     * and test nothing. The major rather than the whole version, because the minor
+     * moves on every surface change. Held to the header by the abi gate. */
+    const val GOSS_ABI_MAJOR: Int = 0
+
+    /** Whether this binary speaks the major these bindings were built against.
+     * Engine.create asks it, so a caller need not remember to. */
+    fun abiCheck(): Boolean = nativeAbiCheck(GOSS_ABI_MAJOR shl 16) == 0
+
+    /** The rails a lens declares that this build lacks, as CAP_ bits; zero means every
+     * one it asked for is here. A catalogue filters on this rather than activating a
+     * lens to find out. */
+    fun lensCapabilitiesMissing(manifestJson: String): Long {
+        val bytes = manifestJson.toByteArray()
+        val buf = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder())
+        buf.put(bytes)
+        return nativeLensCapabilitiesMissing(buf, bytes.size)
+    }
 
     /** Which capabilities this build compiled real, as CAP_* bits. A stub
      * library shares the full one's filename and abi version, so check the
@@ -537,6 +748,9 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     companion object {
         /** Null config means the core's own defaults, same as C's null. */
         fun create(config: GossEngineConfig? = null): GossEngine {
+            // The engine refuses a caller from another major, asked rather than
+            // remembered: these bindings read the version and never compared it.
+            check(Gosslens.abiCheck()) { "gosslens abi major mismatch" }
             val handle = Gosslens.nativeEngineCreate(
                 config?.texturePoolCapacity ?: -1,
                 config?.stagingPoolCapacity ?: -1,
@@ -786,6 +1000,329 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     /** Stops the recording, flushing in-flight frames and finalizing
      * the file. */
     fun stopRecording(): Boolean = Gosslens.nativeRecordingStop(handle) == 0
+
+    /**
+     * Opens a clip as a source of frames for this session, returning its handle or
+     * null. The engine decodes; this session decides when each frame lands, so the
+     * graph is driven by the clip rather than the clip decorating a camera feed.
+     */
+    fun openClip(path: String): Int? {
+        val bytes = path.toByteArray(Charsets.UTF_8)
+        val buffer = ByteBuffer.allocateDirect(bytes.size)
+        buffer.put(bytes)
+        buffer.rewind()
+        val clip = Gosslens.nativeOpenClip(handle, buffer, bytes.size)
+        return if (clip < 0) null else clip
+    }
+
+    /** False at the end of the stream; loop by seeking rather than reopening. */
+    fun clipSubmitFrame(clip: Int, timestampUs: Long = 0): Boolean =
+        Gosslens.nativeClipSubmitFrame(handle, clip, timestampUs) == 0
+
+    fun clipSeek(clip: Int, targetUs: Long): Boolean =
+        Gosslens.nativeClipSeek(handle, clip, targetUs) == 0
+
+    fun clipInfo(clip: Int): ClipInfo? {
+        // Two u32, two i64, one u32, padded: the struct's own layout.
+        val buf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeClipInfo(handle, clip, buf) != 0) return null
+        val w = buf.asIntBuffer()
+        val q = buf.duplicate().order(ByteOrder.nativeOrder()).asLongBuffer()
+        return ClipInfo(w.get(0), w.get(1), q.get(1), q.get(2), w.get(6) != 0)
+    }
+
+    fun closeClip(clip: Int): Boolean = Gosslens.nativeCloseClip(handle, clip) == 0
+
+    /**
+     * Every section this build writes, asked of the engine rather than written by
+     * hand: a hand-written mask excluded the embedding section the day it landed.
+     */
+    fun selectAll(): Int = Gosslens.nativePerceptionSelectAll()
+
+    /**
+     * Turns on the text rail. A detector alone finds where the text is; pass a
+     * recogniser and its dictionary to get strings back.
+     */
+    fun enableText(detector: ByteArray, recognizer: ByteArray = ByteArray(0), dictionary: ByteArray = ByteArray(0), detectSide: Int = 320): Boolean {
+        val det = ByteBuffer.allocateDirect(detector.size).put(detector)
+        val rec = if (recognizer.isEmpty()) null else ByteBuffer.allocateDirect(recognizer.size).put(recognizer)
+        val dict = if (dictionary.isEmpty()) null else ByteBuffer.allocateDirect(dictionary.size).put(dictionary)
+        return Gosslens.nativeEnableText(handle, det, detector.size, rec, recognizer.size, dict, dictionary.size, detectSide) == 0
+    }
+
+    fun disableText(): Boolean = Gosslens.nativeDisableText(handle) == 0
+
+    /** Live count in the low word and refused in the high, from one crossing. */
+    fun textCount(): Pair<Int, Int> {
+        val packed = Gosslens.nativeTextCount(handle)
+        return Pair((packed and 0xFFFFFFFFL).toInt(), (packed ushr 32).toInt())
+    }
+
+    /** Everything the frame says, each reading with its quadrilateral and string. */
+    fun readings(): List<GossReading> {
+        val (live, _) = textCount()
+        if (live <= 0) return emptyList()
+        val entry = ByteBuffer.allocateDirect(80).order(ByteOrder.LITTLE_ENDIAN)
+        val out = ArrayList<GossReading>(live)
+        for (index in 0 until live) {
+            entry.clear()
+            if (Gosslens.nativeTextAt(handle, index, entry) != 0) continue
+            val quad = FloatArray(8) { entry.getFloat(it * 4) }
+            val textLen = entry.getInt(60)
+            var text = ""
+            if (textLen > 0) {
+                val buffer = ByteBuffer.allocateDirect(textLen)
+                if (Gosslens.nativeTextString(handle, index, buffer, textLen) == textLen) {
+                    val bytes = ByteArray(textLen)
+                    buffer.get(bytes)
+                    text = String(bytes)
+                }
+            }
+            out.add(
+                GossReading(
+                    text = text,
+                    quad = quad,
+                    confidence = entry.getFloat(32),
+                    origin = entry.getInt(36),
+                    script = entry.getInt(40),
+                    direction = entry.getInt(44),
+                    trackId = entry.getInt(48),
+                    line = entry.getInt(52),
+                    paragraph = entry.getInt(56),
+                ),
+            )
+        }
+        return out
+    }
+
+    /** Opens the memory plane at a fixed embedding width under a caller-set bound. */
+    fun memoryOpen(dim: Int, maxEntries: Int = 4096): Boolean =
+        Gosslens.nativeMemoryOpen(handle, dim, maxEntries) == 0
+
+    fun memoryClose(): Boolean = Gosslens.nativeMemoryClose(handle) == 0
+
+    /**
+     * The memory sealed under a host key. The nonce is yours: reusing one under the
+     * same key breaks the cipher, and only you know what you have written.
+     */
+    fun memorySaveSealed(key: ByteArray, nonce: ByteArray): ByteArray {
+        val keyBuffer = ByteBuffer.allocateDirect(key.size).put(key)
+        val nonceBuffer = ByteBuffer.allocateDirect(nonce.size).put(nonce)
+        val empty = ByteBuffer.allocateDirect(1)
+        val needed = Gosslens.nativeMemorySaveSealed(handle, keyBuffer, nonceBuffer, empty, 0)
+        if (needed <= 0) return ByteArray(0)
+        val out = ByteBuffer.allocateDirect(needed)
+        if (Gosslens.nativeMemorySaveSealed(handle, keyBuffer, nonceBuffer, out, needed) != needed) return ByteArray(0)
+        val bytes = ByteArray(needed)
+        out.get(bytes)
+        return bytes
+    }
+
+    /** Reads a sealed memory back, refusing a wrong key or a changed byte. */
+    fun memoryLoadSealed(key: ByteArray, bytes: ByteArray): Boolean {
+        val keyBuffer = ByteBuffer.allocateDirect(key.size).put(key)
+        val data = ByteBuffer.allocateDirect(bytes.size).put(bytes)
+        return Gosslens.nativeMemoryLoadSealed(handle, keyBuffer, data, bytes.size) == 0
+    }
+
+    /** Remembers one embedding; the same id replaces rather than duplicating. */
+    fun remember(id: Long, embedding: FloatArray): Boolean {
+        val buffer = ByteBuffer.allocateDirect(embedding.size * 4).order(ByteOrder.LITTLE_ENDIAN)
+        embedding.forEach { buffer.putFloat(it) }
+        return Gosslens.nativeMemoryRemember(handle, id, buffer, embedding.size) == 0
+    }
+
+    fun forget(id: Long): Boolean = Gosslens.nativeMemoryForget(handle, id) == 0
+
+    /** The nearest remembered embeddings, fewer than k on a smaller memory. */
+    fun memorySearch(query: FloatArray, k: Int = 8): List<GossMemoryMatch> {
+        val queryBuffer = ByteBuffer.allocateDirect(query.size * 4).order(ByteOrder.LITTLE_ENDIAN)
+        query.forEach { queryBuffer.putFloat(it) }
+        val out = ByteBuffer.allocateDirect(k * 12).order(ByteOrder.LITTLE_ENDIAN)
+        val count = Gosslens.nativeMemorySearch(handle, queryBuffer, query.size, k, out)
+        if (count <= 0) return emptyList()
+        return (0 until count).map { GossMemoryMatch(out.getLong(it * 12), out.getFloat(it * 12 + 8)) }
+    }
+
+    /** What the memory holds, and what it costs. */
+    fun memoryStats(): Pair<Int, Long> {
+        val packed = Gosslens.nativeMemoryStats(handle)
+        return Pair((packed and 0xFFFFFFFFL).toInt(), packed ushr 32)
+    }
+
+    /**
+     * Narrows what this session answers. A read out of scope is dropped from the
+     * record rather than failing; a verb out of scope is refused.
+     */
+    fun setScope(sections: Int, verbs: Int): Boolean =
+        Gosslens.nativeSetScope(handle, sections, verbs) == 0
+
+    fun scope(): Pair<Int, Int> {
+        val packed = Gosslens.nativeScope(handle)
+        return Pair((packed and 0xFFFFFFFFL).toInt(), (packed ushr 32).toInt())
+    }
+
+    /** Opens a screen as a source, after MediaProjection consent is granted. */
+    fun openScreen(surfaceId: Long, scale: Float = 0f): Int =
+        Gosslens.nativeOpenScreen(handle, surfaceId, scale)
+
+    fun closeScreen(screen: Int): Boolean = Gosslens.nativeCloseScreen(handle, screen) == 0
+
+    /** Submits the newest frame. False when the screen has not changed. */
+    fun stepScreen(screen: Int, source: String = ""): Boolean {
+        val bytes = source.toByteArray()
+        val buffer = if (bytes.isEmpty()) null else ByteBuffer.allocateDirect(bytes.size).put(bytes)
+        return Gosslens.nativeStepScreen(handle, screen, buffer, bytes.size) == 0
+    }
+
+    /** Where a normalized point lands: logical points, backing pixels, desktop. */
+    fun screenPoint(screen: Int, x: Float, y: Float): Triple<FloatArray, FloatArray, FloatArray>? {
+        val out = ByteBuffer.allocateDirect(24).order(ByteOrder.LITTLE_ENDIAN)
+        if (Gosslens.nativeScreenPoint(handle, screen, x, y, out) != 0) return null
+        return Triple(
+            floatArrayOf(out.getFloat(0), out.getFloat(4)),
+            floatArrayOf(out.getFloat(8), out.getFloat(12)),
+            floatArrayOf(out.getFloat(16), out.getFloat(20)),
+        )
+    }
+
+    /**
+     * One versioned record of what the engine currently sees, into the caller's
+     * buffer. The bytes written, or the size needed when the buffer is short.
+     */
+    fun perceptionSnapshot(select: Int, out: ByteBuffer): Int =
+        Gosslens.nativePerceptionSnapshot(handle, select, out, out.capacity())
+
+    /** The same record as compact JSON. Same size-once contract. */
+    fun perceptionJson(select: Int, out: ByteBuffer): Int =
+        Gosslens.nativePerceptionJson(handle, select, out, out.capacity())
+
+    /**
+     * Drains the session's event ring in order. dropped says whether anything was
+     * missed since the last drain, and is cleared by the read.
+     */
+    /**
+     * Drains the ring and hands each event to a callback, returning what was
+     * dropped. A caller using coroutines wraps this in a flow in one line; the SDK
+     * takes no coroutines dependency of its own.
+     */
+    /**
+     * Adds or updates one annotation. The same id replaces rather than
+     * duplicating, so moving one box every frame leaks no entry per frame.
+     */
+    fun annotate(a: Annotation): Boolean {
+        val buf = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder())
+        buf.putInt(0, a.id)
+        buf.putInt(4, a.kind)
+        buf.putInt(8, a.space)
+        for (i in 0 until 4) buf.putFloat(12 + i * 4, a.rect.getOrElse(i) { 0f })
+        buf.putInt(28, a.trackId)
+        buf.putInt(32, a.colour)
+        buf.putInt(36, a.z)
+        buf.putFloat(40, a.opacity)
+        buf.putInt(44, a.lifetimeKind)
+        buf.putLong(48, a.lifetimeValue)
+        buf.putInt(56, a.onLost)
+        buf.putFloat(60, a.value)
+        val bytes = a.text.toByteArray(Charsets.UTF_8)
+        val textBuf = if (bytes.isEmpty()) null else ByteBuffer.allocateDirect(bytes.size).put(bytes).also { it.rewind() }
+        return Gosslens.nativeAnnotate(handle, buf, textBuf, bytes.size) == 0
+    }
+
+    fun annotationRemove(id: Int): Boolean = Gosslens.nativeAnnotationRemove(handle, id) == 0
+
+    fun annotationClear(): Boolean = Gosslens.nativeAnnotationClear(handle) == 0
+
+    /** Live count, and how many adds the bound turned away. */
+    fun annotationCount(): Pair<Int, Long> {
+        val buf = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val n = Gosslens.nativeAnnotationCount(handle, buf)
+        return Pair(if (n < 0) 0 else n, buf.getLong(0))
+    }
+
+    /** Installs the egress policy; false when the configuration is out of range. */
+    fun egressConfigure(config: EgressConfig): Boolean {
+        // Six u32, one u64, one u32, one u32, one f32, one i64 with alignment.
+        val buf = ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder())
+        buf.putInt(0, config.targetLongEdge)
+        buf.putInt(4, config.format)
+        buf.putInt(8, config.quality)
+        buf.putInt(12, config.maxFps)
+        buf.putLong(16, config.maxBytesPerSecond)
+        buf.putInt(24, config.source)
+        buf.putInt(28, config.trigger)
+        buf.putFloat(32, config.changeThreshold)
+        buf.putLong(40, config.keyframeIntervalUs)
+        return Gosslens.nativeEgressConfigure(handle, buf) == 0
+    }
+
+    fun egressRequest(): Boolean = Gosslens.nativeEgressRequest(handle) == 0
+
+    /** Whether this frame is worth sending, and why. Null when nothing to score. */
+    fun egressDecide(): EgressDecision? {
+        val buf = ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeEgressDecide(handle, buf) != 0) return null
+        return EgressDecision(
+            buf.getInt(0) != 0,
+            buf.getInt(4),
+            buf.getFloat(8),
+            buf.getLong(16),
+            buf.getLong(24),
+            buf.getLong(32),
+        )
+    }
+
+    fun drainEvents(capacity: Int = 64, onEvent: (GossEvent) -> Unit): Long {
+        val batch = pollEvents(capacity)
+        for (event in batch.events) onEvent(event)
+        return batch.dropped
+    }
+
+    fun pollEvents(capacity: Int = 64): EventBatch {
+        // kind u32 at 0, sequence u64 at 8, timestamp i64 at 16, a u32 at 24,
+        // b u32 at 28, value f32 at 32; forty bytes with the tail padding.
+        val stride = 40
+        val buf = ByteBuffer.allocateDirect(capacity * stride).order(ByteOrder.nativeOrder())
+        val droppedBuf = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val n = Gosslens.nativePollEvents(handle, buf, capacity, droppedBuf)
+        if (n < 0) return EventBatch(emptyList(), 0)
+        val out = ArrayList<GossEvent>(n)
+        for (i in 0 until n) {
+            val base = i * stride
+            out.add(
+                GossEvent(
+                    buf.getInt(base),
+                    buf.getLong(base + 8),
+                    buf.getLong(base + 16),
+                    buf.getInt(base + 24),
+                    buf.getInt(base + 28),
+                    buf.getFloat(base + 32),
+                ),
+            )
+        }
+        return EventBatch(out, droppedBuf.getLong(0))
+    }
+
+    /** Forward decodes; backward seeks and decodes. */
+    fun clipStep(clip: Int, frames: Int): Boolean = Gosslens.nativeClipStep(handle, clip, frames) == 0
+
+    /**
+     * Holds the recording clock. Frames submitted while paused are not written and
+     * the output has no gap, so a pause and resume pair is a clip boundary.
+     */
+    fun pauseRecording(): Boolean = Gosslens.nativeRecordingPause(handle) == 0
+
+    fun resumeRecording(): Boolean = Gosslens.nativeRecordingResume(handle) == 0
+
+    /** What the recording has done, or null when there is none. */
+    fun recordingReport(): RecordingReport? {
+        // Two i64, two u32, one i64, two u64, one u32, in declaration order.
+        val buf = ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeRecordingReport(handle, buf) != 0) return null
+        val q = buf.asLongBuffer()
+        val w = buf.duplicate().order(ByteOrder.nativeOrder()).asIntBuffer()
+        return RecordingReport(q.get(0), w.get(2), w.get(3), q.get(2), q.get(3), q.get(4), w.get(10) != 0)
+    }
 
     /** Feeds interleaved f32 PCM into the session: the engine's level
      * and beat analysis drives audio triggers, and an active recording
@@ -1132,6 +1669,10 @@ class GossSession private constructor(
     }
 
     companion object {
+        /** What a report struct measures, checked against the engine's own layout. */
+        internal const val ENGINE_REPORT_BYTES = 80
+        internal const val SESSION_REPORT_BYTES = 88
+
         /** Null config means the core's own defaults, same as C's null. */
         fun create(engine: GossEngine, config: GossSessionConfig? = null): GossSession {
             val handle = Gosslens.nativeSessionCreate(engine.handle, config?.frameBudgetUs ?: -1)
@@ -1424,6 +1965,9 @@ class GossSession private constructor(
         val nodesDegraded: Int,
         val nodeReportsLost: Int,
         val scriptFaults: Int,
+        /** A model rail's frame buffer growing mid-run; steady state is zero. */
+        val mlPlanGrowths: Int,
+        val mlPlanBytes: Long,
     )
 
     /** What a lens node is doing, as against what its manifest asked for. */
@@ -1441,9 +1985,18 @@ class GossSession private constructor(
     data class NodeReport(val id: String, val nodeIndex: Int, val state: NodeState, val reason: NodeReason)
 
     /** What the engine is doing now; every field is measured, not configured. */
+    /** What this build's media backend declares it encodes. */
+    fun mediaCapabilities(): MediaCapabilities? {
+        // Eight u32 in declaration order.
+        val buf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeMediaCapabilities(engine.handle, buf) != 0) return null
+        val w = buf.asIntBuffer()
+        return MediaCapabilities(w.get(0), w.get(1), w.get(2), w.get(3), w.get(4), w.get(5), w.get(6) != 0, w.get(7) != 0)
+    }
+
     fun engineReport(): EngineReport? {
         // Thirteen u32, four padding bytes, then three u64: the struct's own layout.
-        val buf = ByteBuffer.allocateDirect(14 * 4 + 3 * 8).order(ByteOrder.nativeOrder())
+        val buf = ByteBuffer.allocateDirect(ENGINE_REPORT_BYTES).order(ByteOrder.nativeOrder())
         if (Gosslens.nativeEngineReport(engine.handle, buf) != 0) return null
         val w = buf.asIntBuffer()
         val q = buf.duplicate().order(ByteOrder.nativeOrder()).position(14 * 4).let { (it as ByteBuffer).asLongBuffer() }
@@ -1458,8 +2011,8 @@ class GossSession private constructor(
 
     /** This session's counters. */
     fun sessionReport(): SessionReport? {
-        // Two u64, two u32, five u64, three u32, in declaration order.
-        val buf = ByteBuffer.allocateDirect(80).order(ByteOrder.nativeOrder())
+        // Two u64, two u32, five u64, four u32, one u64, in declaration order.
+        val buf = ByteBuffer.allocateDirect(SESSION_REPORT_BYTES).order(ByteOrder.nativeOrder())
         if (Gosslens.nativeSessionReport(handle, buf) != 0) return null
         val q = buf.asLongBuffer()
         val w = buf.duplicate().order(ByteOrder.nativeOrder()).asIntBuffer()
@@ -1468,6 +2021,7 @@ class GossSession private constructor(
             DegradeLevel.from(w.get(4)), w.get(5),
             q.get(3), q.get(4), q.get(5), q.get(6), q.get(7),
             w.get(16), w.get(17), w.get(18),
+            w.get(19), q.get(10),
         )
     }
 
@@ -2065,6 +2619,183 @@ class GossSession private constructor(
         return WorldMeshHit(floatArrayOf(pBuf.getFloat(0), pBuf.getFloat(4), pBuf.getFloat(8)), distBuf.getFloat(0))
     }
 
+    /** What a scope may carry. Reading is covered by the snapshot sections; these
+     * are the things that change something or reach a resource. */
+    enum class Verb {
+        ANNOTATE, EGRESS, RECORD, REMEMBER, SEARCH_MEMORY, OPEN_CLIP, CAPTURE_SCREEN,
+        SUBMIT_FRAME, SUBMIT_WORLD, SUBMIT_AUDIO, AUDIO_OUT, SEAL_MEMORY,
+        ACTIVATE_LENS, LOAD_MODEL, ENABLE_TRACKING, RETOUCH;
+
+        val bit: Int get() = 1 shl ordinal
+
+        /** The engine's own name for it, so a refusal reads as words. */
+        fun engineName(): String {
+            val out = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder())
+            val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+            if (Gosslens.nativeScopeVerbName(ordinal, out, out.capacity(), len) != 0) return ""
+            val n = minOf(len.getLong(0).toInt(), out.capacity())
+            val bytes = ByteArray(n)
+            out.position(0)
+            out.get(bytes)
+            return String(bytes)
+        }
+    }
+
+    /** A decoded PNG: packed RGBA8 with its size, through the decoder the engine
+     * already carries. Null when the bytes are not a png it can read. */
+    data class DecodedImage(val rgba: ByteArray, val width: Int, val height: Int)
+
+    fun decodePng(bytes: ByteArray): DecodedImage? {
+        val input = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder())
+        input.put(bytes)
+        val meta = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
+        Gosslens.nativeDecodePng(input, bytes.size, null, 0, meta)
+        val needed = meta.getInt(8)
+        if (needed <= 0) return null
+        val out = ByteBuffer.allocateDirect(needed).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeDecodePng(input, bytes.size, out, needed, meta) != 0) return null
+        val rgba = ByteArray(needed)
+        out.position(0)
+        out.get(rgba)
+        return DecodedImage(rgba, meta.getInt(0), meta.getInt(4))
+    }
+
+    /** A walkable route over the submitted world mesh, so an agent walks content
+     * across real scanned ground. Null when no mesh is submitted or no route
+     * exists. */
+    fun pathAcrossWorld(start: FloatArray, goal: FloatArray): List<FloatArray>? {
+        val capacity = 256
+        val a = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
+        a.asFloatBuffer().put(start)
+        val b = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
+        b.asFloatBuffer().put(goal)
+        val out = ByteBuffer.allocateDirect(capacity * 12).order(ByteOrder.nativeOrder())
+        val count = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativePathAcrossWorld(handle, a, b, out, capacity, count) != 0) return null
+        val found = minOf(count.getLong(0).toInt(), capacity)
+        return (0 until found).map { i ->
+            floatArrayOf(out.getFloat(i * 12), out.getFloat(i * 12 + 4), out.getFloat(i * 12 + 8))
+        }
+    }
+
+    /** What a submitted plane is, as a named kind rather than the platform's own
+     * number, and whether a thing can rest on it. */
+    enum class PlaneKind { UNKNOWN, FLOOR, WALL, CEILING, TABLE, SEAT, DOOR, WINDOW, SCREEN }
+
+    data class PlaneFacts(val kind: PlaneKind, val bearing: Boolean)
+
+    fun planeKind(planeId: Long): PlaneFacts? {
+        val out = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativePlaneKind(handle, planeId, out) != 0) return null
+        val ordinal = out.getInt(0)
+        val kinds = PlaneKind.entries
+        return PlaneFacts(if (ordinal in kinds.indices) kinds[ordinal] else PlaneKind.UNKNOWN, out.getInt(4) == 1)
+    }
+
+    /** The plane this session would call the floor: the lowest bearing surface it
+     * has been shown, or null when it has been shown none. */
+    fun floorPlaneId(): Long? {
+        val out = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeFloorPlane(handle, out) != 0) return null
+        return out.getLong(0)
+    }
+
+    /** Something already on a plane, on that plane's own axes in metres from its
+     * centre, so a placement answers about the surface as it is now. */
+    data class Occupant(val planeId: Long, val x: Float, val z: Float, val width: Float, val depth: Float)
+
+    data class Placement(val planeId: Long, val position: FloatArray, val freeFraction: Float)
+
+    /** Where a footprint fits, best surface first: the bearing plane with the most
+     * room left afterwards. An empty list is an answer. */
+    fun placeOn(width: Float, depth: Float, height: Float = 0f, occupants: List<Occupant> = emptyList()): List<Placement> {
+        val item = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
+        item.putFloat(0, width)
+        item.putFloat(4, depth)
+        item.putFloat(8, height)
+        val taken = if (occupants.isEmpty()) null else ByteBuffer.allocateDirect(occupants.size * 24).order(ByteOrder.nativeOrder())
+        occupants.forEachIndexed { i, o ->
+            val base = i * 24
+            taken!!.putLong(base, o.planeId)
+            taken.putFloat(base + 8, o.x)
+            taken.putFloat(base + 12, o.z)
+            taken.putFloat(base + 16, o.width)
+            taken.putFloat(base + 20, o.depth)
+        }
+        val capacity = 32
+        val out = ByteBuffer.allocateDirect(capacity * 24).order(ByteOrder.nativeOrder())
+        val count = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val status = Gosslens.nativePlaceOn(handle, item, taken, occupants.size, out, capacity, count)
+        // GOSS_AGAIN means more fit than the buffer held, which is still an answer.
+        if (status != 0 && status != 7) return emptyList()
+        val found = minOf(count.getLong(0).toInt(), capacity)
+        return (0 until found).map { i ->
+            val base = i * 24
+            Placement(
+                out.getLong(base),
+                floatArrayOf(out.getFloat(base + 8), out.getFloat(base + 12), out.getFloat(base + 16)),
+                out.getFloat(base + 20),
+            )
+        }
+    }
+
+    /** Point to point in metres with its uncertainty. [known] is false when either
+     * end vouched for no accuracy, so a sigma of zero is never read as certainty. */
+    data class Distance(val metres: Float, val sigma: Float, val known: Boolean)
+
+    fun measureBetween(from: FloatArray, to: FloatArray, fromAccuracyM: Float = 0f, toAccuracyM: Float = 0f): Distance? {
+        val a = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
+        a.asFloatBuffer().put(from)
+        val b = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
+        b.asFloatBuffer().put(to)
+        val out = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeMeasureBetween(handle, a, fromAccuracyM, b, toAccuracyM, out) != 0) return null
+        return Distance(out.getFloat(0), out.getFloat(4), out.getInt(8) == 1)
+    }
+
+    /** One landmark as it crosses to another device. No pose: a pose is
+     * meaningless in another origin. */
+    data class SharedLandmark(val id: Long, val position: FloatArray, val confidence: Float = 1f)
+
+    /** What this device can offer another: one landmark per world anchor it holds. */
+    fun sharedLandmarks(): List<SharedLandmark> {
+        val capacity = 32
+        val out = ByteBuffer.allocateDirect(capacity * 24).order(ByteOrder.nativeOrder())
+        val count = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val status = Gosslens.nativeSharedLandmarks(handle, out, capacity, count)
+        if (status != 0 && status != 7) return emptyList()
+        val found = minOf(count.getLong(0).toInt(), capacity)
+        return (0 until found).map { i ->
+            val base = i * 24
+            SharedLandmark(
+                out.getLong(base),
+                floatArrayOf(out.getFloat(base + 8), out.getFloat(base + 12), out.getFloat(base + 16)),
+                out.getFloat(base + 20),
+            )
+        }
+    }
+
+    /** The transform from the sender's origin into this one, column-major, with the
+     * fit it achieved. Null when fewer than three matched, which cannot fix a
+     * rigid transform. */
+    data class Alignment(val transform: FloatArray, val rmsError: Float, val matched: Int)
+
+    fun alignShared(theirs: List<SharedLandmark>): Alignment? {
+        val list = ByteBuffer.allocateDirect(maxOf(theirs.size, 1) * 24).order(ByteOrder.nativeOrder())
+        theirs.forEachIndexed { i, l ->
+            val base = i * 24
+            list.putLong(base, l.id)
+            list.putFloat(base + 8, l.position[0])
+            list.putFloat(base + 12, l.position[1])
+            list.putFloat(base + 16, l.position[2])
+            list.putFloat(base + 20, l.confidence)
+        }
+        val out = ByteBuffer.allocateDirect(18 * 4).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeAlignShared(handle, list, theirs.size, out) != 0) return null
+        val transform = FloatArray(16) { out.getFloat(it * 4) }
+        return Alignment(transform, out.getFloat(64), out.getInt(68))
+    }
+
     /** Pulls the next block of mixed lens audio into a direct [out] buffer
      * (frames interleaved s16) that play_sound triggers produced, for the app
      * to route to platform audio out. */
@@ -2391,4 +3122,78 @@ class GossSession private constructor(
         closed = true
         if (cleanable != null) NativeCleaner.disarm(cleanable) else Gosslens.nativeSessionDestroy(handle)
     }
+}
+
+/// The operators a model needs that this build does not implement. An empty
+/// list means the model runs; anything in it names exactly what is missing,
+/// which beats a bare "unsupported" when choosing a model.
+fun mlOpSupport(model: ByteArray): List<String> {
+    val modelBuf = ByteBuffer.allocateDirect(model.size)
+    modelBuf.put(model)
+    var capacity = 256
+    while (capacity <= 1 shl 16) {
+        val out = ByteBuffer.allocateDirect(capacity)
+        val written = Gosslens.nativeMlOpSupport(modelBuf, model.size, out, capacity)
+        if (written < 0) return emptyList()
+        if (written <= capacity) {
+            val bytes = ByteArray(written)
+            out.get(bytes)
+            return String(bytes).split("\n").filter { it.isNotEmpty() }
+        }
+        capacity = written
+    }
+    return emptyList()
+}
+
+/// What the frame says at one place in it. The quadrilateral is in normalized
+/// frame space and in reading order, so a coordinate sent back maps to a pixel.
+data class GossReading(
+    val text: String,
+    val quad: FloatArray,
+    val confidence: Float,
+    val origin: Int,
+    val script: Int,
+    val direction: Int,
+    val trackId: Int,
+    val line: Int,
+    val paragraph: Int,
+)
+
+/// One remembered embedding and how near it was.
+data class GossMemoryMatch(val id: Long, val score: Float)
+
+/// What the engine will let this process capture. Scale is the field to carry
+/// through: a point sent back without it lands at half its place on a dense
+/// display.
+data class GossScreenSurface(
+    val id: Long,
+    val kind: Int,
+    val title: String,
+    val logicalWidth: Float,
+    val logicalHeight: Float,
+    val originX: Float,
+    val originY: Float,
+    val scale: Float,
+)
+
+/// The MediaProjection consent flow. Only an Activity can show the dialog and
+/// receive the answer, so this is the app's to drive: grant after the result
+/// arrives, feed each frame the virtual display produces, and revoke when the
+/// projection stops.
+object GossScreenCapture {
+    fun grant(widthPx: Float, heightPx: Float, density: Float, label: String) {
+        val bytes = label.toByteArray()
+        val buffer = ByteBuffer.allocateDirect(bytes.size.coerceAtLeast(1))
+        buffer.put(bytes)
+        Gosslens.nativeScreenGrant(widthPx, heightPx, density, buffer, bytes.size)
+    }
+
+    fun revoke() {
+        Gosslens.nativeScreenRevoke()
+    }
+
+    /// One frame off the ImageReader. The buffer must be direct and must stay
+    /// valid until the next call, which is what the engine reads from.
+    fun frame(pixels: ByteBuffer, width: Int, height: Int, stride: Int, timestampUs: Long): Boolean =
+        Gosslens.nativeScreenFrame(pixels, width, height, stride, timestampUs) == 0
 }

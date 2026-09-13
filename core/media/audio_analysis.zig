@@ -235,7 +235,7 @@ pub const MicResampler = struct {
     tail: f32 = 0,
     have_tail: bool = false,
 
-    /// A stream already at mic_rate passes through untouched — identical values, no filter.
+    /// A stream already at mic_rate passes through untouched, identical values and no filter.
     pub fn feed(self: *MicResampler, in: []const f32, rate: u32, sink: anytype) void {
         if (in.len == 0 or rate == 0) return;
         if (rate == mic_rate) {

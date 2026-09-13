@@ -11,6 +11,13 @@ const core_mod = @import("ml_infer_core");
 
 pub const supported = core_mod.supported;
 pub const Norm = ml_tensor.Norm;
+pub const Bounds = ml_tensor.Bounds;
+
+/// The model rail itself, re-exported so a caller that does its own sampling
+/// (the text pipeline samples rectified crops, not camera squares) drives the
+/// same engine this file wraps. Taking it from here rather than importing
+/// ml_engine again keeps one module over that file per compile.
+pub const Engine = core_mod.Engine;
 pub const CreateError = core_mod.CreateError;
 pub const Core = core_mod.Core;
 pub const max_outputs = core_mod.max_outputs;
@@ -194,9 +201,40 @@ pub fn hasPublished(ml: *MlInfer) bool {
     return ml.core.published;
 }
 
+/// The frame buffer this model reuses and how often it had to grow, read under
+/// the lock that guards the published outputs because the worker thread writes
+/// both at the same moment. Zero before the first publish.
+pub fn planBytes(ml: *MlInfer) usize {
+    const io = ml.io_state.io();
+    ml.out_mutex.lockUncancelable(io);
+    defer ml.out_mutex.unlock(io);
+    return ml.core.plan_bytes;
+}
+
+pub fn planGrowths(ml: *MlInfer) u32 {
+    const io = ml.io_state.io();
+    ml.out_mutex.lockUncancelable(io);
+    defer ml.out_mutex.unlock(io);
+    return ml.core.plan_growths;
+}
+
 /// The element count of an output tensor, for a mask reader sizing its copy.
 pub fn outputLen(ml: *MlInfer, tensor: u32) usize {
     return ml.core.outputLen(tensor);
+}
+
+/// Copies an output that is one vector into dst and answers how many values
+/// landed. A frame embedding is read here rather than through copyOutput so a
+/// caller cannot mistake a feature map for one.
+pub fn copyEmbedding(ml: *MlInfer, tensor: u32, dst: []f32) usize {
+    const io = ml.io_state.io();
+    ml.out_mutex.lockUncancelable(io);
+    defer ml.out_mutex.unlock(io);
+    if (!ml.core.outputIsVector(tensor)) return 0;
+    const src = ml.core.outputSlice(tensor);
+    const n = @min(src.len, dst.len);
+    @memcpy(dst[0..n], src[0..n]);
+    return n;
 }
 
 /// The predicted class of an output tensor (its argmax), thread-safe.
@@ -374,6 +412,21 @@ pub fn temporalLayoutIsNchw(ti: *const TemporalInfer) bool {
     return ti.core.layoutIsNchw();
 }
 
+/// The temporal model's plan, the same pair the single-frame rail answers.
+pub fn temporalPlanBytes(ti: *TemporalInfer) usize {
+    const io = ti.io_state.io();
+    ti.out_mutex.lockUncancelable(io);
+    defer ti.out_mutex.unlock(io);
+    return ti.core.plan_bytes;
+}
+
+pub fn temporalPlanGrowths(ti: *TemporalInfer) u32 {
+    const io = ti.io_state.io();
+    ti.out_mutex.lockUncancelable(io);
+    defer ti.out_mutex.unlock(io);
+    return ti.core.plan_growths;
+}
+
 fn temporalMain(ti: *TemporalInfer) void {
     var frame: PendingFrame = .{};
     defer {
@@ -413,3 +466,5 @@ fn temporalMain(ti: *TemporalInfer) void {
         ti.core.publish();
     }
 }
+
+pub const missingOps = core_mod.missingOps;

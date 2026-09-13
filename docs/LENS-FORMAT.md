@@ -58,9 +58,15 @@ adds its own fields. The types group into a few families:
   model whose output binds to a parameter, a mask, a stylized image, or the
   scene depth. The engine runs the model; the lens names the file and the
   binding, and any model that fits the slot plugs in. The slot's input is one
-  square three-channel RGB image, [0,1] by default, and the ml block's
-  `input_range`, `input_mean`, and `input_std` declare an export's own
-  preprocessing so its numbers arrive as trained.
+  square three-channel RGB image, and the ml block's `input_range`, `input_mean`
+  and `input_std` declare an export's own preprocessing so its numbers arrive as
+  trained. `input_range` takes `unit` for zero to one, the default, `symmetric` for
+  minus one to one, and `byte` for zero to two hundred and fifty five, which is what
+  a detector exported from TensorFlow with a float placeholder wants: give one of
+  those the wrong range and it runs, finds nothing, and reads as working. A `detect`
+  block names which tensors hold the boxes, scores, classes and count, and the engine
+  then reads what is in frame into the record's `detections` section and publishes a
+  detection arriving, leaving, or changing what it is.
 - **Logic**: `logic.graph` and the scripting node - deterministic per-tick
   computation with no ambient authority.
 
@@ -82,6 +88,15 @@ gesture, a beat, a tap, a geofence, the lens clock. The `action` is one of the
 closed set the parser accepts: ramp a parameter, set a parameter, play a sound,
 activate content, and so on. Triggers are how a lens moves without carrying code:
 the engine evaluates the expression each frame and applies the action.
+
+The signals a lens can read include what the frame says, which is how a lens
+reacts to a sign rather than to a face:
+
+| Signal | Reads |
+|---|---|
+| `text.present` | whether the frame says anything at all |
+| `text.matches('exit')` | whether the reading contains a phrase, lowered on both sides so the case a sign is painted in does not matter |
+| `text.changed` | whether what the frame says differs from last tick, so a lens acts on a change rather than on every frame of the same sign |
 
 ## Coordinates and determinism
 

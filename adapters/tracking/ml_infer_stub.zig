@@ -9,6 +9,62 @@ const ml_tensor = @import("ml_tensor");
 pub const supported = false;
 
 pub const Norm = ml_tensor.Norm;
+pub const Bounds = ml_tensor.Bounds;
+
+/// No core on this target either. The type exists so a caller that names it
+/// still compiles, and every entry on it refuses the same way create does.
+pub const Core = struct {
+    pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, norm: ml_tensor.Norm, aux_rgba: ?[]const u8, aux_width: u32, aux_height: u32, temporal: bool) CreateError!*Core {
+        _ = .{ gpa, model_bytes, bounds, threads, norm, aux_rgba, aux_width, aux_height, temporal };
+        return error.Unsupported;
+    }
+};
+
+/// No model rail on this target, so an engine cannot be made. A caller learns
+/// that from the error rather than from a worker that never publishes.
+pub const Engine = struct {
+    pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, threads: i32) !Engine {
+        _ = gpa;
+        _ = model_bytes;
+        _ = threads;
+        return error.InvalidModel;
+    }
+    pub fn deinit(self: *Engine) void {
+        _ = self;
+    }
+    pub fn inputNeedsShape(self: *const Engine, index: usize) bool {
+        _ = self;
+        _ = index;
+        return false;
+    }
+    pub fn resizeInput(self: *Engine, index: usize, dims: []const i64) anyerror!void {
+        _ = self;
+        _ = index;
+        _ = dims;
+        return error.Unsupported;
+    }
+    pub fn writeInput(self: *Engine, index: usize, bytes: []const u8) anyerror!void {
+        _ = self;
+        _ = index;
+        _ = bytes;
+        return error.Unsupported;
+    }
+    pub fn invoke(self: *Engine) anyerror!void {
+        _ = self;
+        return error.Unsupported;
+    }
+    pub fn outputFloats(self: *const Engine, index: usize) anyerror![]const f32 {
+        _ = self;
+        _ = index;
+        return error.Unsupported;
+    }
+    pub fn outputDims(self: *const Engine, index: usize, dims: []i32) anyerror![]i32 {
+        _ = self;
+        _ = index;
+        _ = dims;
+        return error.Unsupported;
+    }
+};
 pub const CreateError = error{ Unsupported, InvalidModel, ModelRejected, OutOfMemory };
 
 pub const max_outputs = 8;
@@ -100,6 +156,16 @@ pub fn temporalFilled(ti: *const TemporalInfer) u32 {
     _ = ti;
     return 0;
 }
+pub fn temporalPlanBytes(ti: *TemporalInfer) usize {
+    _ = ti;
+    return 0;
+}
+
+pub fn temporalPlanGrowths(ti: *TemporalInfer) u32 {
+    _ = ti;
+    return 0;
+}
+
 pub fn temporalLayoutIsNchw(ti: *const TemporalInfer) bool {
     _ = ti;
     return false;
@@ -197,6 +263,18 @@ pub fn hasPublished(ml: *MlInfer) bool {
     return false;
 }
 
+/// No model runs on this build, so there is no plan to report: zero is the
+/// truthful answer rather than a number nothing measured.
+pub fn planBytes(ml: *MlInfer) usize {
+    _ = ml;
+    return 0;
+}
+
+pub fn planGrowths(ml: *MlInfer) u32 {
+    _ = ml;
+    return 0;
+}
+
 pub fn outputLen(ml: *MlInfer, tensor: u32) usize {
     _ = ml;
     _ = tensor;
@@ -223,5 +301,21 @@ pub fn copyOutput(ml: *MlInfer, tensor: u32, dst: []f32) bool {
 
 pub fn outputCount(ml: *MlInfer) u32 {
     _ = ml;
+    return 0;
+}
+
+/// No engine here, so nothing is missing and nothing is claimed: a caller on
+/// this target learns the answer is unavailable rather than "all supported".
+pub fn missingOps(gpa: std.mem.Allocator, model_bytes: []const u8, out: []u8) usize {
+    _ = gpa;
+    _ = model_bytes;
+    _ = out;
+    return 0;
+}
+
+pub fn copyEmbedding(ml: *MlInfer, tensor: u32, dst: []f32) usize {
+    _ = ml;
+    _ = tensor;
+    _ = dst;
     return 0;
 }

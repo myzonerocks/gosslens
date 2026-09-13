@@ -19,15 +19,21 @@
     } while (0)
 
 int main(void) {
-    /* Any-thread, and the first call an embedder makes. A major mismatch is a
-     * refusal to run, not a warning. */
+    /* Any-thread, and the first call an embedder makes. The engine compares the
+     * major, rather than every embedder writing the comparison itself. */
     uint32_t abi = goss_abi_version();
     printf("abi %u.%u\n", abi >> 16, abi & 0xffffu);
-    if ((abi >> 16) != GOSS_ABI_MAJOR) {
-        fprintf(stderr, "abi major mismatch: built %u, linked %u\n",
-                GOSS_ABI_MAJOR, abi >> 16);
-        return 1;
-    }
+    CHECK(goss_abi_check(GOSS_ABI_VERSION));
+
+    /* What a lens asks for against what this build has, answered before activating
+     * anything. A catalogue filters on this instead of activating to find out. */
+    static const char wants_face[] =
+        "{\"glf\":\"1.0\",\"id\":\"x\",\"version\":\"1.0.0\",\"display_name\":\"x\","
+        "\"engine_compat\":\">=0.5\",\"capabilities\":[\"face\"],\"parameters\":[],"
+        "\"nodes\":[],\"triggers\":[]}";
+    uint64_t missing = 0;
+    CHECK(goss_lens_capabilities_missing((const uint8_t *)wants_face, sizeof(wants_face) - 1, &missing));
+    printf("a lens wanting face tracking is missing %llu\n", (unsigned long long)missing);
 
     goss_engine *engine = NULL;
     CHECK(goss_engine_create(NULL, &engine));
@@ -85,6 +91,16 @@ int main(void) {
         goss_session_report_frame(session, 12000, GOSS_THERMAL_NOMINAL);
     printf("degrade level %d\n", (int)level);
 
+    /* What this session has done, read through the header's own struct: the
+     * model rail's plan is the one number that says whether inference is
+     * steady or still growing its buffer. */
+    goss_session_report report;
+    CHECK(goss_session_read_report(session, &report));
+    printf("frames %llu, model plan %llu bytes, %u growths\n",
+           (unsigned long long)report.frames_submitted,
+           (unsigned long long)report.ml_plan_bytes,
+           report.ml_plan_growths);
+
     /* Named geofences: several regions alongside the default one, each firing
      * geo.in_region('name') on-device. Only that boolean crosses the rail. */
     const uint8_t venue[] = "venue";
@@ -109,6 +125,64 @@ int main(void) {
     CHECK(goss_session_set_layout(session, 5)); /* overlay */
     CHECK(goss_session_clear_layout(session));
     CHECK(goss_session_remove_source(session, guest, sizeof(guest) - 1));
+
+    /* Spatial state: submit the room, then ask it the questions an agent asks. The
+     * planes and anchors are the host's to provide; everything below answers over
+     * whatever was last submitted. */
+    const float flat[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    goss_world_plane planes[2];
+    memset(planes, 0, sizeof(planes));
+    memcpy(planes[0].pose, flat, sizeof(flat));
+    planes[0].id = 10;
+    planes[0].extent_x = 4.0f;
+    planes[0].extent_z = 4.0f;
+    planes[0].classification = 1; /* floor */
+    memcpy(planes[1].pose, flat, sizeof(flat));
+    planes[1].id = 20;
+    planes[1].pose[13] = 0.75f; /* a table, three quarters of a metre up */
+    planes[1].extent_x = 1.2f;
+    planes[1].extent_z = 0.8f;
+    planes[1].classification = 4; /* table */
+    goss_world_state world_state;
+    memset(&world_state, 0, sizeof(world_state));
+    world_state.tracking_state = 2;
+    memcpy(world_state.world_from_camera, flat, sizeof(flat));
+    memcpy(world_state.projection, flat, sizeof(flat));
+    CHECK(goss_session_submit_world(session, &world_state, planes, 2, NULL, 0, NULL));
+
+    uint64_t floor_id = 0;
+    CHECK(goss_session_floor_plane(session, &floor_id));
+    printf("floor_plane -> plane %llu\n", (unsigned long long)floor_id);
+
+    goss_footprint cup = { 0.1f, 0.1f, 0.12f };
+    goss_placement spots[4];
+    size_t spot_count = 0;
+    CHECK(goss_session_place_on(session, &cup, NULL, 0, spots, 4, &spot_count));
+    printf("place_on -> %zu surfaces, best is plane %llu with %.3f still free\n",
+           spot_count, (unsigned long long)spots[0].plane_id, spots[0].free_fraction);
+
+    const float from[3] = { 0.0f, 0.0f, 0.0f };
+    const float to[3] = { 3.0f, 4.0f, 0.0f };
+    float metres = 0.0f, sigma = 0.0f;
+    uint32_t known = 0;
+    CHECK(goss_session_measure_between(session, from, 0.01f, to, 0.02f, &metres, &sigma, &known));
+    printf("measure_between -> %.4f m, sigma %.4f, vouched %u\n", metres, sigma, known);
+
+    /* Scope: narrow to everything except drawing, then draw, so the refusal names a
+     * permission a host can grant rather than a capability that does not exist. It
+     * only ever narrows, which is why widening needs a new session. */
+    uint32_t verbs = 0xFFFFFFFFu & ~(1u << GOSS_VERB_ANNOTATE);
+    CHECK(goss_session_set_scope(session, goss_perception_select_all(), verbs));
+    goss_annotation box;
+    memset(&box, 0, sizeof(box));
+    box.id = 1;
+    box.opacity = 1.0f;
+    goss_status drew = goss_session_annotate(session, &box, NULL, 0);
+    uint8_t verb_name[32];
+    size_t verb_len = 0;
+    goss_scope_verb_name(GOSS_VERB_ANNOTATE, verb_name, sizeof(verb_name), &verb_len);
+    printf("annotate out of scope -> status %d, the verb it wanted is \"%.*s\" of %u\n",
+           (int)drew, (int)verb_len, (const char *)verb_name, goss_scope_verb_count());
 
     /* The GPU path, called honestly against the host stub. */
     goss_status render = goss_engine_render_frame(engine, session);

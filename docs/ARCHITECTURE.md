@@ -6,7 +6,7 @@ SDK for any host with a C FFI, and the JNI bridge the Kotlin path rides. The
 core owns portable engine behavior. Platform code owns only what the platform
 has to own.
 
-It is a full camera and AR engine: camera manipulation, face/hand/body
+It is the whole rail, not a tracker: camera manipulation, face/hand/body
 understanding, segmentation, world anchoring, physics-driven and scripted
 lens content, beauty and makeup, capture and recording, a deterministic audio
 mixer, and multi-source compositing, all behind that one ABI. Capability
@@ -195,6 +195,67 @@ FFmpeg is not a fallback. Neither are libav or GStreamer. A missing codec,
 container, importer, scaler, resampler, or streaming feature is implemented
 through a permissive component, a platform API, or a narrow Gosslens-owned
 piece without changing this rule.
+
+## The agent rail
+
+What an agent needs sits on the same seams, not beside them.
+
+- **The perception snapshot** is one versioned TLV record (`core/perception/`).
+  The JSON form is projected from the binary record rather than written a second
+  time, so the two cannot drift, and the layout is declared data
+  (`core/perception/schema.zig`) that a baseline gate holds still. Unknown tags
+  are stepped over by length, so an older consumer reads a newer record.
+- **Events** ride a bounded ring that drops the oldest and reports how many, and
+  a replay log names the first divergence rather than the fact of one.
+- **Frame egress** checks the budget before any trigger fires, scores change from
+  the mean plus a structural term, and redacts in normalized space.
+- **Annotations** are addressed by id, so moving one every frame leaks no entry,
+  and each carries a lifetime and says what happens when its track goes.
+- **What the frame says** comes from a detector and a recogniser on the engine's
+  own ONNX rail (`core/text/`, `adapters/tracking/text_infer.zig`). The
+  probability map becomes oriented quadrilaterals from each blob's second
+  moments; a region unwarps to an upright crop; a region whose rectified pixels
+  have not changed keeps its reading, so a static sign costs the detector alone.
+- **The model rail** (`adapters/tracking/onnx.zig`, `onnx_plan.zig`) runs a
+  published ONNX net with no vendored C++: it folds, fuses and plans at load, then
+  every frame allocates out of one buffer whose every operation is constant time,
+  sized from a measuring walk. A frame that outgrows it spills and sizes the plan
+  for the next one rather than being thrown away, and the session report says how
+  many bytes the rail reuses and how often it grew. A net's input range is part of the
+  contract, not an assumption: an export wanting zero to two hundred and fifty five
+  fed zero to one runs and finds nothing, which reads as working.
+- **What is in frame** comes from a detector's own outputs: a `detect` block names which
+  tensors hold the boxes, scores, classes and count, and the engine reads them into the
+  record as labelled boxes in the normalized frame, publishing a detection arriving,
+  leaving, or changing what it is.
+- **The memory plane** (`core/memory/`) is a navigable graph over embeddings with
+  the exact search beside it as the oracle its recall is measured against, a
+  bounded event log whose every bound retires the oldest rather than refusing the
+  newest, and keyframe selection that measures novelty against what is already
+  remembered rather than against the previous frame.
+- **Screens** (`core/screen/`) carry a scale factor and a desktop origin, so a
+  normalized point an agent sends lands on a real pixel and a point off the
+  surface is refused rather than answered. The capture itself is per platform
+  behind one seam (`adapters/screen/`): ScreenCaptureKit on Apple, MediaProjection
+  on Android whose consent dialog only an Activity can show, getDisplayMedia in the
+  web SDK where the browser owns the picker, and on a desktop host Xlib or the
+  Wayland portal with its PipeWire stream, chosen at run time from the session the
+  process is in, or GDI on Windows. Every desktop library loads at run time, so a
+  build needs none of their headers.
+- **Spatial state** (`core/spatial/`) answers the questions an agent asks of a
+  room it did not measure: a plane as a named kind rather than a platform number,
+  where a footprint fits ordered by the room each surface keeps, a distance with
+  the uncertainty its inputs carried, and the transform between two devices'
+  origins solved from landmarks rather than a pose neither could read.
+- **Scope** (`core/perception/scope.zig`) is two words: the sections a caller may
+  read and the verbs it may act with, each verb checked at every op it
+  gates. A read out of scope is dropped from the record; a verb out of scope answers
+  `out_of_scope`, a permission a host can grant, never `unsupported`. It only ever
+  narrows, so widening means a new session.
+- **The MCP server** (`tools/mcp/`) is one static binary over the same C ABI,
+  speaking JSON-RPC on stdio, so the whole rail is tools a model can call. The
+  engine and its session come up on the first call that needs one, and
+  `zig build mcp-proof` drives the built binary the way a client does.
 
 ## Dependency licenses
 

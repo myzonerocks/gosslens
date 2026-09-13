@@ -37,7 +37,7 @@ pub const Result = extern struct {
     frame_serial: u64,
     timestamp_us: i64,
     presence: f32,
-    landmark_count_out: u32,
+    landmark_count: u32,
     landmarks: [landmark_count * 3]f32,
     visibilities: [landmark_count]f32,
     presences: [landmark_count]f32,
@@ -342,7 +342,7 @@ test "landmark decode maps five-value points and passes scores through" {
 
 test "the frozen result layout holds" {
     var result = std.mem.zeroes(Result);
-    result.landmark_count_out = landmark_count;
+    result.landmark_count = landmark_count;
     try t.expectEqual(@as(usize, 688), @sizeOf(Result));
     try t.expectEqual(@as(usize, 24 + 33 * 3 * 4), @offsetOf(Result, "visibilities"));
 }

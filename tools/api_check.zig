@@ -1,6 +1,11 @@
-//! The public-contract gate. The frozen header, abi_functions, docs/API.md and
-//! the three SDK surfaces describe one operation set, and nothing checked that
-//! they agreed until this existed.
+//! The public-contract gate. The frozen header, abi_functions, docs/API.md and every
+//! SDK surface describe one operation set, and nothing checked that they agreed until
+//! this existed.
+
+//! It compares names, not signatures, and that limit is the point: a wrapper whose call
+//! does not match its own binding passes here and does not compile. The Kotlin SDK sat
+//! broken that way while this gate was green, so a compiler per SDK is part of the bar
+//! and this is not a substitute for one.
 
 //! A drift in any direction is a defect a consumer finds first: an op no SDK
 //! wraps cannot be called, an op the header omits is invisible, and an op with
@@ -31,12 +36,21 @@ const no_ts_wrapper = [_]Exception{
     .{ .op = "goss_engine_recording_start", .why = "the browser records through MediaRecorder off the canvas stream; the engine encoder is native-only" },
     .{ .op = "goss_engine_recording_stop", .why = "paired with recording_start" },
     .{ .op = "goss_engine_recording_set_realtime", .why = "paired with recording_start" },
+    .{ .op = "goss_engine_recording_pause", .why = "paired with recording_start; a page pauses its own MediaRecorder" },
+    .{ .op = "goss_engine_recording_resume", .why = "paired with recording_start" },
+    .{ .op = "goss_engine_recording_read_report", .why = "paired with recording_start; the page owns its recorder's state" },
     .{ .op = "goss_engine_capture_live_frame", .why = "the page reads the composited canvas directly" },
     .{ .op = "goss_engine_render_to_live_texture", .why = "no external-texture path on the web target" },
     .{ .op = "goss_engine_request_screenshot", .why = "the page owns file output; the SDK exports a PNG off the canvas" },
     .{ .op = "goss_session_activate_lens_from_directory", .why = "no filesystem in the page; a bundle stages in through provide_lens_asset" },
     .{ .op = "goss_session_submit_hardware_buffer", .why = "no platform hardware buffer in a browser" },
     .{ .op = "goss_session_submit_source_hardware_buffer", .why = "no platform hardware buffer in a browser; a page source arrives as a texture" },
+    .{ .op = "goss_session_open_clip", .why = "a page decodes with WebCodecs or a video element and submits the frames it already has" },
+    .{ .op = "goss_session_clip_submit_frame", .why = "paired with open_clip" },
+    .{ .op = "goss_session_clip_seek", .why = "paired with open_clip; a page seeks its own video element" },
+    .{ .op = "goss_session_clip_info", .why = "paired with open_clip" },
+    .{ .op = "goss_session_close_clip", .why = "paired with open_clip" },
+    .{ .op = "goss_session_clip_step", .why = "paired with open_clip; a page steps its own video element" },
 };
 
 const Exception = struct { op: []const u8, why: []const u8 };
@@ -57,6 +71,7 @@ const mirrored_enums = [_][]const u8{
     "GOSS_NODE_STATE_",
     "GOSS_DEGRADE_",
     "GOSS_THERMAL_",
+    "GOSS_INTERRUPTION_",
 };
 
 /// Every `Java_com_gosslens_Gosslens_<name>` in the JNI file, names only. A
@@ -314,7 +329,7 @@ pub fn main(init: std.process.Init) !u8 {
         if (!jni_set.contains(name)) try c.flag("Kotlin declares external fun {s} and the JNI binds nothing for it", .{name});
     }
 
-    // Every value of a mirrored enum reaches all three SDKs, spelled each one's
+    // Every value of a mirrored enum reaches every SDK, spelled each one's
     // way. The Kotlin reader decodes by ordinal, so a missing case there does not
     // fail to compile, it mislabels every value after the gap.
     for (mirrored_enums) |prefix| {
@@ -338,7 +353,7 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("api-check: {d} violation(s) across {d} operations\n", .{ c.violations.items.len, header_ops.items.len });
         return 1;
     }
-    std.debug.print("api-check: {d} operations agree across the header, abi_functions, docs/API.md, and all three SDKs\n", .{header_ops.items.len});
+    std.debug.print("api-check: {d} operations agree across the header, abi_functions, docs/API.md, and every SDK\n", .{header_ops.items.len});
     return 0;
 }
 

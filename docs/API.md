@@ -136,6 +136,8 @@ file must move together.
 | ABI function | Public operation | Scope |
 |---|---|---|
 | `goss_abi_version` | `Gosslens.abiVersion()` | all SDKs |
+| `goss_lens_capabilities_missing` | `Gosslens.lensCapabilitiesMissing(manifestJson)`, the rails a lens declares that this build lacks, so a catalogue filters before activating rather than activating to find out | all SDKs |
+| `goss_abi_check` | `Gosslens.abiCheck()`, the caller passing the major it was built against and the engine refusing another one, which every SDK asks at engine creation rather than leaving a caller to remember | all SDKs |
 | `goss_capabilities` | `Gosslens.capabilities()`, which rails this build compiled real as `GOSS_CAP_*` bits, so a stub library is told apart from the full one before any bytes are fed | all SDKs |
 | `goss_color_yuv_to_rgb` | `Gosslens.yuvToRgb(colorStandard, colorRange)`, returning the conversion matrix | all SDKs |
 | `goss_solve_two_bone_ik` | `Gosslens.solveTwoBoneIk(root, upperLen, lowerLen, target, pole)`, analytic two-bone IK returning the mid joint and end positions; an out-of-reach target extends the limb straight at it | all SDKs |
@@ -167,8 +169,65 @@ file must move together.
 | `goss_session_chain_report` | `chainReport()`, what the last drawn frame did with the active lens: the stages ready to draw, the stages it has, and whether the beauty bridge ran; zero ready over a non-zero total is a lens the engine activated and is drawing nothing of, which is what a host shows instead of an unchanged picture | all SDKs |
 | `goss_session_read_reconstruction` | `readReconstruction()`, the guided scan's gaussians (fourteen floats each: xyz, scale, a rotation quaternion, opacity, rgb), which is what a client writes into a moment file | all SDKs |
 | `goss_session_write_reconstruction` | `writeReconstruction(gaussians)`, putting a reconstruction back so a moment captured on one client opens on another | all SDKs |
+| `goss_ml_op_support` | model bytes, out buffer | Lists the operators a model needs that this build lacks, one per line. |
+| `goss_session_enable_text` | detector, recogniser, dictionary, side | Turns on the text rail. A detector alone finds where the text is; the recogniser turns it into a string. |
+| `goss_session_disable_text` | session | Releases the text models and clears what was read. |
+| `goss_session_text_count` | out count, out refused | How many readings the frame holds and how many the bound turned away. |
+| `goss_session_text_at` | index, out entry | One reading: quad, confidence, origin, script, direction, track id, line, paragraph. |
+| `goss_session_text_string` | index, out buffer | The reading itself; GOSS_AGAIN with the size when the buffer is short. |
+| `goss_session_memory_open` | dim, max entries | Opens the memory plane at a fixed embedding width under a caller-set bound. |
+| `goss_session_memory_close` | session | Releases the memory plane. |
+| `goss_session_memory_remember` | id, embedding | Remembers one embedding; the same id replaces rather than duplicating. |
+| `goss_session_memory_forget` | id | Forgets one embedding. |
+| `goss_session_memory_search` | query, k | The nearest remembered embeddings, fewer than k on a smaller memory. |
+| `goss_session_memory_stats` | out count, out bytes | What the memory holds and what it costs. |
+| `goss_session_memory_save` | out buffer | Writes the memory so a cold start is instant; GOSS_AGAIN with the size. |
+| `goss_session_memory_load` | bytes | Reads a memory back, refusing a file from another version or a truncated one. |
+| `goss_session_set_scope` | sections, verbs | Narrows what the session answers and does. It only ever narrows: anything inside the session can call it, so widening means a new session. |
+| `goss_session_scope` | out sections, out verbs | The scope in force. |
+| `goss_scope_verb_name` | verb, out buffer | The engine's own name for a verb, so a refusal reads as a sentence and a permission prompt reads as words. |
+| `goss_scope_verb_count` | none | How many verbs this build knows, for a caller walking them by index. |
+
+A read out of scope is dropped from the record rather than failing the call. A verb
+out of scope returns `GOSS_OUT_OF_SCOPE`, which is deliberately not
+`GOSS_UNSUPPORTED`: the first a host can grant, and no amount of asking changes the
+second. Every verb below is checked at every op it covers.
+
+| verb | what it gates |
+| --- | --- |
+| `annotate` | drawing back into the frame, and removing what was drawn |
+| `egress` | a frame leaving the engine: a still, the UI, a guided view |
+| `record` | starting, pausing and resuming a recording |
+| `remember` | opening the memory plane and writing or forgetting an entry |
+| `search_memory` | reading the memory plane back |
+| `seal_memory` | the index as sealed bytes, which outlive the process |
+| `open_clip` | opening a clip, seeking it, stepping it |
+| `capture_screen` | opening a display or a window as a source |
+| `submit_frame` | feeding pixels in, from any source including a named one |
+| `submit_world` | planes, anchors, a mesh, depth, orientation, location, intrinsics |
+| `submit_audio` | feeding audio in |
+| `audio_out` | mixed audio leaving, which is the ear's equivalent of egress |
+| `activate_lens` | running author content |
+| `load_model` | loading a caller's model, which is arbitrary compute over the frame |
+| `enable_tracking` | turning the face, hand and body trackers on |
+| `retouch` | changing how the person looks |
+
+Reading a code or a fingerprint is deliberately not a verb: every scan op is a pure
+function over pixels or samples the caller already holds, so a permission there
+would gate nothing, and the audit that produced this table exists to remove exactly
+that.
+| `goss_engine_screen_count` | out count | What this process may capture; zero where permission has not been granted, and zero the same way on a host whose screen library is absent. Apple reads ScreenCaptureKit, Android MediaProjection, a desktop host Xlib or the Wayland portal chosen at run time, Windows GDI, and the web the browser's own picker. |
+| `goss_engine_screen_at` | index, out surface | One surface: its logical geometry, desktop origin and scale factor. |
+| `goss_engine_screen_title` | index, out buffer | The surface title; GOSS_AGAIN with the size when the buffer is short. |
+| `goss_session_open_screen` | surface id, scale | Opens a surface as a source; a scale of zero takes its own. |
+| `goss_session_close_screen` | screen | Releases a capture. |
+| `goss_session_step_screen` | screen, source name | Submits the newest frame; GOSS_AGAIN when the screen has not changed. |
+| `goss_session_screen_point` | screen, normalized x and y | Where a point lands, in logical points, backing pixels and desktop coordinates. |
+| `goss_session_memory_save_sealed` | key, nonce, out buffer | Writes the memory sealed under a host key; GOSS_AGAIN with the size. |
+| `goss_session_memory_load_sealed` | key, bytes | Reads a sealed memory, refusing a wrong key, a changed byte or a relabelled file. |
+| `goss_perception_select_all` | none | Every snapshot section this build writes, as a select mask. |
 | `goss_engine_read_report` | `engineReport()`, what the engine is doing now rather than what it was asked for: the render backend it actually brought up, whether the zero-copy image import came up, the bounded texture and staging pools with their live counts, peaks, exhaustion counts, the distinct descriptions each holds and the descriptions turned away at the bin cap, the bytes held on the heap no managed allocator sees, and the vendor-heap allocation calls and bytes of the frame just drawn | all SDKs |
-| `goss_session_read_report` | `sessionReport()`, this session's counters: frames submitted and rendered, the degradation rung and how many times it moved, how much analysis each modality actually ran, how many lens nodes are not ready, and how many script handlers or ticks threw | all SDKs |
+| `goss_session_read_report` | `sessionReport()`, this session's counters: frames submitted and rendered, the degradation rung and how many times it moved, how much analysis each modality actually ran, how many lens nodes are not ready, how many script handlers or ticks threw, and the bytes every model rail reuses each frame beside how often one had to grow | all SDKs |
 | `goss_session_node_report_count` | `nodeReportCount()`, how many nodes of the active lens are not doing what the manifest asked, beside how many diagnostics could not be recorded at all; a zero count with a non-zero lost count means the lens degraded in ways the session could not write down | all SDKs |
 | `goss_session_node_report_at` | `nodeReportAt(index)`, one node's diagnostic: its graph index, whether it is ready, degraded or failed, and why (out of memory, a missing or malformed or oversized asset, a missing or unlinkable shader, a rejected or unsupported model, a capability the target does not carry) | all SDKs |
 | `goss_session_node_report_id` | `nodeReportId(index)`, the manifest id of the node a report names, so a host reports which node rather than which index | all SDKs |
@@ -196,6 +255,10 @@ the capability is present on all three platforms; only the mechanism differs.
 | `goss_engine_recording_start` | `startRecording(session, path, config)`, appending one video frame per rendered frame with effects baked in | Swift and Kotlin |
 | `goss_engine_recording_set_realtime` | `startRecording(..., realtime:)`, tells the next recording whether a viewfinder is watching it; an offline lane passes false and the composite goes straight to the encoder rather than waiting on a display refresh to present a frame nobody sees, with frames carrying their own timestamps either way | Swift and Kotlin |
 | `goss_engine_recording_stop` | `stopRecording()`, flushing in-flight frames and finalizing the file | same |
+| `goss_engine_recording_pause` | `recordingPause()`, holds the recording clock: frames submitted while paused are not written and the output has no gap, so a pause and resume pair is a clip boundary rather than a hole the rest of the file drifts behind | all SDKs |
+| `goss_engine_recording_resume` | `recordingResume()`, starts the clock again from the next frame's stamp | all SDKs |
+| `goss_session_report_interruption` | `reportInterruption(kind)`, a break the host saw and the engine cannot: camera lost, audio route changed, backgrounded, thermal stop. The gap it leaves is accounted for as the break rather than counted as drift | all SDKs |
+| `goss_engine_recording_read_report` | `recordingReport()`, the output duration with pauses removed, the clips, the declared breaks, the measured drift, and the frame and drop counts | all SDKs |
 | `goss_session_submit_audio` | `submitAudio(session, samples, frameCount, sampleRate, channels, timestampUs)`, feeding level and beat triggers always and the recording's audio track where the backend muxes audio. The engine resamples to the microphone ring's own fixed rate, so an audio.infer model reads the same window whatever rate the device submits - a caller passes the hardware rate rather than converting first | Swift and Kotlin |
 | _(SDK helper, no C entry)_ | `GossMicInput`: taps the platform microphone, or on web the stream the page already holds so no second microphone is asked for, and submits it, at the rate the platform granted, into one reused buffer. The web SDK had it; Swift and Kotlin now do too, under the same name, so practice, live and capture do not each write their own. Deliberately does not request permission or touch the platform audio session - the app owns that policy and a call may already hold the microphone | all SDKs |
 | `goss_session_submit_world` | `submitWorld(session, state, planes, anchors, light)`, feeding the tracking-state trigger and world-anchored content | Swift GossWorldSource on ARKit, Kotlin GossARCoreWorldSource on ARCore, and the web SDK's GossWebXRWorldSource |
@@ -203,6 +266,14 @@ the capability is present on all three platforms; only the mechanism differs.
 | `goss_session_hit_test` | `hitTest(session, screenX, screenY)` raycasts a normalized screen point onto the tracked ground plane, returning the world hit position or null until tracking is live and the ray meets the plane | Swift `Session.hitTest`, Kotlin `hitTest`, TS `hitTest` |
 | `goss_session_submit_world_mesh` | `submitWorldMesh(vertices, indices)` submits the device's pre-scanned world mesh (scene reconstruction, a VPS scan) in world space as xyz triples and per-triangle indices; empty clears it | all SDKs |
 | `goss_session_raycast_world_mesh` | `raycastWorldMesh(origin, direction) -> (point, distance)?` casts a world-space ray against the submitted mesh, returning the nearest surface hit or null when no mesh is submitted or the ray misses, so a tap-to-place lens anchors content on scanned geometry | all SDKs |
+| `goss_engine_decode_png` | `decodePng(bytes) -> (rgba, width, height)?` decodes a PNG to packed RGBA8 through the decoder the engine already carries, for a caller holding an encoded image and no decoder of its own | all SDKs |
+| `goss_session_path_across_world` | `pathAcrossWorld(start, goal) -> [point]?` a walkable route over the submitted world mesh, null when no mesh is submitted or no route exists, so an agent walks content across real scanned ground | all SDKs |
+| `goss_session_plane_kind` | `planeKind(planeId) -> (kind, bearing)?` a submitted plane as a named kind rather than the platform's own number, and whether a thing can rest on it | all SDKs |
+| `goss_session_floor_plane` | `floorPlaneId() -> id?` the lowest bearing surface the session has been shown, null when it has been shown none | all SDKs |
+| `goss_session_place_on` | `placeOn(width, depth, height, occupants) -> [placement]` where a footprint fits, best surface first: the bearing plane with the most room left afterwards, each answer carrying the fraction of that surface still free | all SDKs |
+| `goss_session_measure_between` | `measureBetween(from, to, fromAccuracy, toAccuracy) -> (metres, sigma, known)?` point to point with the uncertainty that follows from each end's accuracy; `known` is false when either end vouched for none | all SDKs |
+| `goss_session_shared_landmarks` | `sharedLandmarks() -> [landmark]` what this device can offer another: one landmark per world anchor it holds, in its own frame, never a pose | all SDKs |
+| `goss_session_align_shared` | `alignShared(theirs) -> (transform, rmsError, matched)?` the transform from the sender's origin into this one, solved over the landmarks both recognise, null under three matches | all SDKs |
 
 ### GossSession lifecycle
 
@@ -219,6 +290,23 @@ the capability is present on all three platforms; only the mechanism differs.
 | `goss_session_submit_frame_copy` | `submitFrameCopy(y, yStride, uv, uvStride, width, height, rotationDegrees, mirrored, colorStandard, colorRange, timestampUs)` | platforms that expose this copy path |
 | `goss_session_submit_hardware_buffer` | `submitHardwareBuffer(buffer, width, height, rotationDegrees, mirrored, timestampUs)` | Android |
 | `goss_session_submit_frame_rgba_copy` | `submitFrameRgbaCopy(rgba, stride, width, height, pixelFormat, rotationDegrees, mirrored, timestampUs)` | copy-path SDKs |
+| `goss_session_open_clip` | `openClip(path)`, opens a clip as a source of frames for the session. The engine decodes; the host decides when each frame lands | native SDKs |
+| `goss_session_clip_submit_frame` | `clipSubmitFrame(clip, timestampUs)`, decodes the next frame and submits it as the session's frame through the same path a camera's bytes take, so the graph cannot tell them apart and a session needs no camera. `GOSS_AGAIN` at the end of the stream | native SDKs |
+| `goss_session_clip_seek` | `clipSeek(clip, targetUs)`, the keyframe at or before a time, refused past the end rather than clamped | native SDKs |
+| `goss_session_clip_info` | `clipInfo(clip)`, the clip's size, duration, the position last submitted, and whether it ended | native SDKs |
+| `goss_session_close_clip` | `closeClip(clip)` | native SDKs |
+| `goss_session_clip_step` | `clipStep(clip, frames)`, moves by whole frames and leaves the clip on the one it lands on. Forward decodes; backward seeks and decodes, because a forward-only decoder cannot step back any other way | native SDKs |
+| `goss_engine_media_capabilities` | `mediaCapabilities()`, what this build's media backend declares it encodes as bit sets over the codec and container enums, so a host asks rather than assuming from the platform | all SDKs |
+| `goss_session_perception_snapshot` | `perceptionSnapshot(select)`, one versioned record of what the engine currently sees: the frame, faces, hands, bodies, audio, the active lens with its node states, and the engine's own counters, each section tagged with its own version and byte length so a consumer built against an older schema steps over what it does not know. `GOSS_AGAIN` with the needed size when the buffer is short | all SDKs |
+| `goss_session_perception_json` | `perceptionJson(select)`, the same record as compact JSON, projected from the binary form rather than written a second time from the session, so the two cannot drift. A section this build cannot name is reported with its tag and byte length rather than dropped | all SDKs |
+| `goss_session_poll_events` | `pollEvents(capacity)`, drains the session's bounded event ring in order: faces appearing and leaving, gestures, the ladder moving, a pool turning a request away, lens nodes degrading or failing, the recording lifecycle, declared interruptions, the audio beat. The drop count says whether anything was missed and is cleared by the read | all SDKs |
+| `goss_session_egress_configure` | `egressConfigure(config)`, what the brain sees and what it costs: the target edge, format, quality, the rate and byte ceilings, the source, and when a frame is worth sending | all SDKs |
+| `goss_session_egress_request` | `egressRequest()`, the host asking for one frame whatever the change score says | all SDKs |
+| `goss_session_egress_decide` | `egressDecide()`, whether this frame is worth sending and why, with the change score and the running sent and held counts, so a gateway can explain itself rather than guess. The budget is checked before any trigger, because a budget a trigger can talk past is not a budget | all SDKs |
+| `goss_session_annotate` | `annotate(annotation, text)`, one thing an agent draws back into the frame: a box, label, point, arrow, path, highlight, mask overlay, image or meter, anchored in screen or pixel space, in the world, to a track, or to a named face region. The same id replaces rather than duplicating, and every annotation carries its own lifetime | all SDKs |
+| `goss_session_annotation_remove` | `annotationRemove(id)` | all SDKs |
+| `goss_session_annotation_clear` | `annotationClear()` | all SDKs |
+| `goss_session_annotation_count` | `annotationCount()`, how many are live and how many adds the bound turned away, which is what tells an agent its overlay is losing annotations rather than drawing them somewhere it cannot see | all SDKs |
 
 ### Events and degradation
 
@@ -229,7 +317,7 @@ the capability is present on all three platforms; only the mechanism differs.
 
 ### Face tracking
 
-All three SDKs expose the in-engine tracking, beauty, and result-readback ops
+Every SDK exposes the in-engine tracking, beauty, and result-readback ops
 below (the "native tracking path" rows). On web they call the same symbols and
 return `unsupported` unless the wasm build carries the inference stack; a web app
 without it feeds tracking through the producer path (`submitFaces`,
@@ -303,7 +391,7 @@ wasm engine by default) returns `unsupported`, and the web producer path
 | `goss_session_allow_model_digest` / `goss_session_clear_model_allowlist` | `allowModelDigest(digest)` / `clearModelAllowlist()`, allowlist a bring-your-own model by its 32-byte SHA-256 so an unlisted net is refused at enable time and at every lens model loader; none set admits any model | all SDKs |
 | `goss_session_provide_lens_asset` | `provideLensAsset(name, bytes)`, stages one bundle asset's bytes in memory under its manifest name ahead of a JSON activation, so a filesystem-less host runs the whole lens from memory - images, LUTs, sprites, face textures, glTF models and shader binaries (as `shaders/<stem>.<profile>.bin`) as well as the inference nets; empty bytes remove the name | all SDKs |
 | `goss_session_sprite_transform` | `spriteTransform(nodeId)`, reads a placed sprite.2d, text.2d or video.texture node's live rect and its turn in degrees - the authored angle, plus any bound parameter, plus any gesture - so a host can draw selection handles or persist where a sticker was left | all SDKs |
-| `goss_session_ml_output` | `mlOutput(nodeId, tensor)`, one ml.infer node's whole published output tensor into caller memory (a length probe sizes it), so a detection, embedding, or logits vector leaves the engine | all SDKs |
+| `goss_session_ml_output` | `mlOutput(nodeId, tensor)`, one ml.infer node's whole published output tensor into caller memory, GOSS_AGAIN with the size when the buffer is short, so a detection, embedding, or logits vector leaves the engine | all SDKs |
 | `goss_session_ml_mask` | `mlMask(nodeId)`, one ml.infer node's mask-bound output resampled to the fixed segmentation plane; refused when the node binds no mask | all SDKs |
 
 ### Beauty

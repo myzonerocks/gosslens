@@ -2,8 +2,9 @@
 
 # Gosslens
 
-**A camera and AR engine that runs real-time beauty, tracking and AR effects on
-device, and lets any app or model draw into the live camera view.**
+**Real-time visual plumbing for agents: one core behind a frozen C ABI that
+connects any model to live cameras, video, clips and screens, and lets it draw
+and act back into the frame.**
 
 [![gates](https://github.com/myzonerocks/gosslens/actions/workflows/gates.yml/badge.svg)](https://github.com/myzonerocks/gosslens/actions/workflows/gates.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.md)
@@ -14,9 +15,10 @@ device, and lets any app or model draw into the live camera view.**
 
 </div>
 
-Retouching and makeup, face, hand and body tracking, background removal, AR
-effects, and capture, on iOS, Android and the web. It hands you each frame and
-composites what you draw back, ships compiled, and makes no network calls.
+Point it at a camera, a clip or a screen and it tells you what is in every frame.
+Draw on what it hands back and it composites your work into the picture. One
+compiled core does the tracking, the segmentation, the retouching and the
+capture, on iOS, Android and the web, and nothing ever leaves the device.
 
 ## Install
 
@@ -39,14 +41,14 @@ to the newest release on its own:
 
 ```swift
 // Package.swift
-.package(url: "https://github.com/myzonerocks/gosslens", from: "0.12.0")
+.package(url: "https://github.com/myzonerocks/gosslens", from: "0.12.0-alpha.3")
 ```
 
 **Android - Kotlin**
 
 ```kotlin
 // build.gradle.kts
-implementation("io.github.avosa:gosslens:0.12.0")
+implementation("io.github.avosa:gosslens:0.12.0-alpha.3")
 ```
 
 **Web - TypeScript**
@@ -61,10 +63,15 @@ or the [C SDK](sdk/c/README.md) for any other language with a C FFI.
 
 ## What you get
 
+- **For agents** - one versioned record of everything the engine sees, an event stream, budgeted frame egress, and annotations an agent draws back into the frame. An [MCP server](docs/MCP.md) makes all of it tools a model can call.
+- **What the frame says** - text detection and recognition on the engine's own ONNX rail: oriented regions, reading order, and a track id that survives a frame.
+- **Screens** - a display or a window is a source like any other, with the scale factor and desktop origin that put a coordinate back on a real pixel: ScreenCaptureKit, MediaProjection, or getDisplayMedia.
+- **Spatial state** - which surface is the floor, where a thing fits and how much of that surface it leaves, a distance with the uncertainty its inputs carried, and the transform between two devices' origins.
+- **Memory** - an on-device index over embeddings with the keyframe selection that decides what was worth remembering, and the search that finds it again.
 - **Beauty and makeup** - smooth, whiten, reshape, lipstick, and blush, each a live 0-to-1 control.
 - **Tracking** - multi-face, hands with gestures, and full-body pose, plus selfie segmentation for virtual backgrounds.
 - **Lenses** - the `.glens` format: scripted triggers, shader passes, glTF models, and physics, authored once and run on every platform.
-- **Your own models** - a lens bundles a TFLite or ONNX net and binds its outputs to parameters, masks, depth, or a drawn image; the host stages models in memory and reads tensors back.
+- **Your own models** - a lens bundles a TFLite or ONNX net and binds its outputs to parameters, masks, depth, or a drawn image; the ONNX engine is written from scratch here, with quantization, control flow, and inference that allocates nothing after load.
 - **World and AR** - anchor content in space from ARKit, ARCore, or WebXR frames, and raycast a tap onto a scanned world mesh.
 - **Capture** - photos, video, and multi-source compositing through each platform's native media APIs.
 
@@ -83,6 +90,16 @@ is the honest table of what is proven where.
 The platform SDKs are thin wrappers over the same C ABI and share one operation
 contract, so an effect behaves identically everywhere. Full install and
 render-loop steps live in each platform's guide above.
+
+## Documents
+
+- [API.md](docs/API.md), the operation contract every SDK wraps
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md), what owns what and why
+- [LENS-FORMAT.md](docs/LENS-FORMAT.md) and [PERCEPTION-FORMAT.md](docs/PERCEPTION-FORMAT.md), the
+  two formats published for forking
+- [MCP.md](docs/MCP.md), the engine as tools a model calls
+- [PARITY.md](docs/PARITY.md), what is proven on which platform
+- [ROADMAP.md](docs/ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md)
 
 ## On device
 

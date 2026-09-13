@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 115u
+#define GOSS_ABI_MINOR 176u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -52,6 +52,17 @@ uint32_t goss_abi_version(void);
 #define GOSS_CAP_PHOTO_CAPTURE (1ull << 7)
 #define GOSS_CAP_RECORDING (1ull << 8)
 #define GOSS_CAP_FILE_IO (1ull << 9)
+/* The engine reported these and the header did not name them, so a consumer read
+ * bits it could not interpret. The last four are built in every configuration: the
+ * world seam is the host's to feed, stroke boards and the reconstruction store are
+ * pure core, and the diagnostics exist wherever this ABI does. */
+#define GOSS_CAP_SCRIPT (1ull << 10)
+#define GOSS_CAP_AUDIO_PLAYBACK (1ull << 11)
+#define GOSS_CAP_AUDIO_RECORDING (1ull << 12)
+#define GOSS_CAP_WORLD_TRACKING (1ull << 13)
+#define GOSS_CAP_STROKE_BOARDS (1ull << 14)
+#define GOSS_CAP_RECONSTRUCTION (1ull << 15)
+#define GOSS_CAP_DIAGNOSTICS (1ull << 16)
 
 /* Any-thread. */
 uint64_t goss_capabilities(void);
@@ -75,7 +86,24 @@ typedef enum goss_status {
      * what it asked. The rest of the lens draws; the node reports say which node
      * and why, so the host decides whether that is acceptable. */
     GOSS_LENS_NODE_FAILED = 8,
+    /* The session's scope does not carry the verb this op needs. Distinct from
+     * GOSS_UNSUPPORTED on purpose: a host can grant this one, and no amount of
+     * asking changes the other. */
+    GOSS_OUT_OF_SCOPE = 9,
 } goss_status;
+
+/* Any-thread. Pass GOSS_ABI_VERSION, the version you compiled against, and get
+ * GOSS_STATUS_ABI_MISMATCH when this binary speaks a different major. Zero means
+ * you are not saying, and is allowed. This is the check, rather than reading the
+ * version and remembering to compare it. */
+goss_status goss_abi_check(uint32_t caller_version);
+
+/* Any-thread. Which capabilities a lens's manifest declares that this build does not
+ * have, as GOSS_CAP_ bits; zero means every rail it asked for is here. A lens states
+ * what it needs and nothing could read that back, so a catalogue had to activate one
+ * to find out. Activation still runs such a lens and degrades the nodes that needed
+ * the missing rail, which the node reports name. */
+goss_status goss_lens_capabilities_missing(const uint8_t *manifest_json, size_t manifest_len, uint64_t *out_missing);
 
 typedef struct goss_engine goss_engine;
 typedef struct goss_session goss_session;
@@ -352,6 +380,38 @@ goss_status goss_engine_recording_start(goss_engine *engine, goss_session *sessi
  * finalizing the container. */
 goss_status goss_engine_recording_stop(goss_engine *engine);
 
+/* What interrupted a recording, as the host saw it. A declared break is a gap the
+ * output accounts for, rather than drift the engine is blamed for. */
+typedef enum goss_interruption {
+    GOSS_INTERRUPTION_PAUSE = 0,
+    GOSS_INTERRUPTION_CAMERA_LOST = 1,
+    GOSS_INTERRUPTION_AUDIO_ROUTE = 2,
+    GOSS_INTERRUPTION_BACKGROUNDED = 3,
+    GOSS_INTERRUPTION_THERMAL = 4,
+} goss_interruption;
+
+typedef struct goss_recording_report {
+    int64_t duration_us;    /* output length, with the paused spans removed */
+    uint32_t clips;         /* pause and resume pairs produce these, from one */
+    uint32_t interruptions; /* declared breaks of every kind */
+    int64_t drift_us;       /* largest gap that was not a declared break */
+    uint64_t frames;
+    uint64_t dropped;
+    uint32_t paused;
+} goss_recording_report;
+
+/* Graph thread. Holds the recording clock. Frames submitted while paused are not
+ * written and the output has no gap, so a pause and resume pair is a clip
+ * boundary rather than a hole the rest of the file drifts behind. */
+goss_status goss_engine_recording_pause(goss_engine *engine);
+goss_status goss_engine_recording_resume(goss_engine *engine);
+
+/* Graph thread. A break the host saw rather than one the engine can detect. */
+goss_status goss_session_report_interruption(goss_session *session, goss_interruption kind);
+
+/* Any thread. What the recording has done so far. */
+goss_status goss_engine_recording_read_report(goss_engine *engine, goss_recording_report *out_report);
+
 /* Tells the next recording whether a viewfinder is watching it. True is the live camera and
  * the default; an offline lane rendering a clip faster than real time passes false, and the
  * composite then goes straight to the encoder rather than waiting on a display refresh.
@@ -451,6 +511,8 @@ typedef struct goss_session_report {
     uint32_t nodes_degraded;
     uint32_t node_reports_lost;
     uint32_t script_faults;       /* handlers and ticks that threw; a lens still draws */
+    uint32_t ml_plan_growths;     /* model frame buffers that grew mid-run; steady is 0 */
+    uint64_t ml_plan_bytes;       /* bytes those rails reuse every frame, summed */
 } goss_session_report;
 
 /* One node's diagnostic. node_index is the node's index in the session graph,
@@ -481,6 +543,83 @@ goss_status goss_session_submit_world(goss_session *session, const goss_world_st
  * three per triangle. The engine copies it, and a ray meets it through
  * goss_session_raycast_world_mesh. An empty submission clears the stored mesh. */
 goss_status goss_session_submit_world_mesh(goss_session *session, const float *vertices, size_t vertex_count, const uint32_t *indices, size_t index_count);
+
+/* Decodes a PNG to tightly packed RGBA8. A caller holding an encoded image and no
+ * decoder of its own is the ordinary case in a server or a tool, and the engine
+ * already carries the decoder for its own assets. GOSS_AGAIN with the size in
+ * out_len when the buffer is short, so a caller sizes once. */
+goss_status goss_engine_decode_png(const uint8_t *bytes, size_t len, uint8_t *out_rgba, size_t capacity, uint32_t *out_width, uint32_t *out_height, size_t *out_len);
+
+/* A walkable path across the submitted world mesh, from start to goal, written as
+ * out_count xyz triples. GOSS_AGAIN when no mesh is submitted, when no route
+ * exists, or with the count when the buffer was short: a caller can act on "not
+ * here" and cannot act on an empty list it mistook for a straight line. */
+goss_status goss_session_path_across_world(goss_session *session, const float *start, const float *goal, float *out_points, size_t capacity, size_t *out_count);
+
+/* A footprint to place, in metres. Height is asked for even on a flat surface:
+ * it decides whether a thing fits under a shelf. */
+typedef struct goss_footprint {
+    float width;
+    float depth;
+    float height;
+} goss_footprint;
+
+/* Where a footprint can go: which plane, where on it in world space, and how
+ * much of that surface stays free afterwards, as a fraction. */
+typedef struct goss_placement {
+    uint64_t plane_id;
+    float position[3];
+    float free_fraction;
+} goss_placement;
+
+/* Something already on a plane, on that plane's own axes in metres from its
+ * centre, so a placement query answers about the surface as it is now. */
+typedef struct goss_occupant {
+    uint64_t plane_id;
+    float x;
+    float z;
+    float width;
+    float depth;
+} goss_occupant;
+
+/* One landmark as it crosses between two devices. No pose: a pose is meaningless
+ * in another origin. The position is in the sender's own frame, read only for the
+ * distances between landmarks. */
+typedef struct goss_shared_landmark {
+    uint64_t id;
+    float x;
+    float y;
+    float z;
+    float confidence;
+} goss_shared_landmark;
+
+/* What a submitted plane is, as a named kind rather than the platform's own
+ * number: 0 unknown, 1 floor, 2 wall, 3 ceiling, 4 table, 5 seat, 6 door,
+ * 7 window, 8 screen. out_bearing is 1 when a thing can rest on it. */
+goss_status goss_session_plane_kind(goss_session *session, uint64_t plane_id, uint32_t *out_kind, uint32_t *out_bearing);
+
+/* The plane this session would call the floor: the lowest bearing surface it has
+ * been shown. GOSS_AGAIN when it has been shown none. */
+goss_status goss_session_floor_plane(goss_session *session, uint64_t *out_plane_id);
+
+/* Where this footprint fits, best surface first: the bearing plane with the most
+ * room left afterwards. out_count is the number found; GOSS_AGAIN with the count
+ * when the buffer was short. Zero placements is an answer. */
+goss_status goss_session_place_on(goss_session *session, const goss_footprint *item, const goss_occupant *occupants, size_t occupant_count, goss_placement *out, size_t capacity, size_t *out_count);
+
+/* Point to point in metres, with the uncertainty that follows from the accuracy
+ * each end carried. Pass a non-positive accuracy to vouch for none; out_known is
+ * then 0, so a sigma of zero is never read as certainty. */
+goss_status goss_session_measure_between(goss_session *session, const float *from, float from_accuracy_m, const float *to, float to_accuracy_m, float *out_metres, float *out_sigma, uint32_t *out_known);
+
+/* What this device can offer another: one landmark per world anchor it holds, in
+ * its own frame. GOSS_AGAIN with the count when the buffer was short. */
+goss_status goss_session_shared_landmarks(goss_session *session, goss_shared_landmark *out, size_t capacity, size_t *out_count);
+
+/* The transform from the sender's origin into this one, column-major, solved over
+ * the landmarks both sides recognise, with the fit it achieved. GOSS_AGAIN when
+ * fewer than three matched, which cannot fix a rigid transform. */
+goss_status goss_session_align_shared(goss_session *session, const goss_shared_landmark *theirs, size_t count, float *out_transform, float *out_rms_error, uint32_t *out_matched);
 
 /* Casts a world-space ray (origin and direction) against the submitted world
  * mesh and writes the nearest surface hit into out_point with its ray distance
@@ -677,9 +816,9 @@ goss_status goss_session_sprite_transform(goss_session *session, const uint8_t *
 
 /* Graph thread. Copies one ml.infer node's whole published output tensor
  * into caller memory, the element count written to out_len. capacity is in
- * floats and must cover the tensor; a short buffer still reports the needed
- * count, so a detection, embedding, or logits read sizes itself in two
- * calls. GOSS_AGAIN before the model's first publish. */
+ * floats; a short buffer reports the needed count and answers GOSS_AGAIN, the
+ * same sizing answer every other op here gives, so a detection, embedding or
+ * logits read sizes itself in two calls. GOSS_AGAIN before the first publish. */
 goss_status goss_session_ml_output(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint32_t tensor, float *out, size_t capacity, size_t *out_len);
 
 /* Graph thread. Copies one ml.infer node's mask-bound output into caller
@@ -827,6 +966,128 @@ goss_status goss_session_submit_source_hardware_buffer(goss_session *session, co
 /* Graph thread. What the engine is doing now: the backend it actually brought
  * up, the bounded pools with their peaks and exhaustion counts, and the heap
  * traffic of the frame just drawn. */
+/* Names the operators a model needs and this build does not implement, one per
+   line. GOSS_AGAIN with out_len set means the buffer was too short. */
+goss_status goss_ml_op_support(const uint8_t *model, size_t model_len, uint8_t *out, size_t capacity, size_t *out_len);
+
+/* One thing the frame says: where it is, how sure the engine is, what found it,
+   and which line and paragraph it belongs to. The string comes through
+   goss_session_text_string, so a caller sizes once. */
+typedef struct goss_text_entry {
+    float quad[8];
+    float confidence;
+    uint32_t origin;
+    uint32_t script;
+    uint32_t direction;
+    uint32_t track_id;
+    uint32_t line;
+    uint32_t paragraph;
+    uint32_t text_len;
+    int64_t first_seen_us;
+    int64_t last_seen_us;
+} goss_text_entry;
+
+/* Turns on the text rail with a caller-supplied detector, and a recogniser and
+   dictionary where the caller has them. A detector alone finds where the text
+   is; the recogniser is what turns it into a string. */
+goss_status goss_session_enable_text(goss_session *session, const uint8_t *detector, size_t detector_len, const uint8_t *recognizer, size_t recognizer_len, const uint8_t *dictionary, size_t dictionary_len, uint32_t detect_side);
+goss_status goss_session_disable_text(goss_session *session);
+goss_status goss_session_text_count(goss_session *session, uint32_t *out_count, uint64_t *out_refused);
+goss_status goss_session_text_at(goss_session *session, uint32_t index, goss_text_entry *out_entry);
+/* GOSS_AGAIN with out_len set means the buffer was too short. */
+goss_status goss_session_text_string(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len);
+
+/* The memory plane. Nothing is remembered until a host opens it, and the bound
+   is the host's, so the memory it was promised is the memory it gets. */
+goss_status goss_session_memory_open(goss_session *session, uint32_t dim, uint32_t max_entries);
+goss_status goss_session_memory_close(goss_session *session);
+/* The same id replaces rather than duplicating. */
+goss_status goss_session_memory_remember(goss_session *session, uint64_t id, const float *embedding, uint32_t dim);
+goss_status goss_session_memory_forget(goss_session *session, uint64_t id);
+goss_status goss_session_memory_search(goss_session *session, const float *query, uint32_t dim, uint32_t k, uint64_t *out_ids, float *out_scores, uint32_t *out_count);
+goss_status goss_session_memory_stats(goss_session *session, uint32_t *out_count, uint64_t *out_bytes);
+/* GOSS_AGAIN with out_len set means the buffer was too short. */
+goss_status goss_session_memory_save(goss_session *session, uint8_t *out, size_t capacity, size_t *out_len);
+goss_status goss_session_memory_load(goss_session *session, const uint8_t *bytes, size_t len);
+
+/* The verbs a scope carries, one bit each. Reading is covered by the snapshot
+ * sections; these are the things that change something or reach a resource.
+ * Appended to, never reordered, so a stored mask keeps its meaning. */
+typedef enum goss_verb {
+    GOSS_VERB_ANNOTATE = 0,         /* draw back into the frame */
+    GOSS_VERB_EGRESS = 1,           /* a frame out of the engine */
+    GOSS_VERB_RECORD = 2,
+    GOSS_VERB_REMEMBER = 3,         /* write the memory plane */
+    GOSS_VERB_SEARCH_MEMORY = 4,
+    GOSS_VERB_OPEN_CLIP = 5,
+    GOSS_VERB_CAPTURE_SCREEN = 6,
+    GOSS_VERB_SUBMIT_FRAME = 7,     /* feed pixels in */
+    GOSS_VERB_SUBMIT_WORLD = 8,     /* planes, anchors, mesh, depth, pose, location */
+    GOSS_VERB_SUBMIT_AUDIO = 9,
+    GOSS_VERB_AUDIO_OUT = 10,       /* mixed audio out, the ear's egress */
+    GOSS_VERB_SEAL_MEMORY = 11,     /* the index as bytes that outlive the process */
+    GOSS_VERB_ACTIVATE_LENS = 12,   /* run author content */
+    GOSS_VERB_LOAD_MODEL = 13,      /* arbitrary compute over the frame */
+    GOSS_VERB_ENABLE_TRACKING = 14,
+    GOSS_VERB_RETOUCH = 15          /* change how the person looks */
+} goss_verb;
+
+/* Reading a code or a fingerprint is deliberately not a verb: every scan op is a
+ * pure function over pixels or samples the caller already holds, so a permission
+ * there would gate nothing. */
+
+/* Narrows what this session will answer. Sections are the snapshot bits, verbs
+   the goss_verb bits. A session opens fully permissive and this only ever
+   narrows: anything running inside the session can call it, so a scope that
+   could widen itself would be advisory. Widening means a new session. A read out
+   of scope is dropped from the record rather than failing the call; a verb out of
+   scope returns GOSS_OUT_OF_SCOPE, which a host can grant, as against
+   GOSS_UNSUPPORTED, which it cannot. */
+goss_status goss_session_set_scope(goss_session *session, uint32_t sections, uint32_t verbs);
+goss_status goss_session_scope(goss_session *session, uint32_t *out_sections, uint32_t *out_verbs);
+
+/* The name of one verb, for a refusal an agent can act on and a permission prompt
+ * a person can read. GOSS_AGAIN with the size when the buffer is short. */
+goss_status goss_scope_verb_name(uint32_t verb, uint8_t *out, size_t capacity, size_t *out_len);
+uint32_t goss_scope_verb_count(void);
+
+/* One thing that can be captured. The scale factor is the field a caller must not
+   ignore: a point sent back without it lands at half its intended place on a
+   retina display. */
+typedef struct goss_screen_surface {
+    uint64_t id;
+    uint32_t kind;
+    float logical_width;
+    float logical_height;
+    float origin_x;
+    float origin_y;
+    float scale;
+    uint32_t title_len;
+} goss_screen_surface;
+
+/* Zero surfaces is the honest answer for a host that has not been granted
+   permission, so a caller prompts rather than reading an error. */
+goss_status goss_engine_screen_count(goss_engine *engine, uint32_t *out_count);
+goss_status goss_engine_screen_at(goss_engine *engine, uint32_t index, goss_screen_surface *out_surface);
+goss_status goss_engine_screen_title(goss_engine *engine, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len);
+/* A scale of zero takes the surface's own. */
+goss_status goss_session_open_screen(goss_session *session, uint64_t surface_id, float scale, uint32_t *out_screen);
+goss_status goss_session_close_screen(goss_session *session, uint32_t screen);
+/* GOSS_AGAIN means the screen has not changed since the last step. */
+goss_status goss_session_step_screen(goss_session *session, uint32_t screen, const uint8_t *name, size_t name_len);
+goss_status goss_session_screen_point(goss_session *session, uint32_t screen, float x, float y, float *out_logical, float *out_pixel, float *out_desktop);
+
+/* The memory sealed under a host key: an index of embeddings is a record of what a
+   camera saw, so a file lifted off the device should be bytes rather than a diary.
+   The nonce is the caller's, because a nonce reused under one key breaks the
+   cipher. GOSS_AGAIN with out_len set means the buffer was too short. */
+goss_status goss_session_memory_save_sealed(goss_session *session, const uint8_t *key, const uint8_t *nonce, uint8_t *out, size_t capacity, size_t *out_len);
+goss_status goss_session_memory_load_sealed(goss_session *session, const uint8_t *key, const uint8_t *bytes, size_t len);
+
+/* Every snapshot section this build writes. A hand-written mask goes stale the
+   moment a section is added, so ask rather than assume. */
+uint32_t goss_perception_select_all(void);
+
 goss_status goss_engine_read_report(goss_engine *engine, goss_engine_report *out_report);
 
 /* Graph thread. This session's counters: frames in and out, the rung and how
@@ -1014,6 +1275,253 @@ goss_status goss_session_set_segmentation_class_mask(goss_session *session, uint
  * shape as goss_session_submit_frame_copy, one interleaved plane instead
  * of NV12's two. */
 goss_status goss_session_submit_frame_rgba_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride);
+
+/* What an opened clip is and where it is, so a host scrubbing a timeline reads it
+ * rather than guessing from a frame count and an authored frame rate. */
+typedef struct goss_clip_info {
+    uint32_t width;
+    uint32_t height;
+    int64_t duration_us;
+    int64_t position_us;  /* presentation time of the frame last submitted */
+    uint32_t ended;       /* 1 once the stream ended and no seek reopened it */
+} goss_clip_info;
+
+/* Graph thread. Opens a clip as a source of frames for this session. The engine
+ * decodes it and the host decides when each frame lands, so the graph is driven by
+ * the clip rather than the clip being decorated onto a camera feed. */
+goss_status goss_session_open_clip(goss_session *session, const uint8_t *path, size_t path_len, uint32_t *out_clip);
+
+/* Graph thread. Decodes the clip's next frame and submits it as this session's
+ * frame, through the same path a camera's bytes take, so the graph cannot tell
+ * where it came from and a session needs no camera at all. Pass 0 for
+ * timestamp_us to carry the clip's own presentation time. GOSS_AGAIN at the end of
+ * the stream, so a host loops by seeking rather than reopening. */
+goss_status goss_session_clip_submit_frame(goss_session *session, uint32_t clip, int64_t timestamp_us);
+
+/* Graph thread. Moves to the keyframe at or before a time. Refused past the end
+ * rather than clamped: a clamped seek returns the wrong frame silently. */
+goss_status goss_session_clip_seek(goss_session *session, uint32_t clip, int64_t target_us);
+
+goss_status goss_session_clip_info(goss_session *session, uint32_t clip, goss_clip_info *out_info);
+goss_status goss_session_close_clip(goss_session *session, uint32_t clip);
+
+/* Graph thread. Moves the clip by whole frames and leaves it on the one it lands
+ * on. Forward is a decode; backward is a seek and a decode, because a
+ * forward-only decoder cannot step back any other way. */
+goss_status goss_session_clip_step(goss_session *session, uint32_t clip, int32_t frames);
+
+/* What this build's media backend declares it encodes, as bit sets over the codec
+ * and container enums, so a host asks rather than assuming from the platform. */
+typedef struct goss_media_capabilities {
+    uint32_t video_codecs;   /* bit per goss_video_codec */
+    uint32_t audio_codecs;   /* bit per goss_audio_codec */
+    uint32_t containers;     /* bit per goss_container */
+    uint32_t max_width;
+    uint32_t max_height;
+    uint32_t max_bit_depth;
+    uint32_t hdr;            /* 1 when a declared profile writes an hdr transfer */
+    uint32_t zero_copy;      /* 1 when the backend takes a platform buffer */
+} goss_media_capabilities;
+
+/* Any thread. */
+goss_status goss_engine_media_capabilities(goss_engine *engine, goss_media_capabilities *out_caps);
+
+/* Which sections a perception snapshot should carry, as bits. An agent polling
+ * every frame usually wants two of the twelve, and writing all of them to be
+ * ignored is the cost this avoids. */
+#define GOSS_PERCEPTION_FRAME (1u << 0)
+#define GOSS_PERCEPTION_FACES (1u << 1)
+#define GOSS_PERCEPTION_HANDS (1u << 2)
+#define GOSS_PERCEPTION_BODIES (1u << 3)
+#define GOSS_PERCEPTION_SEGMENTATION (1u << 4)
+#define GOSS_PERCEPTION_WORLD (1u << 5)
+#define GOSS_PERCEPTION_DEPTH (1u << 6)
+#define GOSS_PERCEPTION_SCENE (1u << 7)
+#define GOSS_PERCEPTION_TEXT (1u << 8)
+#define GOSS_PERCEPTION_AUDIO (1u << 9)
+#define GOSS_PERCEPTION_LENS (1u << 10)
+#define GOSS_PERCEPTION_ENGINE (1u << 11)
+#define GOSS_PERCEPTION_ALL 0xFFFu
+
+/* Any thread. One versioned record of what the engine currently sees, written
+ * into the caller's buffer. Every section carries its own tag, version and byte
+ * length, so a consumer built against an older schema steps over a section it does
+ * not know rather than failing. GOSS_AGAIN with out_len set to the size needed
+ * when the buffer is short, so a caller sizes once rather than guessing. */
+goss_status goss_session_perception_snapshot(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len);
+
+/* Any thread. The same record as compact JSON, for the agent gateways that speak
+ * it. Projected from the binary form rather than written a second time from the
+ * session, so the two cannot drift. A section this build cannot name is reported
+ * with its tag and byte length rather than dropped. */
+goss_status goss_session_perception_json(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len);
+
+/* What happened. Numbers are frozen once shipped: a consumer switches on these. */
+typedef enum goss_event_kind {
+    GOSS_EVENT_FACE_APPEARED = 1,
+    GOSS_EVENT_FACE_LOST = 2,
+    GOSS_EVENT_FACE_COUNT_CHANGED = 3,
+    GOSS_EVENT_HAND_APPEARED = 4,
+    GOSS_EVENT_HAND_LOST = 5,
+    GOSS_EVENT_GESTURE_RECOGNISED = 6,
+    GOSS_EVENT_BODY_APPEARED = 7,
+    GOSS_EVENT_BODY_LOST = 8,
+    GOSS_EVENT_ACTION_RECOGNISED = 9,
+    GOSS_EVENT_TRACKING_STATE_CHANGED = 10,
+    GOSS_EVENT_PLANE_ADDED = 11,
+    GOSS_EVENT_PLANE_UPDATED = 12,
+    GOSS_EVENT_ANCHOR_ADDED = 13,
+    GOSS_EVENT_ANCHOR_LOST = 14,
+    GOSS_EVENT_WORLD_MESH_UPDATED = 15,
+    GOSS_EVENT_DETECTION_APPEARED = 16,
+    GOSS_EVENT_DETECTION_LOST = 17,
+    GOSS_EVENT_LABEL_CHANGED = 18,
+    GOSS_EVENT_TEXT_APPEARED = 19,
+    GOSS_EVENT_TEXT_CHANGED = 20,
+    GOSS_EVENT_SEGMENTATION_CLASS_APPEARED = 21,
+    GOSS_EVENT_AUDIO_BEAT = 22,
+    GOSS_EVENT_VOICE_ACTIVITY_STARTED = 23,
+    GOSS_EVENT_VOICE_ACTIVITY_ENDED = 24,
+    GOSS_EVENT_LENS_ACTIVATED = 25,
+    GOSS_EVENT_LENS_NODE_DEGRADED = 26,
+    GOSS_EVENT_LENS_NODE_FAILED = 27,
+    GOSS_EVENT_PARAMETER_CHANGED = 28,
+    GOSS_EVENT_TRIGGER_FIRED = 29,
+    GOSS_EVENT_DEGRADE_LEVEL_CHANGED = 30,
+    GOSS_EVENT_POOL_EXHAUSTED = 31,
+    GOSS_EVENT_RECORDING_STARTED = 32,
+    GOSS_EVENT_RECORDING_PAUSED = 33,
+    GOSS_EVENT_RECORDING_RESUMED = 34,
+    GOSS_EVENT_RECORDING_STOPPED = 35,
+    GOSS_EVENT_INTERRUPTION = 36,
+    GOSS_EVENT_FRAME_DROPPED = 37,
+    GOSS_EVENT_BUDGET_EXCEEDED = 38,
+    GOSS_EVENT_THERMAL_CHANGED = 39,
+} goss_event_kind;
+
+/* One thing that happened. Plain data and fixed size: an event carrying a pointer
+ * would outlive what it points at. What a and b mean is per kind. */
+typedef struct goss_event {
+    uint32_t kind;
+    uint64_t sequence;   /* monotonic per session, so a gap is visible */
+    int64_t timestamp_us;
+    uint32_t a;
+    uint32_t b;
+    float value;
+} goss_event;
+
+/* Any thread. Drains the session's bounded event ring in order. out_dropped says
+ * whether anything was missed since the last drain and is cleared by the read, so
+ * a consumer sees each drop once rather than the same number for ever. */
+goss_status goss_session_poll_events(goss_session *session, goss_event *out, uint32_t capacity, uint32_t *out_count, uint64_t *out_dropped);
+
+/* When an egress frame is worth sending. Combinable: "every keyframe, plus
+ * anything that changed, plus anything an event touched" is one policy. */
+#define GOSS_EGRESS_ALWAYS (1u << 0)
+#define GOSS_EGRESS_ON_CHANGE (1u << 1)
+#define GOSS_EGRESS_ON_EVENT (1u << 2)
+#define GOSS_EGRESS_ON_INTERVAL (1u << 3)
+#define GOSS_EGRESS_ON_REQUEST (1u << 4)
+
+typedef enum goss_egress_format {
+    GOSS_EGRESS_JPEG = 0, GOSS_EGRESS_PNG = 1, GOSS_EGRESS_WEBP = 2,
+    GOSS_EGRESS_RGBA = 3, GOSS_EGRESS_NV12 = 4,
+} goss_egress_format;
+
+typedef enum goss_egress_source {
+    GOSS_EGRESS_COMPOSITED = 0, GOSS_EGRESS_CAMERA = 1, GOSS_EGRESS_NAMED_SOURCE = 2,
+    GOSS_EGRESS_NAMED_SCREEN = 3, GOSS_EGRESS_SEGMENTATION_MASK = 4, GOSS_EGRESS_DEPTH = 5,
+} goss_egress_source;
+
+/* Why a frame was or was not sent, so a gateway can explain itself. */
+typedef enum goss_egress_reason {
+    GOSS_EGRESS_SENT_ALWAYS = 0, GOSS_EGRESS_SENT_CHANGED = 1, GOSS_EGRESS_SENT_EVENT = 2,
+    GOSS_EGRESS_SENT_INTERVAL = 3, GOSS_EGRESS_SENT_REQUESTED = 4,
+    GOSS_EGRESS_HELD_RATE = 5, GOSS_EGRESS_HELD_BYTES = 6,
+    GOSS_EGRESS_HELD_UNCHANGED = 7, GOSS_EGRESS_HELD_NO_TRIGGER = 8,
+} goss_egress_reason;
+
+typedef struct goss_egress_config {
+    uint32_t target_long_edge;   /* 0 means no scaling */
+    uint32_t format;
+    uint32_t quality;            /* 1..100 for the lossy formats */
+    uint32_t max_fps;            /* 0 means no ceiling */
+    uint64_t max_bytes_per_second;
+    uint32_t source;
+    uint32_t trigger;            /* GOSS_EGRESS_* bits */
+    float change_threshold;      /* 0..1 */
+    int64_t keyframe_interval_us;
+} goss_egress_config;
+
+typedef struct goss_egress_decision {
+    uint32_t send;
+    uint32_t reason;
+    float change_score;
+    int64_t since_last_us;
+    uint64_t sent_total;
+    uint64_t held_total;
+} goss_egress_decision;
+
+/* Graph thread. Installs the policy; a configuration outside its own ranges is
+ * refused rather than producing a stream nobody can explain. */
+goss_status goss_session_egress_configure(goss_session *session, const goss_egress_config *config);
+
+/* Graph thread. The host asking for one frame whatever the change score says. */
+goss_status goss_session_egress_request(goss_session *session);
+
+/* Graph thread. Whether this frame is worth sending, and why. The score is
+ * measured on a luma grid, so a still room costs a grid comparison rather than an
+ * encode. GOSS_AGAIN when there are no pixels to score. */
+goss_status goss_session_egress_decide(goss_session *session, goss_egress_decision *out_decision);
+
+/* What an agent draws back into the frame. */
+typedef enum goss_annotation_kind {
+    GOSS_ANNOTATION_BOX = 1, GOSS_ANNOTATION_LABEL = 2, GOSS_ANNOTATION_POINT = 3,
+    GOSS_ANNOTATION_ARROW = 4, GOSS_ANNOTATION_PATH = 5, GOSS_ANNOTATION_HIGHLIGHT = 6,
+    GOSS_ANNOTATION_MASK_OVERLAY = 7, GOSS_ANNOTATION_IMAGE = 8, GOSS_ANNOTATION_METER = 9,
+} goss_annotation_kind;
+
+/* What an annotation is positioned against. A box in screen space and a box bound
+ * to a face are one annotation with different anchors. */
+typedef enum goss_anchor_space {
+    GOSS_ANCHOR_SCREEN = 0, GOSS_ANCHOR_PIXELS = 1, GOSS_ANCHOR_WORLD = 2,
+    GOSS_ANCHOR_TRACK = 3, GOSS_ANCHOR_FACE_REGION = 4,
+} goss_anchor_space;
+
+/* What happens when the thing an annotation follows goes away. Stated rather than
+ * assumed: a label that outlives its face is the commonest overlay bug. */
+typedef enum goss_on_lost { GOSS_ON_LOST_REMOVE = 0, GOSS_ON_LOST_HOLD = 1, GOSS_ON_LOST_FADE = 2 } goss_on_lost;
+
+typedef enum goss_lifetime_kind {
+    GOSS_LIFETIME_EXPLICIT = 0, GOSS_LIFETIME_FRAMES = 1,
+    GOSS_LIFETIME_DURATION = 2, GOSS_LIFETIME_TRACK = 3,
+} goss_lifetime_kind;
+
+typedef struct goss_annotation {
+    uint32_t id;
+    uint32_t kind;
+    uint32_t space;
+    float rect[4];
+    uint32_t track_id;
+    uint8_t colour[4];
+    int32_t z;
+    float opacity;
+    uint32_t lifetime_kind;
+    int64_t lifetime_value;  /* frame count or microseconds */
+    uint32_t on_lost;
+    float value;
+} goss_annotation;
+
+/* Graph thread. Adds or updates one annotation; the same id replaces rather than
+ * duplicating, so an agent moves one box every frame without leaking an entry per
+ * frame. GOSS_ERROR_POOL_EXHAUSTED when the bounded set is full. */
+goss_status goss_session_annotate(goss_session *session, const goss_annotation *annotation, const uint8_t *text, size_t text_len);
+goss_status goss_session_annotation_remove(goss_session *session, uint32_t id);
+goss_status goss_session_annotation_clear(goss_session *session);
+
+/* Any thread. How many are live, and how many adds the bound turned away, which is
+ * what tells an agent its overlay is losing annotations. */
+goss_status goss_session_annotation_count(goss_session *session, uint32_t *out_count, uint64_t *out_refused);
 
 /* Graph thread. Multi-source composition (Duet, Stitch, live grids). Register a
  * named RGBA source with define_source, feed it with submit_source_frame_rgba_copy,

@@ -95,3 +95,54 @@ though they have already been adopted.
 
 When a third-party dependency is added, removed, or replaced, this notice
 MUST be reviewed and updated in the same change.
+
+### Portable media codecs
+
+Pinned under `third_party/` and fetched by `zig build vendor-sync`. Every one is
+permissively licensed and on the vendor allowlist; none is a runtime dependency of
+a target that has a platform encoder it prefers.
+
+- **libopus** (`third_party/opus`, v1.5.2, BSD-3-Clause, Xiph.Org Foundation and
+  contributors): the one audio codec the engine can own on every target, and the
+  codec WebM requires.
+- **libwebm** (`third_party/libwebm`, 1.0.0.31, BSD-3-Clause, Google Inc.): WebM
+  mux and demux, so the web has a container the engine owns.
+- **libvpx** (`third_party/libvpx`, v1.15.0, BSD-3-Clause, The WebM Project
+  authors): VP8 and VP9, the web's compatibility floor. Opt-in: only a target
+  that needs it pays for the build.
+- **dav1d** (`third_party/dav1d`, 1.5.1, BSD-2-Clause, VideoLAN and dav1d authors)
+  gives AV1 decode. Opt-in.
+- **libaom** (`third_party/aom`, 3.12.0, BSD-2-Clause, Alliance for Open Media):
+  AV1 encode, and decode where dav1d does not win the measured budget. Opt-in.
+- **openh264** (`third_party/openh264`, v2.6.0, BSD-2-Clause, Cisco Systems): the
+  H.264 software fallback where no hardware encoder exists. Opt-in.
+
+**Patent posture, stated rather than assumed.** H.264 and AV1 both sit under
+patent pools whose terms are not granted by the software licenses above. Cisco
+offers a royalty-free path for openh264 only when its own prebuilt binary is
+downloaded at run time, which this project does not do: it builds from source, so
+that offer does not apply and any AVC licensing obligation rests with whoever
+ships a binary built here. openh264 is therefore a fallback of last resort,
+selected only where a target has no hardware H.264 encoder. AV1 is covered by the
+Alliance for Open Media patent license in each project's `PATENTS` file, which
+travels with the source. VP8 and VP9 carry Google's `PATENTS.TXT` grant on the same
+terms. None of these files is modified here.
+
+## Models
+
+Every model is fetched by pinned url and digest from `third_party/models.lock`
+and none is committed. The ONNX rail is proven against real published nets:
+
+- **MobileNetV2** (Apache-2.0, the ONNX model zoo) gives the image classifier,
+  float and int8.
+- **SSD-MobileNetV1** (MIT, the ONNX model zoo) gives the detector, whose graph
+  carries the loops, TopK and non-max suppression a real head needs.
+- **FCN-ResNet50** (MIT, the ONNX model zoo) gives semantic segmentation.
+- **ArcFace ResNet100** (Apache-2.0, the ONNX model zoo) gives the face
+  embedding.
+- **Depth Anything V2 Small** (Apache-2.0, LiheYoung and contributors) gives
+  monocular depth, and is the transformer shape the operator set was widened
+  for.
+- **PP-OCRv4** (Apache-2.0, PaddlePaddle authors) gives text detection and
+  recognition, with the character dictionary it was trained against.
+

@@ -721,11 +721,11 @@ pub fn main(init_args: std.process.Init) !u8 {
         }
         try out.print(
             "abi pose surface: serial {d}, presence {d:.3}, landmarks {d}, timestamp {d}\n",
-            .{ pose_result.frame_serial, pose_result.presence, pose_result.landmark_count_out, pose_result.timestamp_us },
+            .{ pose_result.frame_serial, pose_result.presence, pose_result.landmark_count, pose_result.timestamp_us },
         );
         try out.flush();
         if (pose_result.presence < 0.5) return 1;
-        if (pose_result.landmark_count_out != pose.landmark_count) return 1;
+        if (pose_result.landmark_count != pose.landmark_count) return 1;
         if (pose_result.timestamp_us != 3000) return 1;
     }
 
@@ -774,11 +774,11 @@ pub fn main(init_args: std.process.Init) !u8 {
         }
         try out.print(
             "abi surface: serial {d}, presence {d:.3}, landmarks {d}, timestamp {d}\n",
-            .{ result.frame_serial, result.presence, result.landmark_count_out, result.timestamp_us },
+            .{ result.frame_serial, result.presence, result.landmark_count, result.timestamp_us },
         );
         try out.flush();
         if (result.presence < 0.5) return 1;
-        if (result.landmark_count_out != face.landmark_count) return 1;
+        if (result.landmark_count != face.landmark_count) return 1;
         if (result.timestamp_us != 1000) return 1;
 
         // The head pose through the same public surface: the fit must

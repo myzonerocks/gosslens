@@ -84,5 +84,78 @@
             .sha256 = "ff36e24d40547fe9e645e2f4e8745d1876d6e38b332d39a82f0bf0f5d1d561b3",
             .license = "Apache-2.0",
         },
+    
+        .{
+            .name = "mobilenetv2.onnx",
+            .url = "https://github.com/onnx/models/raw/main/validated/vision/classification/mobilenet/model/mobilenetv2-12.onnx",
+            .sha256 = "c0c3f76d93fa3fd6580652a45618618a220fced18babf65774ed169de0432ad5",
+            .license = "Apache-2.0",
+        },
+        .{
+            .name = "mobilenetv2-int8.onnx",
+            .url = "https://github.com/onnx/models/raw/main/validated/vision/classification/mobilenet/model/mobilenetv2-12-int8.onnx",
+            .sha256 = "cc028fe6cae7bc11a4ff53cfc9b79c920e8be65ce33a904ec3e2a8f66d77f95f",
+            .license = "Apache-2.0",
+        },
+        .{
+            .name = "ssd_mobilenet.onnx",
+            .url = "https://github.com/onnx/models/raw/main/validated/vision/object_detection_segmentation/ssd-mobilenetv1/model/ssd_mobilenet_v1_12.onnx",
+            .sha256 = "b8fba5e404077d4048d27fcd1667e85e27e192eb9bf51e696c46a3acd7d21058",
+            .license = "MIT",
+        },
+        .{
+            .name = "ssd_mobilenet-int8.onnx",
+            .url = "https://github.com/onnx/models/raw/main/validated/vision/object_detection_segmentation/ssd-mobilenetv1/model/ssd_mobilenet_v1_12-int8.onnx",
+            .sha256 = "2b79e6a7fb1ec6a33f332b9b10d82d9de4b7b49dcd26b5946921bb356895c954",
+            .license = "MIT",
+        },
+        .{
+            .name = "fcn_resnet50.onnx",
+            .url = "https://github.com/onnx/models/raw/main/validated/vision/object_detection_segmentation/fcn/model/fcn-resnet50-12.onnx",
+            .sha256 = "eb5017d1b80372eb0b58552655274698817ba2e774437e2c2d3c0a613d2e99bd",
+            .license = "MIT",
+        },
+        .{
+            .name = "fcn_resnet50-int8.onnx",
+            .url = "https://github.com/onnx/models/raw/main/validated/vision/object_detection_segmentation/fcn/model/fcn-resnet50-12-int8.onnx",
+            .sha256 = "67fcba8ebd435c2fb6b297d2e7c084f3c3b9ae6bc7ae41453b748ae4ed8c0331",
+            .license = "MIT",
+        },
+        .{
+            .name = "arcface-int8.onnx",
+            .url = "https://github.com/onnx/models/raw/main/validated/vision/body_analysis/arcface/model/arcfaceresnet100-11-int8.onnx",
+            .sha256 = "c625ca68a422418c48aa84f73341337e0a92b111f327909005d1eec07c95f936",
+            .license = "Apache-2.0",
+        },
+        .{
+            .name = "depth_anything_v2_small.onnx",
+            .url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model.onnx",
+            .sha256 = "afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d51603e57b0a1df10c",
+            .license = "Apache-2.0",
+        },
+        .{
+            .name = "depth_anything_v2_small-int8.onnx",
+            .url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_quantized.onnx",
+            .sha256 = "fcf51f1b230362b28690bb9d1809bf0431f29cad20534e3f589bd7285547f20d",
+            .license = "Apache-2.0",
+        },
+        .{
+            .name = "text_det.onnx",
+            .url = "https://huggingface.co/webnn/PP-OCRv4-ONNX/resolve/main/ch_PP-OCRv4_det.onnx",
+            .sha256 = "30a86f5731181461d08021402766601e4302a9b9b9666be8aff402696339cdff",
+            .license = "Apache-2.0",
+        },
+        .{
+            .name = "text_rec.onnx",
+            .url = "https://huggingface.co/webnn/PP-OCRv4-ONNX/resolve/main/ch_PP-OCRv4_rec.onnx",
+            .sha256 = "06b3e6af6c59a1ba5d53790ed8c2e4b2de389870b6cf5a97f349f3412cb269c0",
+            .license = "Apache-2.0",
+        },
+        .{
+            .name = "text_keys.txt",
+            .url = "https://huggingface.co/webnn/PP-OCRv4-ONNX/resolve/main/ch_PP-OCR_keys_v1.txt",
+            .sha256 = "28b2362ad4ab2dc38769aa72feb535e3a9ddb3fd2a7585a05920e6393b1dc7f7",
+            .license = "Apache-2.0",
+        },
     },
 }

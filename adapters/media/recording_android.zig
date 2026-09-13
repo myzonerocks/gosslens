@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const pcm = @import("pcm.zig");
+const media = @import("media");
 
 const c = @import("c");
 
@@ -12,16 +13,27 @@ const c = @import("c");
 /// platform window the renderer presents into.
 pub const NativeHandleKind = enum { texture, window };
 pub const native_handle_kind: NativeHandleKind = .window;
-/// Whether this backend muxes a submitted audio track.
-pub const audio_supported = true;
 
-/// Whether a real backend exists on this target.
-pub const supported = true;
-
-pub const Codec = enum(u32) {
-    h264 = 0,
-    hevc = 1,
+/// What this backend does, from what it configures: AMediaCodec over an input
+/// surface writing h264 or hevc, AAC for audio, AMediaMuxer writing MP4. The
+/// API 29 floor is what bounds it: hevc is required from 29 but ten-bit hdr is
+/// not, so this declares eight bits and no hdr rather than assuming a device.
+pub const backend: media.Backend = .{
+    .name = "amediacodec",
+    .video = &.{
+        .{ .codec = .h264, .max_width = 3840, .max_height = 2160 },
+        .{ .codec = .hevc, .max_width = 3840, .max_height = 2160 },
+    },
+    .audio = &.{.aac},
+    .containers = &.{.mp4},
+    .zero_copy = true,
+    .rank = 10,
 };
+
+pub const supported = backend.video.len > 0;
+pub const audio_supported = backend.audio.len > 0;
+
+pub const Codec = media.VideoCodec;
 
 pub const Config = struct {
     width: u32,

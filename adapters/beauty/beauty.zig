@@ -110,7 +110,7 @@ pub fn set(beauty: *Beauty, effect: Effect, value: f32) void {
 /// transform here - mirror first, then quarter turns, like the blit.
 fn contourFromResult(result: ?*const face.Result, width: u32, height: u32, rotation_quarter_turns: u32, mirror: bool, contour: *[face106.point_count * 2]f32) ?[*]const f32 {
     const tracked = result orelse return null;
-    if (tracked.landmark_count_out != face.landmark_count or tracked.presence < 0.5) return null;
+    if (tracked.landmark_count != face.landmark_count or tracked.presence < 0.5) return null;
     var landmarks: [face.landmark_count]face.Landmark = undefined;
     for (&landmarks, 0..) |*landmark, at| {
         landmark.* = .{

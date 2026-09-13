@@ -5,6 +5,11 @@
 
 const std = @import("std");
 const ml_engine = @import("ml_engine");
+
+/// The model rail itself, re-exported so a caller doing its own sampling drives
+/// the same engine this file wraps rather than importing ml_engine again, which
+/// would put two modules over one file in the same compile.
+pub const Engine = ml_engine.Engine;
 const ml_sample = @import("ml_sample");
 const sampler = @import("sampler");
 const ml_tensor = @import("ml_tensor");
@@ -119,6 +124,10 @@ pub const Core = struct {
     output_count: u32,
     outputs: [max_outputs][]f32,
     published: bool = false,
+    /// The model's frame buffer and its growths, snapshotted at publish so a
+    /// reader takes them under the lock that already guards the outputs.
+    plan_bytes: usize = 0,
+    plan_growths: u32 = 0,
 
     /// Loads the model under the sandbox bounds. Rejects a model whose input is
     /// not one square RGB image (NHWC or NCHW), whose output count is outside
@@ -142,6 +151,23 @@ pub const Core = struct {
         if (in_count < 1 or in_count > 2) return error.InvalidModel;
         if (out_count == 0 or out_count > max_outputs) return error.InvalidModel;
 
+        // A model with symbolic spatial dims declares no size of its own. The
+        // manifest's input_width is what says which size to run it at, and it
+        // was parsed and thrown away until now.
+        if (bounds.requested_input_side > 0 and engine.inputNeedsShape(0)) {
+            // The declared layout decides where the side goes. A detector
+            // exported from TensorFlow is NHWC, and resizing it as NCHW hands
+            // every kernel a shape its weights do not match.
+            var declared_buf: [8]i32 = undefined;
+            const declared = engine.inputDims(0, &declared_buf) catch return error.InvalidModel;
+            const side: i64 = bounds.requested_input_side;
+            const nhwc = declared.len == 4 and declared[3] == 3;
+            if (nhwc) {
+                engine.resizeInput(0, &[_]i64{ 1, side, side, 3 }) catch return error.InvalidModel;
+            } else {
+                engine.resizeInput(0, &[_]i64{ 1, 3, side, side }) catch return error.InvalidModel;
+            }
+        }
         var in_dims_buf: [8]i32 = undefined;
         const in_dims = engine.inputDims(0, &in_dims_buf) catch return error.InvalidModel;
         const in_sq = ml_sample.detectSquareRgb(in_dims) orelse return error.InvalidModel;
@@ -245,7 +271,11 @@ pub const Core = struct {
     /// leaving the result in the engine for publish(). Reuses the input plane,
     /// so a compute allocates nothing.
     pub fn compute(core: *Core, frame: sampler.Frame) bool {
-        const range: sampler.Range = if (core.norm.symmetric) .symmetric else .unit;
+        const range: sampler.Range = switch (core.norm.range) {
+            .unit => .unit,
+            .symmetric => .symmetric,
+            .byte => .byte,
+        };
         ml_sample.writeFrameNormalized(&core.engine, 0, core.in_sq, frame, core.input_tensor, core.nchw_scratch, range, core.norm.mean, core.norm.std_dev) catch return false;
         if (core.aux_sq) |sq| {
             if (core.temporal) {
@@ -274,6 +304,8 @@ pub const Core = struct {
             const dst = core.outputs[i];
             if (src.len == dst.len) @memcpy(dst, src);
         }
+        core.plan_bytes = core.engine.planBytes();
+        core.plan_growths = core.engine.planGrowths();
         core.published = true;
     }
 
@@ -294,6 +326,26 @@ pub const Core = struct {
     pub fn outputLen(core: *const Core, tensor: u32) usize {
         if (tensor >= core.output_count) return 0;
         return core.outputs[tensor].len;
+    }
+
+    /// Whether an output is one vector rather than a feature map: a shape the
+    /// model declares as [N] or [1, N]. An embedding is exactly that, and this
+    /// is what tells it apart from a mask a caller must not index as one.
+    pub fn outputIsVector(core: *const Core, tensor: u32) bool {
+        if (tensor >= core.output_count) return false;
+        var dims_buf: [8]i32 = undefined;
+        const dims = core.engine.outputDims(tensor, &dims_buf) catch return false;
+        var non_unit: usize = 0;
+        for (dims) |d| {
+            if (d > 1) non_unit += 1;
+        }
+        return non_unit == 1 and core.outputs[tensor].len > 1;
+    }
+
+    /// The published values of an output tensor, empty until the first publish.
+    pub fn outputSlice(core: *const Core, tensor: u32) []const f32 {
+        if (!core.published or tensor >= core.output_count) return &.{};
+        return core.outputs[tensor];
     }
 
     /// Whether the model's image tensors are channel-first (NCHW). A style
@@ -344,6 +396,10 @@ pub const AudioCore = struct {
     output_count: u32,
     outputs: [max_outputs][]f32,
     published: bool = false,
+    /// The model's frame buffer and its growths, snapshotted at publish so a
+    /// reader takes them under the lock that already guards the outputs.
+    plan_bytes: usize = 0,
+    plan_growths: u32 = 0,
 
     /// The largest window a bounded audio model may take, so a hostile shape
     /// never allocates an unbounded buffer.
@@ -427,6 +483,8 @@ pub const AudioCore = struct {
             const m = @min(floats.len, self.outputs[i].len);
             @memcpy(self.outputs[i][0..m], floats[0..m]);
         }
+        self.plan_bytes = self.engine.planBytes();
+        self.plan_growths = self.engine.planGrowths();
         self.published = true;
         return true;
     }
@@ -567,6 +625,10 @@ pub const TemporalCore = struct {
     phase: f32 = 0.5,
     style_out: []f32,
     published: bool = false,
+    /// The model's frame buffer and its growths, snapshotted at publish so a
+    /// reader takes them under the lock that already guards the outputs.
+    plan_bytes: usize = 0,
+    plan_growths: u32 = 0,
 
     pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, frames_req: u32) CreateError!*TemporalCore {
         if (frames_req < 2 or frames_req > 8) return error.InvalidModel;
@@ -707,6 +769,8 @@ pub const TemporalCore = struct {
     pub fn publish(core: *TemporalCore) void {
         const src = core.engine.outputFloats(0) catch return;
         if (src.len == core.style_out.len) @memcpy(core.style_out, src);
+        core.plan_bytes = core.engine.planBytes();
+        core.plan_growths = core.engine.planGrowths();
         core.published = true;
     }
 
@@ -724,3 +788,9 @@ pub const TemporalCore = struct {
         return core.in_sq.layout == .nchw;
     }
 };
+
+/// Names the operators a model needs that the engine does not implement, which
+/// is what turns "unsupported" into a precise list a caller can act on.
+pub fn missingOps(gpa: std.mem.Allocator, model_bytes: []const u8, out: []u8) usize {
+    return ml_engine.missingOps(gpa, model_bytes, out);
+}

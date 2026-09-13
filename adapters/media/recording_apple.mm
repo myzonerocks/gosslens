@@ -4,6 +4,7 @@
 // interop shape). C surface only; no vendor type escapes.
 
 #import <AVFoundation/AVFoundation.h>
+#include <stdio.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Metal/Metal.h>
@@ -217,6 +218,8 @@ int32_t recording_commit_frame_impl(void* handle, void* frame_token, int64_t tim
     int spins = 0;
     while (!r->input.readyForMoreMediaData) {
       if (++spins > 10'000) {
+        fprintf(stderr, "gosslens: recording append gave up waiting for the writer at %lldus\n",
+                (long long)timestamp_us);
         r->failed = true;
         recycleFrame(r, frame);
         return -1;
@@ -226,6 +229,10 @@ int32_t recording_commit_frame_impl(void* handle, void* frame_token, int64_t tim
     const BOOL appended = [r->adaptor appendPixelBuffer:frame->pixel_buffer withPresentationTime:time];
     recycleFrame(r, frame);
     if (!appended) {
+      // The flag alone surfaced at stop as one status with no site and no reason.
+      fprintf(stderr, "gosslens: recording append refused at %lldus (first %lldus), writer status=%ld error=%s\n",
+              (long long)timestamp_us, (long long)r->first_timestamp_us, (long)r->writer.status,
+              r->writer.error ? r->writer.error.localizedDescription.UTF8String : "none");
       r->failed = true;
       return -1;
     }
@@ -304,6 +311,10 @@ int32_t recording_finish_impl(void* handle) {
   int32_t status = 0;
   @autoreleasepool {
     if (r->failed || r->writer.status != AVAssetWriterStatusWriting) {
+      // Three different faults answered one -1, which cost two runs to tell apart.
+      fprintf(stderr, "gosslens: recording finish refused, failed=%d writer status=%ld error=%s\n",
+              (int)r->failed, (long)r->writer.status,
+              r->writer.error ? r->writer.error.localizedDescription.UTF8String : "none");
       [r->writer cancelWriting];
       status = -1;
     } else {
@@ -314,7 +325,12 @@ int32_t recording_finish_impl(void* handle) {
         dispatch_semaphore_signal(done);
       }];
       dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
-      if (r->writer.status != AVAssetWriterStatusCompleted) status = -1;
+      if (r->writer.status != AVAssetWriterStatusCompleted) {
+        fprintf(stderr, "gosslens: recording did not complete, writer status=%ld error=%s\n",
+                (long)r->writer.status,
+                r->writer.error ? r->writer.error.localizedDescription.UTF8String : "none");
+        status = -1;
+      }
     }
     if (r->metal_cache) CFRelease(r->metal_cache);
     if (r->audio_format) CFRelease(r->audio_format);

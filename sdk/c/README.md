@@ -48,20 +48,25 @@ cc app.c \
     -o app
 ```
 
-`goss_abi_version` is the first call to make; a mismatch in its high 16 bits
-against `GOSS_ABI_MAJOR` means the header and the library are different major
+`goss_abi_check(GOSS_ABI_VERSION)` is the first call to make: the engine compares
+the major you compiled against and answers `GOSS_STATUS_ABI_MISMATCH` when the
+header and the library are different major
 versions and the program must refuse to run. An engine and its sessions stay on
 the thread that created them, except for the few functions the header marks
 any-thread.
 
 ## What the host library carries
 
-The library `c` stages is the host build, and it does not bring up a GPU
-renderer or the in-engine inference stack. `goss_engine_init_renderer` reports
+The library `c` stages is the host build. It brings up no GPU renderer, and of the
+inference stack it carries the pure-Zig ONNX engine and not the vendored TensorFlow
+Lite runtime, which is what the landmarkers and segmenters are built against. `goss_engine_init_renderer` reports
 `GOSS_ERROR_RENDERER_UNAVAILABLE`, so the calls that need a surface - frame
 submission, `goss_engine_render_frame`, and the capture paths - report the same;
-`goss_session_enable_face_tracking` and the other in-engine workers report
-`GOSS_ERROR_UNSUPPORTED`, and beauty reports it too. `goss_capabilities()`
+`goss_session_enable_face_tracking` reports `GOSS_ERROR_UNSUPPORTED`, because the
+landmarkers are TensorFlow Lite bundles and this build vendors no TFLite, and beauty
+reports it too. The bring-your-own model rail is a different matter: it runs here,
+over the pure-Zig ONNX engine, so an `.onnx` model loads and infers and only a
+`.tflite` one leaves its node inert. `goss_capabilities()`
 reports which rails a given library compiled real as `GOSS_CAP_*` bits, so a
 consumer can tell this host build from a full one before feeding it bytes. The render backend and the
 inference runtime link in through the platform builds, `zig build ios`,
@@ -72,7 +77,10 @@ surface: engine and session lifecycle, the lens runtime (activation and ticking
 against triggers), camera-control and recording-policy intent read back, the
 app-tracked multi-face and multi-body paths, the brush, the named-geofence and
 geofence signal, the model-digest allowlist, the multi-source composition state,
-the degradation policy, and the pure helpers. That is enough to link the library and
+the degradation policy, the spatial questions over a submitted room (the floor, where
+a footprint fits, a distance with its uncertainty, a route across a submitted mesh,
+and the transform between two devices' origins), the scope that governs all of it, an
+ONNX model through `ml.infer`, and the pure helpers including the PNG decode. That is enough to link the library and
 exercise the ABI from C without a window, which is what the example does.
 
 ## Example

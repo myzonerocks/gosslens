@@ -278,7 +278,13 @@ jobs:
             git push origin ":refs/tags/${RELEASE_TAG}" 2>/dev/null || true
             target=(--target "${GITHUB_SHA}")
           fi
-          notes="SwiftPM binaryTarget checksum: $(cat dist/apple/GosslensKit.checksum.txt)"
+          # The release notes are the changelog's Unreleased section, moved under
+          # this tag, so a reader of the release and a reader of main see the same
+          # words. The checksum a SwiftPM consumer needs follows them.
+          notes="$(./tools/changelog-cut.sh "${RELEASE_TAG}")"
+          notes="${notes}
+
+SwiftPM binaryTarget checksum: $(cat dist/apple/GosslensKit.checksum.txt)"
           assets=(dist/android/gosslens-android-jniLibs.zip dist/apple/GosslensKit.xcframework.zip dist/web/*.tgz)
           [ -f dist/web/gosslens-web-engine.zip ] && assets+=(dist/web/gosslens-web-engine.zip)
           # A version with a pre-release label is a pre-release on GitHub too.
@@ -358,8 +364,8 @@ jobs:
           # The install docs carry a real version a reader can paste; stamp it
           # here so it names this release rather than drifting behind it.
           tools/stamp-doc-versions.sh "${RELEASE_TAG}"
-          git diff --quiet Package.swift README.md sdk/swift/README.md sdk/kotlin/README.md && { echo "main already current"; exit 0; }
-          git add Package.swift README.md sdk/swift/README.md sdk/kotlin/README.md
+          git diff --quiet Package.swift README.md CHANGELOG.md sdk/swift/README.md sdk/kotlin/README.md && { echo "main already current"; exit 0; }
+          git add Package.swift README.md CHANGELOG.md sdk/swift/README.md sdk/kotlin/README.md
           git commit -m "release ${RELEASE_TAG}: pin the swift xcframework and stamp the install docs"
           # The branch rule declines a direct push even with the PAT, so fall
           # back to a branch and a pull request rather than dropping the pin.

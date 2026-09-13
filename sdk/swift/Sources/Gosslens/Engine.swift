@@ -23,6 +23,10 @@ public final class GossEngine: @unchecked Sendable {
     var liveRowScratch: [UInt8] = []
 
     public static func create(config: GossEngineConfig = GossEngineConfig()) throws -> GossEngine {
+        // The engine refuses a caller from another major, asked rather than
+        // remembered: a comment telling the caller to compare the version was the
+        // whole check, and nothing made it happen.
+        try checked(goss_abi_check(UInt32(GOSS_ABI_VERSION)))
         var raw = goss_engine_config(
             texture_pool_capacity: config.texturePoolCapacity,
             staging_pool_capacity: config.stagingPoolCapacity

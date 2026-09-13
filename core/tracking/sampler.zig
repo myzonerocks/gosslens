@@ -53,6 +53,10 @@ pub const Range = struct {
     pub const unit: Range = .{ .gain = 1.0, .bias = 0.0 };
     /// Minus one to one, the detector's input range.
     pub const symmetric: Range = .{ .gain = 2.0, .bias = -1.0 };
+    /// Zero to two hundred and fifty five, which is what a detector exported from
+    /// TensorFlow with a float placeholder wants. Without it such a model runs and
+    /// returns nothing, which reads as working.
+    pub const byte: Range = .{ .gain = 255.0, .bias = 0.0 };
 };
 
 /// The whole frame, centered and letterboxed to its longer side - every

@@ -11,9 +11,12 @@ const core_mod = @import("ml_infer_core");
 
 pub const supported = core_mod.supported;
 pub const Norm = ml_tensor.Norm;
+pub const Bounds = ml_tensor.Bounds;
+pub const Engine = core_mod.Engine;
 pub const CreateError = core_mod.CreateError;
 pub const Core = core_mod.Core;
 pub const max_outputs = core_mod.max_outputs;
+pub const missingOps = core_mod.missingOps;
 
 pub const AudioInfer = core_mod.AudioCore;
 
@@ -134,6 +137,16 @@ pub fn outputLen(ml: *MlInfer, tensor: u32) usize {
     return ml.core.outputLen(tensor);
 }
 
+/// The plan the model reuses, read straight off the core: this seam runs the
+/// inference on the calling thread, so there is no publish to take it under.
+pub fn planBytes(ml: *MlInfer) usize {
+    return ml.core.plan_bytes;
+}
+
+pub fn planGrowths(ml: *MlInfer) u32 {
+    return ml.core.plan_growths;
+}
+
 pub fn argmaxOutput(ml: *MlInfer, tensor: u32) u32 {
     return ml.core.argmaxOutput(tensor);
 }
@@ -144,6 +157,14 @@ pub fn layoutIsNchw(ml: *MlInfer) bool {
 
 pub fn copyOutput(ml: *MlInfer, tensor: u32, dst: []f32) bool {
     return ml.core.copyOutput(tensor, dst);
+}
+
+pub fn copyEmbedding(ml: *MlInfer, tensor: u32, dst: []f32) usize {
+    if (!ml.core.outputIsVector(tensor)) return 0;
+    const src = ml.core.outputSlice(tensor);
+    const n = @min(src.len, dst.len);
+    @memcpy(dst[0..n], src[0..n]);
+    return n;
 }
 
 pub fn outputCount(ml: *MlInfer) u32 {
@@ -199,6 +220,14 @@ pub fn temporalStyleLen(ti: *const TemporalInfer) usize {
 
 pub fn temporalFilled(ti: *const TemporalInfer) u32 {
     return ti.core.filled;
+}
+
+pub fn temporalPlanBytes(ti: *TemporalInfer) usize {
+    return ti.core.plan_bytes;
+}
+
+pub fn temporalPlanGrowths(ti: *TemporalInfer) u32 {
+    return ti.core.plan_growths;
 }
 
 pub fn temporalLayoutIsNchw(ti: *const TemporalInfer) bool {

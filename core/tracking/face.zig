@@ -58,7 +58,7 @@ pub const Result = extern struct {
     frame_serial: u64,
     timestamp_us: i64,
     presence: f32,
-    landmark_count_out: u32,
+    landmark_count: u32,
     landmarks: [landmark_count * 3]f32,
     blendshapes: [blendshape_count]f32,
 };

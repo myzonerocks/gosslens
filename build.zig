@@ -64,12 +64,67 @@ pub fn build(b: *std.Build) void {
 
     // The SDKs compile. Three of them did not, each for a different reason, and
     // nothing in any gate would have said so: only running a compiler does.
-    const sdk_check_step = b.step("sdk-check", "Typecheck the Swift SDK and compile the Kotlin SDK where the toolchains exist");
+    {
+        const probe = b.addExecutable(.{
+            .name = "model-probe",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/model_probe.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+            }),
+        });
+        probe.root_module.addImport("onnx", onnxModule(b, target, .ReleaseFast));
+        // A decoder, so the probe runs a model on a real picture rather than the blank
+        // frame an unwritten input tensor holds: a detector finds nothing in a blank
+        // frame, which says nothing about whether it works. stb reads the corpus jpegs
+        // as well as png.
+        probe.root_module.addCSourceFile(.{
+            .file = b.path("harness/stb_image_impl.c"),
+            .flags = &.{ "-std=c99", "-fno-sanitize=undefined", "-w" },
+        });
+        probe.root_module.addIncludePath(b.path(".vendor/gpupixel/third_party/stb/include/stb"));
+        attachC(b, probe.root_module, "stb", "harness/stb_c.h");
+        const run_probe = b.addRunArtifact(probe);
+        run_probe.setCwd(b.path("."));
+        if (b.args) |args| run_probe.addArgs(args);
+        b.step("model-probe", "Load a real model and print what it needs, costs and keeps").dependOn(&run_probe.step);
+    }
+
+    {
+        // The snapshot schema gate, in the ABI gate's shape: a field cannot be
+        // reordered or dropped inside a major without a diff somebody reads.
+        const schema_dump = b.addExecutable(.{
+            .name = "schema_dump",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/schema_dump.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        schema_dump.root_module.addImport("perception", perceptionModule(b, target, optimize));
+
+        const check = b.addRunArtifact(schema_dump);
+        check.setCwd(b.path("."));
+        check.addArgs(&.{ "--check", "tools/snapshot-baseline.txt" });
+        b.step("schema-check", "Check the snapshot schema against its baseline").dependOn(&check.step);
+        ci_step.dependOn(&check.step);
+
+        const update = b.addRunArtifact(schema_dump);
+        update.setCwd(b.path("."));
+        update.addArgs(&.{ "--update", "tools/snapshot-baseline.txt" });
+        b.step("schema-update", "Rewrite the snapshot schema baseline").dependOn(&update.step);
+    }
+
+    const sdk_check_step = b.step("sdk-check", "Typecheck every SDK where its toolchain exists");
     if (swiftTypecheckCommand(b)) |cmd| {
         sdk_check_step.dependOn(&cmd.step);
         ci_step.dependOn(&cmd.step);
     }
     if (kotlinCompileCommand(b)) |cmd| {
+        sdk_check_step.dependOn(&cmd.step);
+        ci_step.dependOn(&cmd.step);
+    }
+    if (typescriptTypecheckCommand(b)) |cmd| {
         sdk_check_step.dependOn(&cmd.step);
         ci_step.dependOn(&cmd.step);
     }
@@ -105,24 +160,6 @@ pub fn build(b: *std.Build) void {
 
     const material_module = b.createModule(.{
         .root_source_file = b.path("core/material/graph.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const particles_module = b.createModule(.{
-        .root_source_file = b.path("core/particles/particles.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const navmesh_module = b.createModule(.{
-        .root_source_file = b.path("core/nav/navmesh.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const sph_module = b.createModule(.{
-        .root_source_file = b.path("core/particles/sph.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -177,6 +214,13 @@ pub fn build(b: *std.Build) void {
         .{ .custom = "c/include" },
         "gosslens.h",
     ).step);
+
+    // Below the staging it depends on, because the step needs that handle.
+    {
+        const cmd = cDemoCommand(b, c_step);
+        sdk_check_step.dependOn(&cmd.step);
+        ci_step.dependOn(&cmd.step);
+    }
 
     const abi_dump_module = b.createModule(.{
         .root_source_file = b.path("tools/abi_dump.zig"),
@@ -270,11 +314,6 @@ pub fn build(b: *std.Build) void {
         ci_step.dependOn(&models_check.step);
     }
 
-    const blob_module = b.createModule(.{
-        .root_source_file = b.path("adapters/bgfx/blob.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
     const tracking_cores = trackingCoreModules(b, target, optimize, math_module);
     const bundle_module = tracking_cores.bundle;
     const detector_module = tracking_cores.detector;
@@ -304,7 +343,15 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("gif", gifModule(b, target, optimize));
     abi_module.addImport("jpeg", jpegModule(b, target, optimize));
     abi_module.addImport("color", colorModule(b, target, optimize));
-    abi_module.addImport("media_recording", recordingModule(b, target, optimize));
+    abi_module.addImport("media_recording", recordingModule(b, target, optimize, math_module));
+    abi_module.addImport("media", mediaCoreModule(b, target, optimize, math_module));
+    abi_module.addImport("perception", perceptionModule(b, target, optimize));
+    abi_module.addImport("spatial", spatialModule(b, target, optimize, math_module));
+    abi_module.addImport("navmesh", navmeshModule(b, target, optimize));
+    abi_module.addImport("text", textModule(b, target, optimize));
+    abi_module.addImport("memory", memoryModule(b, target, optimize));
+    abi_module.addImport("screen", screenModule(b, target, optimize));
+    abi_module.addImport("screen_capture", screenCaptureModule(b, target, optimize));
     abi_module.addImport("media_video", mediaVideoModule(b, target, optimize, null));
     abi_module.addImport("photo", photoModule(b, target, optimize, null));
     abi_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
@@ -344,8 +391,14 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, pose_core_module, math_module));
     abi_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
     const stub_ml_tensor_host = mlTensorModule(b, target, optimize);
-    abi_module.addImport("ml_infer", mlInferStubModule(b, target, optimize, math_module, stub_ml_tensor_host));
-    abi_module.addImport("diffusion", diffusionStubModule(b, target, optimize, math_module, stub_ml_tensor_host));
+    {
+        // The onnx rail, not a refusal: this library carries no vendored C++ and
+        // the onnx engine needs none, so a model still runs and the text rail with it.
+        const host_ml_infer = mlInferOnnxModule(b, target, optimize, math_module, stub_ml_tensor_host, tracking_cores.sampler);
+        abi_module.addImport("ml_infer", host_ml_infer);
+        abi_module.addImport("text_infer", textInferModule(b, target, optimize, host_ml_infer));
+    }
+    abi_module.addImport("diffusion", diffusionOnnxModule(b, target, optimize, math_module, stub_ml_tensor_host, tracking_cores.sampler));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
     abi_module.addImport("face106", face106_module);
 
@@ -437,6 +490,51 @@ pub fn build(b: *std.Build) void {
         lens_package_reference_step.dependOn(&run.step);
     }
 
+    // Every packaged lens zipped and each archive checked the way a client checks
+    // it. No probe for the archiver: a step that skips itself when a tool is
+    // missing is a gate that quietly does nothing.
+    const lens_zip_step = b.step("lens-zip", "Zip every packaged reference lens and verify each archive against its sidecar");
+    for (listReferenceLenses(b)) |lens_dir| {
+        const name = std.fs.path.basename(lens_dir);
+        const run = b.addSystemCommand(&.{ "/bin/sh", "tools/lens-zip.sh" });
+        run.setCwd(b.path("."));
+        run.addArg(b.fmt(".lens-packages/{s}", .{name}));
+        run.addArg("zig-out/lens-zips");
+        run.setName(b.fmt("lens-zip {s}", .{name}));
+        run.step.dependOn(lens_package_reference_step);
+        lens_zip_step.dependOn(&run.step);
+    }
+    ci_step.dependOn(lens_zip_step);
+
+    const media_core_tests = b.addTest(.{ .root_module = mediaCoreModule(b, target, optimize, math_module) });
+    const text_core_tests = b.addTest(.{ .root_module = textModule(b, target, optimize) });
+    const screen_core_tests = b.addTest(.{ .root_module = screenModule(b, target, optimize) });
+    const screen_capture_tests = b.addTest(.{ .root_module = screenCaptureModule(b, target, optimize) });
+    const memory_core_tests = b.addTest(.{ .root_module = memoryModule(b, target, optimize) });
+    const spatial_core_tests = b.addTest(.{ .root_module = spatialModule(b, target, optimize, math_module) });
+    // The determinism gate: the same input stream must produce the same records.
+    const determinism_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("harness/determinism.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+
+    // The media harness: the checks that belong to the contracts rather than to a
+    // rendered frame, so they need no window and no gpu. What needs a real
+    // composite stays in conformance beside the other rendered proofs.
+    const media_harness = b.addExecutable(.{
+        .name = "gosslens-media-harness",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("harness/media.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "media", .module = mediaCoreModule(b, target, optimize, math_module) }},
+        }),
+    });
+    const media_harness_step = b.step("media-harness", "Run the media contract harness");
+    const run_media_harness = b.addRunArtifact(media_harness);
+    media_harness_step.dependOn(&run_media_harness.step);
+    ci_step.dependOn(&run_media_harness.step);
     const quiet_tests = b.addTest(.{ .root_module = quietModule(b, target, optimize) });
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const api_check_tests = b.addTest(.{ .root_module = api_check_module });
@@ -458,11 +556,10 @@ pub fn build(b: *std.Build) void {
     const tracker_tests = b.addTest(.{ .root_module = tracker_module });
     const face106_tests = b.addTest(.{ .root_module = face106_module });
     const segment_tests = b.addTest(.{ .root_module = segment_module });
-    const blob_tests = b.addTest(.{ .root_module = blob_module });
+    const blob_tests = b.addTest(.{ .root_module = blobModule(b, target, optimize) });
     const math_tests = b.addTest(.{ .root_module = math_module });
     const material_tests = b.addTest(.{ .root_module = material_module });
-    const fit_module = b.createModule(.{ .root_source_file = b.path("core/math/fit.zig"), .target = target, .optimize = optimize });
-    const fit_tests = b.addTest(.{ .root_module = fit_module });
+    const fit_tests = b.addTest(.{ .root_module = fitModule(b, target, optimize) });
     const png_tests = b.addTest(.{ .root_module = pngModule(b, target, optimize) });
     const gif_tests = b.addTest(.{ .root_module = gifModule(b, target, optimize) });
     const jpeg_tests = b.addTest(.{ .root_module = jpegModule(b, target, optimize) });
@@ -502,6 +599,101 @@ pub fn build(b: *std.Build) void {
     const lens_runtime_tests = b.addTest(.{ .root_module = lens_runtime_module });
     const test_step = b.step("test", "Run all tests");
     ci_step.dependOn(test_step);
+    test_step.dependOn(&b.addRunArtifact(media_core_tests).step);
+    test_step.dependOn(&b.addRunArtifact(text_core_tests).step);
+    test_step.dependOn(&b.addRunArtifact(screen_core_tests).step);
+    // The desktop backends carry real logic a host can check without that host's
+    // display: a channel placed by the server's mask, a pod built to the byte, a
+    // frame copied at the producer's own stride, a file URI turned into a path.
+    // They run on every host, and the capture itself waits on a Linux machine.
+    const desktop_capture_tests = [_][]const u8{
+        "adapters/screen/screen_capture_x11.zig",
+        "adapters/screen/screen_capture_windows.zig",
+        "adapters/screen/wayland_dbus.zig",
+        "adapters/screen/wayland_pipewire.zig",
+    };
+    // The host tests above compile these for the host. Nothing compiled them for the
+    // target they ship to, so the Linux dispatcher was built by no step at all and a
+    // break in it would have reached a Linux machine before anything here noticed.
+    const desktop_cross = b.step("desktop-cross", "Compile the desktop screen backends for the targets they ship to");
+    ci_step.dependOn(desktop_cross);
+    const desktop_cross_targets = [_]struct { name: []const u8, query: std.Target.Query }{
+        .{ .name = "linux", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu } },
+        .{ .name = "windows", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu } },
+    };
+    // Through the same factory the engine uses, and every declaration referenced: zig
+    // analyses only what is reached, so compiling a backend as a bare root proved almost
+    // nothing and passed over a type error a Linux runner found immediately.
+    for (desktop_cross_targets) |entry| {
+        const cross_target = b.resolveTargetQuery(entry.query);
+        const obj = b.addObject(.{
+            .name = b.fmt("cross_screen_{s}", .{entry.name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/cross_ref.zig"),
+                .target = cross_target,
+                .optimize = .Debug,
+                .imports = &.{.{ .name = "screen_capture", .module = screenCaptureModule(b, cross_target, .Debug) }},
+            }),
+        });
+        desktop_cross.dependOn(&obj.step);
+    }
+
+    for (desktop_capture_tests) |path| {
+        const module = b.createModule(.{
+            .root_source_file = b.path(path),
+            .target = target,
+            .optimize = optimize,
+        });
+        module.link_libc = true;
+        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
+    }
+
+    test_step.dependOn(&b.addRunArtifact(screen_capture_tests).step);
+    test_step.dependOn(&b.addRunArtifact(memory_core_tests).step);
+    test_step.dependOn(&b.addRunArtifact(spatial_core_tests).step);
+    test_step.dependOn(&b.addRunArtifact(determinism_tests).step);
+
+    {
+        // The MCP server: the engine as tools an agent calls, over JSON-RPC on
+        // stdio. One static binary, speaking the protocol itself, because the
+        // point of a frozen C ABI is that a thin thing can sit on it.
+        const mcp = b.addExecutable(.{
+            .name = "gosslens-mcp",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/mcp/main.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        mcp.root_module.addImport("abi", abi_module);
+        b.installArtifact(mcp);
+        const run_mcp = b.addRunArtifact(mcp);
+        b.step("mcp", "Run the MCP server on stdio").dependOn(&run_mcp.step);
+
+        // The protocol tests cannot see whether a tool does anything, so the
+        // proof runs the built server the way a client does and checks that an
+        // embedding put in through it comes back out.
+        const mcp_proof = b.addExecutable(.{
+            .name = "mcp-proof",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/mcp_proof.zig"),
+                .target = target,
+                .optimize = .Debug,
+            }),
+        });
+        const run_mcp_proof = b.addRunArtifact(mcp_proof);
+        run_mcp_proof.setCwd(b.path("."));
+        run_mcp_proof.addArtifactArg(mcp);
+        b.step("mcp-proof", "Drive the built MCP server over stdio and check every tool answers").dependOn(&run_mcp_proof.step);
+        ci_step.dependOn(&run_mcp_proof.step);
+
+        const mcp_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/mcp/server.zig"),
+            .target = target,
+            .optimize = optimize,
+        }) });
+        test_step.dependOn(&b.addRunArtifact(mcp_tests).step);
+    }
     test_step.dependOn(&b.addRunArtifact(quiet_tests).step);
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
     test_step.dependOn(&b.addRunArtifact(bundle_tests).step);
@@ -525,9 +717,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(blob_tests).step);
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
     test_step.dependOn(&b.addRunArtifact(material_tests).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = particles_module })).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = navmesh_module })).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sph_module })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = particlesModule(b, target, optimize) })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = navmeshModule(b, target, optimize) })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sphModule(b, target, optimize) })).step);
     test_step.dependOn(&b.addRunArtifact(fit_tests).step);
     test_step.dependOn(&b.addRunArtifact(png_tests).step);
     test_step.dependOn(&b.addRunArtifact(gif_tests).step);
@@ -908,6 +1100,10 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "tracking", .module = tracking_real_module },
                 .{ .name = "segmentation", .module = segmentation_module },
                 .{ .name = "ml_infer", .module = ml_infer_module },
+                // The engine imports this unconditionally, and of the five abi modules
+                // here this was the one without it, so the tracking harness stopped
+                // compiling the moment the text rail landed and no other lane said so.
+                .{ .name = "text_infer", .module = textInferModule(b, target, optimize, ml_infer_module) },
                 .{ .name = "diffusion", .module = diffusion_module },
                 .{ .name = "manifest", .module = lens_manifest_module },
                 .{ .name = "trigger", .module = lens_trigger_module },
@@ -918,7 +1114,15 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("gif", gifModule(b, target, optimize));
         abi_tracking_module.addImport("jpeg", jpegModule(b, target, optimize));
         abi_tracking_module.addImport("color", colorModule(b, target, optimize));
-        abi_tracking_module.addImport("media_recording", recordingModule(b, target, optimize));
+        abi_tracking_module.addImport("media_recording", recordingModule(b, target, optimize, math_module));
+        abi_tracking_module.addImport("media", mediaCoreModule(b, target, optimize, math_module));
+        abi_tracking_module.addImport("perception", perceptionModule(b, target, optimize));
+        abi_tracking_module.addImport("spatial", spatialModule(b, target, optimize, math_module));
+        abi_tracking_module.addImport("navmesh", navmeshModule(b, target, optimize));
+        abi_tracking_module.addImport("text", textModule(b, target, optimize));
+        abi_tracking_module.addImport("memory", memoryModule(b, target, optimize));
+        abi_tracking_module.addImport("screen", screenModule(b, target, optimize));
+        abi_tracking_module.addImport("screen_capture", screenCaptureModule(b, target, optimize));
         abi_tracking_module.addImport("media_video", mediaVideoModule(b, target, optimize, null));
         abi_tracking_module.addImport("photo", photoModule(b, target, optimize, null));
         abi_tracking_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
@@ -1194,7 +1398,15 @@ pub fn build(b: *std.Build) void {
         abi_wasm.addImport("gif", gifModule(b, wasm_target, opt_small));
         abi_wasm.addImport("jpeg", jpegModule(b, wasm_target, opt_small));
         abi_wasm.addImport("color", colorModule(b, wasm_target, opt_small));
-        abi_wasm.addImport("media_recording", recordingModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("media_recording", recordingModule(b, wasm_target, opt_small, math_wasm));
+        abi_wasm.addImport("media", mediaCoreModule(b, wasm_target, opt_small, math_wasm));
+        abi_wasm.addImport("perception", perceptionModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("spatial", spatialModule(b, wasm_target, opt_small, math_wasm));
+        abi_wasm.addImport("navmesh", navmeshModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("text", textModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("memory", memoryModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("screen", screenModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("screen_capture", screenCaptureModule(b, wasm_target, opt_small));
         abi_wasm.addImport("media_video", mediaVideoModule(b, wasm_target, opt_small, null));
         abi_wasm.addImport("photo", photoModule(b, wasm_target, opt_small, null));
         abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, opt_small));
@@ -1230,7 +1442,11 @@ pub fn build(b: *std.Build) void {
         abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, opt_small, math_wasm));
         const stub_ml_tensor_wasm = mlTensorModule(b, wasm_target, opt_small);
         const sync_chain_wasm = syncMlChain(b, wasm_target, opt_small, tracking_cores_wasm.sampler);
-        abi_wasm.addImport("ml_infer", mlInferSyncModule(b, wasm_target, opt_small, math_wasm, stub_ml_tensor_wasm, tracking_cores_wasm.sampler, sync_chain_wasm));
+        {
+            const wasm_ml_infer = mlInferSyncModule(b, wasm_target, opt_small, math_wasm, stub_ml_tensor_wasm, tracking_cores_wasm.sampler, sync_chain_wasm);
+            abi_wasm.addImport("ml_infer", wasm_ml_infer);
+            abi_wasm.addImport("text_infer", textInferModule(b, wasm_target, opt_small, wasm_ml_infer));
+        }
         abi_wasm.addImport("diffusion", diffusionModule(b, wasm_target, opt_small, sync_chain_wasm.engine, sync_chain_wasm.sample, tracking_cores_wasm.sampler, math_wasm, stub_ml_tensor_wasm, true));
         abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, opt_small, tracking_cores_wasm.face));
         const lens_manifest_wasm = b.createModule(.{
@@ -1417,7 +1633,15 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("gif", gifModule(b, target, optimize));
         abi_conformance_module.addImport("jpeg", conformance_jpeg_module);
         abi_conformance_module.addImport("color", conformance_color_module);
-        abi_conformance_module.addImport("media_recording", recordingModule(b, target, optimize));
+        abi_conformance_module.addImport("media_recording", recordingModule(b, target, optimize, math_module));
+        abi_conformance_module.addImport("media", mediaCoreModule(b, target, optimize, math_module));
+        abi_conformance_module.addImport("perception", perceptionModule(b, target, optimize));
+        abi_conformance_module.addImport("spatial", spatialModule(b, target, optimize, math_module));
+        abi_conformance_module.addImport("navmesh", navmeshModule(b, target, optimize));
+        abi_conformance_module.addImport("text", textModule(b, target, optimize));
+        abi_conformance_module.addImport("memory", memoryModule(b, target, optimize));
+        abi_conformance_module.addImport("screen", screenModule(b, target, optimize));
+        abi_conformance_module.addImport("screen_capture", screenCaptureModule(b, target, optimize));
         abi_conformance_module.addImport("media_video", mediaVideoModule(b, target, optimize, null));
         abi_conformance_module.addImport("photo", photoModule(b, target, optimize, null));
         abi_conformance_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
@@ -1554,14 +1778,19 @@ pub fn build(b: *std.Build) void {
             abi_conformance_module.addImport("tracking", tracking_conformance);
             abi_conformance_module.addImport("segmentation", segmentation_conformance);
             abi_conformance_module.addImport("ml_infer", ml_infer_conformance);
+            abi_conformance_module.addImport("text_infer", textInferModule(b, target, optimize, ml_infer_conformance));
             abi_conformance_module.addImport("diffusion", diffusion_conformance);
             abi_conformance_module.addImport("beauty", beauty_conformance);
         } else {
             abi_conformance_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, pose_core_module, math_module));
             abi_conformance_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
             const stub_ml_tensor_conf = mlTensorModule(b, target, optimize);
-            abi_conformance_module.addImport("ml_infer", mlInferStubModule(b, target, optimize, math_module, stub_ml_tensor_conf));
-            abi_conformance_module.addImport("diffusion", diffusionStubModule(b, target, optimize, math_module, stub_ml_tensor_conf));
+            {
+                const conf_stub_ml_infer = mlInferOnnxModule(b, target, optimize, math_module, stub_ml_tensor_conf, sampler_module);
+                abi_conformance_module.addImport("ml_infer", conf_stub_ml_infer);
+                abi_conformance_module.addImport("text_infer", textInferModule(b, target, optimize, conf_stub_ml_infer));
+            }
+            abi_conformance_module.addImport("diffusion", diffusionOnnxModule(b, target, optimize, math_module, stub_ml_tensor_conf, sampler_module));
             abi_conformance_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
         }
         const conformance_module = b.createModule(.{
@@ -1849,13 +2078,21 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     abi_android.addImport("gif", gifModule(b, android_target, optimize));
     abi_android.addImport("jpeg", jpegModule(b, android_target, optimize));
     abi_android.addImport("color", colorModule(b, android_target, optimize));
-    abi_android.addImport("media_recording", recordingModule(b, android_target, optimize));
+    abi_android.addImport("media_recording", recordingModule(b, android_target, optimize, math_android));
+    abi_android.addImport("media", mediaCoreModule(b, android_target, optimize, math_android));
+    abi_android.addImport("perception", perceptionModule(b, android_target, optimize));
+    abi_android.addImport("spatial", spatialModule(b, android_target, optimize, math_android));
+    abi_android.addImport("navmesh", navmeshModule(b, android_target, optimize));
     abi_android.addImport("audio_analysis", audioAnalysisModule(b, android_target, optimize));
     abi_android.addImport("audio_mix", audioMixModule(b, android_target, optimize));
     abi_android.addImport("sfx", sfxModule(b, android_target, optimize));
     abi_android.addImport("music", musicModule(b, android_target, optimize));
     abi_android.addImport("barcode", barcodeModule(b, android_target, optimize));
     abi_android.addImport("medialib", medialibModule(b, android_target, optimize));
+    abi_android.addImport("text", textModule(b, android_target, optimize));
+    abi_android.addImport("memory", memoryModule(b, android_target, optimize));
+    abi_android.addImport("screen", screenModule(b, android_target, optimize));
+    abi_android.addImport("screen_capture", screenCaptureModule(b, android_target, optimize));
     abi_android.addImport("qr", qrModule(b, android_target, optimize));
     abi_android.addImport("flash", flashModule(b, android_target, optimize));
     const fft_abi_android = fftModule(b, android_target, optimize);
@@ -2009,6 +2246,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
             },
         });
         abi_android.addImport("ml_infer", ml_infer_android);
+        abi_android.addImport("text_infer", textInferModule(b, android_target, optimize, ml_infer_android));
         abi_android.addImport("diffusion", diffusion_android);
         const face106_android = b.createModule(.{
             .root_source_file = b.path("core/tracking/face106.zig"),
@@ -2031,8 +2269,12 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
         abi_android.addImport("tracking", trackingStubModule(b, android_target, optimize, tracking_cores_android.face, tracking_cores_android.hand, tracking_cores_android.pose, math_android));
         abi_android.addImport("segmentation", segmentationStubModule(b, android_target, optimize, math_android));
         const stub_ml_tensor_android = mlTensorModule(b, android_target, optimize);
-        abi_android.addImport("ml_infer", mlInferStubModule(b, android_target, optimize, math_android, stub_ml_tensor_android));
-        abi_android.addImport("diffusion", diffusionStubModule(b, android_target, optimize, math_android, stub_ml_tensor_android));
+        {
+            const android_stub_ml_infer = mlInferOnnxModule(b, android_target, optimize, math_android, stub_ml_tensor_android, tracking_cores_android.sampler);
+            abi_android.addImport("ml_infer", android_stub_ml_infer);
+            abi_android.addImport("text_infer", textInferModule(b, android_target, optimize, android_stub_ml_infer));
+        }
+        abi_android.addImport("diffusion", diffusionOnnxModule(b, android_target, optimize, math_android, stub_ml_tensor_android, tracking_cores_android.sampler));
         abi_android.addImport("beauty", beautyStubModule(b, android_target, optimize, tracking_cores_android.face));
     }
     const have_cgltf_android = blk: {
@@ -2053,7 +2295,10 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
         .root_source_file = b.path("adapters/android/jni.zig"),
         .target = android_target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "abi", .module = abi_android }},
+        .imports = &.{
+            .{ .name = "abi", .module = abi_android },
+            .{ .name = "screen_capture", .module = screenCaptureModule(b, android_target, optimize) },
+        },
     });
     jni_module.link_libc = true;
     addNdkPaths(b, jni_module, sysroot, abi_triple);
@@ -2156,8 +2401,12 @@ fn barcodeModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     return b.createModule(.{ .root_source_file = b.path("core/media/barcode.zig"), .target = target, .optimize = optimize });
 }
 
+/// Memoized, because the memory plane seals through these primitives too and two
+/// modules over one file collide the moment a compile pulls in both.
 fn medialibModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = b.path("core/media/library.zig"), .target = target, .optimize = optimize });
+    const key = b.fmt("goss-medialib-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{ .root_source_file = b.path("core/media/library.zig"), .target = target, .optimize = optimize });
 }
 
 fn qrModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
@@ -2244,6 +2493,182 @@ fn buildQuickjsLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         module.addCSourceFile(.{ .file = b.path(b.fmt("{s}/{s}", .{ root, file })), .flags = &flags });
     }
     return b.addLibrary(.{ .name = "quickjs", .linkage = .static, .root_module = module });
+}
+
+/// The blob the renderer reads a packed asset out of. Memoized so one compile
+/// never pulls in two modules over the same file.
+fn blobModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-blob-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{
+        .root_source_file = b.path("adapters/bgfx/blob.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+/// Weighted similarity fitting, which the shared-anchor solve reads through the
+/// math module and its own tests read directly.
+fn fitModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-fit-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{
+        .root_source_file = b.path("core/math/fit.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+/// Navigation over the submitted world mesh: the walkable triangles, their
+/// adjacency, and the search that routes between two points on them.
+fn navmeshModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-navmesh-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{
+        .root_source_file = b.path("core/nav/navmesh.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+/// Spatial semantics: what a plane is, and the placement questions asked of it.
+fn spatialModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math: *std.Build.Module) *std.Build.Module {
+    const key = b.fmt("goss-spatial-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{
+        .root_source_file = b.path("core/spatial/spatial.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "math", .module = math }},
+    });
+}
+
+/// The memory plane: the navigable graph over the embeddings and the exact
+/// search it is measured against.
+fn memoryModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-memory-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    const module = b.addModule(key, .{
+        .root_source_file = b.path("core/memory/memory.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    // The vault primitives already exist in the media library; the memory plane
+    // seals through them rather than growing a second cipher.
+    module.addImport("library", medialibModule(b, target, optimize));
+    return module;
+}
+
+/// Screen capture, per target. ScreenCaptureKit on Apple, which is also the
+/// desktop harness path, so the proof runs where the suite runs. MediaProjection
+/// on Android, whose consent dialog only an Activity can show, so the SDK drives
+/// the grant and feeds the frames. The web uses getDisplayMedia in its own SDK.
+fn screenCaptureModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-screen-capture-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    // macOS alone, not every apple target: ScreenCaptureKit does not exist on iOS, and
+    // an iPhone's screen is only readable from a broadcast extension out of process, so
+    // there is no in-process backend for the engine to call there.
+    const is_macos = target.result.os.tag == .macos;
+    const is_android = target.result.abi == .android or target.result.abi == .androideabi;
+    // Every host that has a screen API this engine can reach gets its own backend.
+    // The stub is for a target with none, which is now wasm alone.
+    const root_file = if (is_macos)
+        "adapters/screen/screen_capture.zig"
+    else if (is_android)
+        "adapters/screen/screen_capture_android.zig"
+    else if (target.result.os.tag == .linux)
+        "adapters/screen/screen_capture_linux.zig"
+    else if (target.result.os.tag == .windows)
+        "adapters/screen/screen_capture_windows.zig"
+    else
+        "adapters/screen/screen_capture_stub.zig";
+    const module = b.addModule(key, .{
+        .root_source_file = b.path(root_file),
+        .target = target,
+        .optimize = optimize,
+    });
+    if (target.result.os.tag == .linux) {
+        // dlopen and getenv come from libc, which is how both Linux backends reach
+        // the desktop's own libraries without this build needing their headers.
+        module.link_libc = true;
+    }
+    if (is_macos) {
+        module.addCSourceFile(.{
+            .file = b.path("adapters/screen/screen_capture_apple.mm"),
+            .flags = &.{ "-std=c++17", "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
+        module.link_libcpp = true;
+        module.linkFramework("Foundation", .{});
+        module.linkFramework("CoreMedia", .{});
+        module.linkFramework("CoreVideo", .{});
+        module.linkFramework("ScreenCaptureKit", .{});
+    }
+    return module;
+}
+
+/// Screens as a source: the surface geometry, the coordinate mapping that puts
+/// an agent's point on a real pixel, and the structured layer the platform knows.
+fn screenModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-screen-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{
+        .root_source_file = b.path("core/screen/screen.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+/// The text rail: region geometry, detector post-processing, rectification and
+/// recognition. Memoized like the other core modules, because two modules over
+/// one file collide the moment a compile pulls in both.
+fn textModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-text-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{
+        .root_source_file = b.path("core/text/text.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+/// The text pipeline takes the compile's own ml_infer rather than building a
+/// second module over the engine file: two modules over one file collide the
+/// moment a compile pulls in both, which this repo has hit before.
+fn textInferModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ml_infer_mod: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/text_infer.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "text", .module = textModule(b, target, optimize) },
+            .{ .name = "ml_infer", .module = ml_infer_mod },
+        },
+    });
+}
+
+fn perceptionModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-perception-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{
+        .root_source_file = b.path("core/perception/perception.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+fn mediaCoreModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math: *std.Build.Module) *std.Build.Module {
+    const key = b.fmt("goss-media-core-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    const module = b.addModule(key, .{
+        .root_source_file = b.path("core/media/media.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    // The caller's own math module, not a second one over the same files: two
+    // modules across one file collide the moment a compile pulls in both.
+    module.addImport("math", math);
+    return module;
 }
 
 /// The stderr silencer the two deliberate-failure tests use. See
@@ -2432,7 +2857,7 @@ fn mediaVideoModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 // Video recording rides the platform's own encoder and muxer; targets
 // without a landed backend get the stub, which reports the capability
 // honestly absent rather than pretending.
-fn recordingModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+fn recordingModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math: *std.Build.Module) *std.Build.Module {
     const apple = target.result.os.tag == .macos or target.result.os.tag == .ios;
     const android = target.result.abi.isAndroid();
     const root = if (apple)
@@ -2446,6 +2871,10 @@ fn recordingModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         .target = target,
         .optimize = optimize,
     });
+    // Every recording backend declares its capability through the core contract
+    // rather than exporting its own codec enum as the vocabulary.
+    module.addImport("media", mediaCoreModule(b, target, optimize, math));
+    module.addImport("perception", perceptionModule(b, target, optimize));
     if (android) {
         // Translation-only sysroot includes: link_libc here would mix
         // zig's bundled bionic headers with the sysroot's and conflict;
@@ -2752,6 +3181,14 @@ fn diffusionModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     });
 }
 
+/// The diffusion rail over the onnx-only chain, for a target with no vendored
+/// TFLite tree. The restyle nets that matter are ONNX, and the engine that runs
+/// them is pure Zig, so a refusal here would be a choice rather than a limit.
+fn diffusionOnnxModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_mod: *std.Build.Module, ml_tensor_mod: *std.Build.Module, sampler_mod: *std.Build.Module) *std.Build.Module {
+    const chain = syncMlChain(b, target, optimize, sampler_mod);
+    return diffusionModule(b, target, optimize, chain.engine, chain.sample, sampler_mod, math_mod, ml_tensor_mod, false);
+}
+
 fn diffusionStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_mod: *std.Build.Module, ml_tensor_mod: *std.Build.Module) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path("adapters/tracking/diffusion_stub.zig"),
@@ -2764,22 +3201,47 @@ fn diffusionStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize
     });
 }
 
-/// The synchronous byo-ml rail for targets with no threads (the web): the
-/// real inference core over the pure-Zig ONNX engine, with the TFLite
-/// backend stubbed so a .tflite model degrades to an inert node instead of
-/// dragging the C++ runtime into a build that cannot host it.
+/// The real inference core over the pure-Zig ONNX engine with the TFLite backend
+/// stubbed, so a .tflite model degrades to an inert node rather than dragging the
+/// C++ runtime into a build that cannot host it, or has not vendored it.
 const SyncMlChain = struct { engine: *std.Build.Module, sample: *std.Build.Module };
 
-/// The onnx-only engine chain both synchronous web rails (ml_infer_sync and
-/// diffusion_sync) share on a wasm target.
+/// The onnx-only engine chain: the web rails ride it because they have no
+/// threads, and every build without the vendored TFLite tree rides it because
+/// refusing a model the engine can run is worse than running it.
 fn syncMlChain(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sampler_mod: *std.Build.Module) SyncMlChain {
-    const runtime_stub = b.createModule(.{
+    // Memoized, because two rails share this chain on the same target now and two
+    // modules over one file in one compile is the collision the module rule names.
+    const triple = target.result.zigTriple(b.allocator) catch "t";
+    const engine_key = b.fmt("goss-onnx-engine-{s}-{s}", .{ triple, @tagName(optimize) });
+    const sample_key = b.fmt("goss-onnx-sample-{s}-{s}", .{ triple, @tagName(optimize) });
+    if (b.modules.get(engine_key)) |engine| {
+        return .{ .engine = engine, .sample = b.modules.get(sample_key).? };
+    }
+    const runtime_stub = b.addModule(b.fmt("goss-onnx-runtime-stub-{s}-{s}", .{ triple, @tagName(optimize) }), .{
         .root_source_file = b.path("adapters/tracking/runtime_stub.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const engine = mlEngineModule(b, target, optimize, runtime_stub);
-    return .{ .engine = engine, .sample = mlSampleModule(b, target, optimize, sampler_mod, engine) };
+    const engine = b.addModule(engine_key, .{
+        .root_source_file = b.path("adapters/tracking/ml_engine.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "runtime", .module = runtime_stub },
+            .{ .name = "onnx", .module = onnxModule(b, target, optimize) },
+        },
+    });
+    const sample = b.addModule(sample_key, .{
+        .root_source_file = b.path("adapters/tracking/ml_sample.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sampler", .module = sampler_mod },
+            .{ .name = "ml_engine", .module = engine },
+        },
+    });
+    return .{ .engine = engine, .sample = sample };
 }
 
 fn mlInferSyncModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_mod: *std.Build.Module, ml_tensor_mod: *std.Build.Module, sampler_mod: *std.Build.Module, chain: SyncMlChain) *std.Build.Module {
@@ -2803,6 +3265,35 @@ fn mlInferSyncModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
         .imports = &.{
             .{ .name = "math", .module = math_mod },
             .{ .name = "sampler", .module = sampler_mod },
+            .{ .name = "ml_tensor", .module = ml_tensor_mod },
+            .{ .name = "ml_infer_core", .module = core },
+        },
+    });
+}
+
+/// The threaded byo-ml rail over the onnx-only chain, for a target that has
+/// threads and no vendored TFLite tree. Everything an ONNX model needs is here;
+/// only a .tflite model degrades.
+fn mlInferOnnxModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_mod: *std.Build.Module, ml_tensor_mod: *std.Build.Module, sampler_mod: *std.Build.Module) *std.Build.Module {
+    const chain = syncMlChain(b, target, optimize, sampler_mod);
+    const core = b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/ml_infer_core.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ml_engine", .module = chain.engine },
+            .{ .name = "ml_sample", .module = chain.sample },
+            .{ .name = "sampler", .module = sampler_mod },
+            .{ .name = "ml_tensor", .module = ml_tensor_mod },
+        },
+    });
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/ml_infer.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sampler", .module = sampler_mod },
+            .{ .name = "math", .module = math_mod },
             .{ .name = "ml_tensor", .module = ml_tensor_mod },
             .{ .name = "ml_infer_core", .module = core },
         },
@@ -4078,6 +4569,30 @@ fn swiftTypecheckCommand(b: *std.Build) ?*std.Build.Step.Run {
 /// Android SDK: the library is an android-library, so gradle cannot resolve its
 /// plugin there, and a gate that fails for a missing toolchain rather than a
 /// missing symbol is the false gate this wave spent its time removing.
+/// The TypeScript SDK typechecks. It was the one SDK sdk-check did not run a
+/// compiler over, and an undeclared constant slipped through on exactly that.
+fn typescriptTypecheckCommand(b: *std.Build) ?*std.Build.Step.Run {
+    var code: u8 = undefined;
+    _ = b.runAllowFail(&.{ "/bin/sh", "-c", "command -v bun >/dev/null && test -f sdk/ts/tsconfig.json" }, &code, .ignore) catch return null;
+    if (code != 0) return null;
+    const cmd = b.addSystemCommand(&.{ "bun", "x", "tsc", "--noEmit" });
+    cmd.setCwd(b.path("sdk/ts"));
+    cmd.setName("tsc --noEmit (sdk/ts)");
+    return cmd;
+}
+
+/// The C SDK's example, compiled against the staged header and run. It was the one
+/// SDK surface no step exercised. The staging is a dependency in the graph rather
+/// than a nested `zig build`.
+fn cDemoCommand(b: *std.Build, c_step: *std.Build.Step) *std.Build.Step.Run {
+    const cmd = b.addSystemCommand(&.{ "/bin/sh", "sdk/c/demo/build.sh" });
+    cmd.setCwd(b.path("."));
+    cmd.setName("c sdk example");
+    cmd.setEnvironmentVariable("GOSS_C_STAGED", "1");
+    cmd.step.dependOn(c_step);
+    return cmd;
+}
+
 fn kotlinCompileCommand(b: *std.Build) ?*std.Build.Step.Run {
     var code: u8 = undefined;
     _ = b.runAllowFail(&.{
@@ -4464,7 +4979,15 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("gif", gifModule(b, ios_target, optimize));
     abi_ios.addImport("jpeg", jpegModule(b, ios_target, optimize));
     abi_ios.addImport("color", colorModule(b, ios_target, optimize));
-    abi_ios.addImport("media_recording", recordingModule(b, ios_target, optimize));
+    abi_ios.addImport("media_recording", recordingModule(b, ios_target, optimize, math_ios));
+    abi_ios.addImport("media", mediaCoreModule(b, ios_target, optimize, math_ios));
+    abi_ios.addImport("perception", perceptionModule(b, ios_target, optimize));
+    abi_ios.addImport("spatial", spatialModule(b, ios_target, optimize, math_ios));
+    abi_ios.addImport("navmesh", navmeshModule(b, ios_target, optimize));
+    abi_ios.addImport("text", textModule(b, ios_target, optimize));
+    abi_ios.addImport("memory", memoryModule(b, ios_target, optimize));
+    abi_ios.addImport("screen", screenModule(b, ios_target, optimize));
+    abi_ios.addImport("screen_capture", screenCaptureModule(b, ios_target, optimize));
     abi_ios.addImport("media_video", mediaVideoModule(b, ios_target, optimize, null));
     abi_ios.addImport("photo", photoModule(b, ios_target, optimize, null));
     abi_ios.addImport("audio_analysis", audioAnalysisModule(b, ios_target, optimize));
@@ -4640,6 +5163,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             },
         });
         abi_ios.addImport("ml_infer", ml_infer_ios);
+        abi_ios.addImport("text_infer", textInferModule(b, ios_target, optimize, ml_infer_ios));
         abi_ios.addImport("diffusion", diffusion_ios);
         const face106_ios = b.createModule(.{
             .root_source_file = b.path("core/tracking/face106.zig"),
@@ -4684,8 +5208,10 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         abi_ios.addImport("tracking", trackingStubModule(b, ios_target, optimize, tracking_cores_ios.face, tracking_cores_ios.hand, tracking_cores_ios.pose, math_ios));
         abi_ios.addImport("segmentation", segmentationStubModule(b, ios_target, optimize, math_ios));
         const stub_ml_tensor_ios = mlTensorModule(b, ios_target, optimize);
-        abi_ios.addImport("ml_infer", mlInferStubModule(b, ios_target, optimize, math_ios, stub_ml_tensor_ios));
-        abi_ios.addImport("diffusion", diffusionStubModule(b, ios_target, optimize, math_ios, stub_ml_tensor_ios));
+        const stub_ml_infer_ios = mlInferOnnxModule(b, ios_target, optimize, math_ios, stub_ml_tensor_ios, tracking_cores_ios.sampler);
+        abi_ios.addImport("ml_infer", stub_ml_infer_ios);
+        abi_ios.addImport("text_infer", textInferModule(b, ios_target, optimize, stub_ml_infer_ios));
+        abi_ios.addImport("diffusion", diffusionOnnxModule(b, ios_target, optimize, math_ios, stub_ml_tensor_ios, tracking_cores_ios.sampler));
         abi_ios.addImport("beauty", beautyStubModule(b, ios_target, optimize, tracking_cores_ios.face));
     }
     const have_cgltf_ios = blk: {
@@ -5123,7 +5649,15 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("gif", gifModule(b, em_target, opt_small));
     abi_em.addImport("jpeg", jpegModule(b, em_target, opt_small));
     abi_em.addImport("color", colorModule(b, em_target, opt_small));
-    abi_em.addImport("media_recording", recordingModule(b, em_target, opt_small));
+    abi_em.addImport("media_recording", recordingModule(b, em_target, opt_small, math_em));
+    abi_em.addImport("media", mediaCoreModule(b, em_target, opt_small, math_em));
+    abi_em.addImport("perception", perceptionModule(b, em_target, opt_small));
+    abi_em.addImport("spatial", spatialModule(b, em_target, opt_small, math_em));
+    abi_em.addImport("navmesh", navmeshModule(b, em_target, opt_small));
+    abi_em.addImport("text", textModule(b, em_target, opt_small));
+    abi_em.addImport("memory", memoryModule(b, em_target, opt_small));
+    abi_em.addImport("screen", screenModule(b, em_target, opt_small));
+    abi_em.addImport("screen_capture", screenCaptureModule(b, em_target, opt_small));
     abi_em.addImport("media_video", mediaVideoModule(b, em_target, opt_small, null));
     abi_em.addImport("photo", photoModule(b, em_target, opt_small, null));
     abi_em.addImport("audio_analysis", audioAnalysisModule(b, em_target, opt_small));
@@ -5153,7 +5687,9 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("segmentation", segmentationStubModule(b, em_target, opt_small, math_em));
     const stub_ml_tensor_em = mlTensorModule(b, em_target, opt_small);
     const sync_chain_em = syncMlChain(b, em_target, opt_small, tracking_cores_em.sampler);
-    abi_em.addImport("ml_infer", mlInferSyncModule(b, em_target, opt_small, math_em, stub_ml_tensor_em, tracking_cores_em.sampler, sync_chain_em));
+    const ml_infer_em = mlInferSyncModule(b, em_target, opt_small, math_em, stub_ml_tensor_em, tracking_cores_em.sampler, sync_chain_em);
+    abi_em.addImport("ml_infer", ml_infer_em);
+    abi_em.addImport("text_infer", textInferModule(b, em_target, opt_small, ml_infer_em));
     abi_em.addImport("diffusion", diffusionModule(b, em_target, opt_small, sync_chain_em.engine, sync_chain_em.sample, tracking_cores_em.sampler, math_em, stub_ml_tensor_em, true));
     abi_em.addImport("beauty", beautyStubModule(b, em_target, opt_small, tracking_cores_em.face));
     // Web's own beauty.reshape dispatch needs the 106-point

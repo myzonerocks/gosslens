@@ -7,6 +7,159 @@
 // rotation) straight to the engine.
 
 export const GOSS_OK = 0;
+/// The session's scope does not carry the verb an op needs. A host can grant this
+/// one; GOSS_UNSUPPORTED it cannot.
+export const GOSS_OUT_OF_SCOPE = 9;
+
+/// What a scope may carry. Reading is covered by the snapshot sections; these are
+/// the things that change something or reach a resource.
+export const enum GossVerb {
+  Annotate = 0,
+  Egress = 1,
+  Record = 2,
+  Remember = 3,
+  SearchMemory = 4,
+  OpenClip = 5,
+  CaptureScreen = 6,
+  SubmitFrame = 7,
+  SubmitWorld = 8,
+  SubmitAudio = 9,
+  AudioOut = 10,
+  SealMemory = 11,
+  ActivateLens = 12,
+  LoadModel = 13,
+  EnableTracking = 14,
+  Retouch = 15,
+}
+
+/// The mask for a set of verbs, which is what setScope takes.
+export function gossVerbMask(verbs: GossVerb[]): number {
+  return verbs.reduce((mask, verb) => mask | (1 << verb), 0);
+}
+export const GOSS_AGAIN = 7;
+
+/// What this build's media backend declares it encodes.
+export interface GossMediaCapabilities {
+  videoCodecs: number;
+  audioCodecs: number;
+  containers: number;
+  maxWidth: number;
+  maxHeight: number;
+  maxBitDepth: number;
+  hdr: boolean;
+  zeroCopy: boolean;
+}
+
+/// What the engine will let this process capture. Scale is the field to carry
+/// through: a point sent back without it lands at half its place on a retina
+/// display.
+export interface GossScreenSurface {
+  id: number;
+  kind: number;
+  title: string;
+  logicalWidth: number;
+  logicalHeight: number;
+  originX: number;
+  originY: number;
+  scale: number;
+}
+
+/// What the frame says at one place in it. The quadrilateral is in normalized
+/// frame space and in reading order, so a coordinate sent back maps to a pixel.
+export interface GossReading {
+  text: string;
+  quad: number[];
+  confidence: number;
+  origin: number;
+  script: number;
+  direction: number;
+  trackId: number;
+  line: number;
+  paragraph: number;
+}
+
+/// One thing an agent draws back into the frame.
+export interface GossAnnotation {
+  id: number;
+  kind: number;
+  space?: number;
+  rect?: [number, number, number, number];
+  trackId?: number;
+  colour?: [number, number, number, number];
+  z?: number;
+  opacity?: number;
+  lifetimeKind?: number;
+  lifetimeValue?: number;
+  onLost?: number;
+  value?: number;
+}
+
+/// What the brain sees and what it costs.
+export interface GossEgressConfig {
+  targetLongEdge?: number;
+  format?: number;
+  quality?: number;
+  maxFps?: number;
+  maxBytesPerSecond?: number;
+  source?: number;
+  trigger?: number;
+  changeThreshold?: number;
+  keyframeIntervalUs?: number;
+}
+
+/// Why a frame was or was not sent, so a gateway can explain itself.
+export interface GossEgressDecision {
+  send: boolean;
+  reason: number;
+  changeScore: number;
+  sinceLastUs: number;
+  sentTotal: number;
+  heldTotal: number;
+}
+
+/// One thing that happened. What a and b mean is per kind.
+export interface GossEvent {
+  kind: number;
+  sequence: number;
+  timestampUs: number;
+  a: number;
+  b: number;
+  value: number;
+}
+
+/// The event kinds, mirroring goss_event_kind.
+export const enum GossEventKind {
+  FaceAppeared = 1,
+  FaceLost = 2,
+  FaceCountChanged = 3,
+  HandAppeared = 4,
+  HandLost = 5,
+  GestureRecognised = 6,
+  BodyAppeared = 7,
+  BodyLost = 8,
+  ActionRecognised = 9,
+  TrackingStateChanged = 10,
+  AudioBeat = 22,
+  LensActivated = 25,
+  LensNodeDegraded = 26,
+  LensNodeFailed = 27,
+  DegradeLevelChanged = 30,
+  PoolExhausted = 31,
+  RecordingStarted = 32,
+  RecordingPaused = 33,
+  RecordingResumed = 34,
+  RecordingStopped = 35,
+  Interruption = 36,
+}
+
+/// What interrupted a recording, as the page saw it.
+export const enum GossInterruption {
+  Pause = 0,
+  CameraLost = 1,
+  AudioRoute = 2,
+  Backgrounded = 3,
+  Thermal = 4,
+}
 
 export const enum GossDegradeLevel {
   Full = 0,
@@ -405,6 +558,24 @@ export class Gosslens {
     return Number(this.mod.ccall("goss_capabilities", "number", [], []));
   }
 
+  /// The rails a lens declares that this build lacks, as GOSS_CAP_ bits; zero means
+  /// every one it asked for is here. A catalogue filters on this rather than
+  /// activating a lens to find out.
+  lensCapabilitiesMissing(manifestJson: string): number {
+    const bytes = new TextEncoder().encode(manifestJson);
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]) as number;
+    const out = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      this.mod.HEAPU8.set(bytes, ptr);
+      const status = this.mod.ccall("goss_lens_capabilities_missing", "number", ["number", "number", "number"], [ptr, bytes.length, out]);
+      if (status !== GOSS_OK) return 0;
+      return this.mod.HEAPU32[out >> 2];
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [out, 8]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
+    }
+  }
+
   /// Loads gosslens_web.js and checks its ABI major version. A
   /// dynamic import, not static: bun's bundler would otherwise inline
   /// this file, breaking Emscripten's own import.meta.url-relative
@@ -412,8 +583,12 @@ export class Gosslens {
   static async load(canvas: HTMLCanvasElement, wasmJsUrl: string | URL): Promise<Gosslens> {
     const imported = (await import(/* @vite-ignore */ String(wasmJsUrl))) as { default: EngineModuleFactory };
     const mod = await imported.default({ canvas });
+    // The engine decides, rather than this file comparing against a literal major
+    // that would go stale the day the major moves.
     const version = mod.ccall("goss_abi_version", "number", [], []) >>> 0;
-    if (version >> 16 !== 0) throw new Error(`gosslens abi major mismatch: ${version >> 16}`);
+    if (mod.ccall("goss_abi_check", "number", ["number"], [GOSS_ABI_MAJOR << 16]) !== GOSS_OK) {
+      throw new Error(`gosslens abi major mismatch: ${version >> 16}`);
+    }
     return new Gosslens(mod, version);
   }
 
@@ -1097,8 +1272,103 @@ export class GossEngine {
   /// What the engine is doing now, as against what it was asked for. Every
   /// field is measured. The u64 fields are read as their low word, which holds
   /// the whole count at any rate this engine reaches.
+  /// What this build's media backend declares it encodes, as bit sets over the
+  /// codec and container enums, so a page asks rather than assuming.
+  mediaCapabilities(): GossMediaCapabilities | null {
+    const bytes = 8 * 4;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    try {
+      if (this.mod.ccall("goss_engine_media_capabilities", "number", ["number", "number"], [this.handle, ptr]) !== GOSS_OK) return null;
+      const w = (offset: number) => this.mod.HEAPU32[(ptr + offset) >> 2];
+      return {
+        videoCodecs: w(0),
+        audioCodecs: w(4),
+        containers: w(8),
+        maxWidth: w(12),
+        maxHeight: w(16),
+        maxBitDepth: w(20),
+        hdr: w(24) !== 0,
+        zeroCopy: w(28) !== 0,
+      };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+    }
+  }
+
+  /// Everything capturable. Empty where permission has not been granted, so
+  /// prompt rather than treating it as an error.
+  screens(): GossScreenSurface[] {
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const entryPtr = this.mod.ccall("goss_alloc", "number", ["number"], [40]) as number;
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    const out: GossScreenSurface[] = [];
+    try {
+      if (this.mod.ccall("goss_engine_screen_count", "number", ["number", "number"], [this.handle, countPtr]) !== GOSS_OK) return out;
+      const count = this.mod.HEAPU32[countPtr >> 2];
+      for (let i = 0; i < count; i += 1) {
+        if (this.mod.ccall("goss_engine_screen_at", "number", ["number", "number", "number"], [this.handle, i, entryPtr]) !== GOSS_OK) continue;
+        const f = (off: number) => this.mod.HEAPF32[(entryPtr + off) >> 2];
+        const u = (off: number) => this.mod.HEAPU32[(entryPtr + off) >> 2];
+        this.mod.ccall("goss_engine_screen_title", "number", ["number", "number", "number", "number", "number"], [this.handle, i, 0, 0, lenPtr]);
+        const needed = this.mod.HEAPU32[lenPtr >> 2];
+        let title = "";
+        if (needed > 0) {
+          const titlePtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed]) as number;
+          try {
+            if (this.mod.ccall("goss_engine_screen_title", "number", ["number", "number", "number", "number", "number"], [this.handle, i, titlePtr, needed, lenPtr]) === GOSS_OK) {
+              title = new TextDecoder().decode(this.mod.HEAPU8.subarray(titlePtr, titlePtr + needed));
+            }
+          } finally {
+            this.mod.ccall("goss_free", null, ["number", "number"], [titlePtr, needed]);
+          }
+        }
+        out.push({ id: u(0), kind: u(8), title, logicalWidth: f(12), logicalHeight: f(16), originX: f(20), originY: f(24), scale: f(28) });
+      }
+      return out;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [entryPtr, 40]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 8]);
+    }
+  }
+
+  /// The operators a model needs that this build does not implement. An empty
+  /// list means the model runs; anything in it names exactly what is missing.
+  mlOpSupport(model: Uint8Array): string[] {
+    const modelPtr = this.mod.ccall("goss_alloc", "number", ["number"], [model.length]) as number;
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    this.mod.HEAPU8.set(model, modelPtr);
+    let capacity = 256;
+    try {
+      while (capacity <= 1 << 16) {
+        const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [capacity]) as number;
+        try {
+          const status = this.mod.ccall(
+            "goss_ml_op_support",
+            "number",
+            ["number", "number", "number", "number", "number"],
+            [modelPtr, model.length, outPtr, capacity, lenPtr],
+          ) as number;
+          if (status !== GOSS_OK && status !== GOSS_AGAIN) return [];
+          const needed = this.mod.HEAPU32[lenPtr >> 2];
+          if (needed <= capacity) {
+            const text = new TextDecoder().decode(this.mod.HEAPU8.subarray(outPtr, outPtr + needed));
+            return text.split("\n").filter((line) => line.length !== 0);
+          }
+          capacity = needed;
+        } finally {
+          this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, capacity]);
+        }
+      }
+      return [];
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [modelPtr, model.length]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 8]);
+    }
+  }
+
   engineReport(): GossEngineReport | null {
-    const bytes = 14 * 4 + 3 * 8;
+    const bytes = ENGINE_REPORT_BYTES;
     const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
     try {
       if (this.mod.ccall("goss_engine_read_report", "number", ["number", "number"], [this.handle, ptr]) !== 0) return null;
@@ -1203,6 +1473,15 @@ export interface GossEngineReport {
   bgfxBytesLastFrame: number;
 }
 
+/// The ABI major these bindings were generated against: handing the engine its own
+/// version back would always match and test nothing. The major, not the whole version,
+/// because only the major decides compatibility. Held to the header by the abi gate.
+const GOSS_ABI_MAJOR = 0;
+
+/// What a report struct measures, checked against the engine's own layout.
+const ENGINE_REPORT_BYTES = 80;
+const SESSION_REPORT_BYTES = 88;
+
 /// This session's counters: work asked for against work done.
 export interface GossSessionReport {
   framesSubmitted: number;
@@ -1217,6 +1496,9 @@ export interface GossSessionReport {
   nodesDegraded: number;
   nodeReportsLost: number;
   scriptFaults: number;
+  /// A model rail's frame buffer growing mid-run; steady state is zero.
+  mlPlanGrowths: number;
+  mlPlanBytes: number;
 }
 
 /// What a lens node is doing, as against what its manifest asked for.
@@ -1465,6 +1747,231 @@ export class GossSession {
   /// Casts a world-space ray against the submitted world mesh, returning the
   /// nearest surface hit `{ point, distance }`, or null when no mesh is
   /// submitted or the ray misses. A tap-to-place lens anchors content there.
+  /// Decodes a PNG to packed RGBA8 through the decoder the engine already carries,
+  /// for a caller holding an encoded image and none of its own.
+  decodePng(bytes: Uint8Array): { rgba: Uint8Array; width: number; height: number } | null {
+    const inPtr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]) as number;
+    const wPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const hPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    let outPtr = 0;
+    let needed = 0;
+    try {
+      this.mod.HEAPU8.set(bytes, inPtr);
+      const args = ["number", "number", "number", "number", "number", "number", "number"];
+      this.mod.ccall("goss_engine_decode_png", "number", args, [inPtr, bytes.length, 0, 0, wPtr, hPtr, lenPtr]);
+      needed = this.mod.HEAPU32[lenPtr >> 2]!;
+      if (needed === 0) return null;
+      outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed]) as number;
+      if (this.mod.ccall("goss_engine_decode_png", "number", args, [inPtr, bytes.length, outPtr, needed, wPtr, hPtr, lenPtr]) !== GOSS_OK) return null;
+      return {
+        rgba: this.mod.HEAPU8.slice(outPtr, outPtr + needed),
+        width: this.mod.HEAPU32[wPtr >> 2]!,
+        height: this.mod.HEAPU32[hPtr >> 2]!,
+      };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [inPtr, bytes.length]);
+      if (outPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed]);
+      for (const [ptr, size] of [[wPtr, 4], [hPtr, 4], [lenPtr, 8]] as const) {
+        this.mod.ccall("goss_free", null, ["number", "number"], [ptr, size]);
+      }
+    }
+  }
+
+  /// A walkable route over the submitted world mesh, so an agent walks content
+  /// across real scanned ground. Null when no mesh is submitted or no route exists.
+  pathAcrossWorld(start: [number, number, number], goal: [number, number, number]): [number, number, number][] | null {
+    const capacity = 256;
+    const aPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const bPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const outBytes = capacity * 12;
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [outBytes]) as number;
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      this.mod.HEAPF32.set(start, aPtr / 4);
+      this.mod.HEAPF32.set(goal, bPtr / 4);
+      const args = ["number", "number", "number", "number", "number", "number"];
+      if (this.mod.ccall("goss_session_path_across_world", "number", args, [this.handle, aPtr, bPtr, outPtr, capacity, countPtr]) !== GOSS_OK) return null;
+      const found = Math.min(this.mod.HEAPU32[countPtr >> 2]!, capacity);
+      const out: [number, number, number][] = [];
+      for (let i = 0; i < found; i += 1) {
+        const w = (outPtr >> 2) + i * 3;
+        out.push([this.mod.HEAPF32[w]!, this.mod.HEAPF32[w + 1]!, this.mod.HEAPF32[w + 2]!]);
+      }
+      return out;
+    } finally {
+      for (const [ptr, bytes] of [[aPtr, 12], [bPtr, 12], [outPtr, outBytes], [countPtr, 8]] as const) {
+        this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+      }
+    }
+  }
+
+  /// What a submitted plane is, as a named kind rather than the platform's own
+  /// number, and whether a thing can rest on it.
+  planeKind(planeId: number): { kind: number; bearing: boolean } | null {
+    const kindPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const bearingPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    try {
+      const args = ["number", "number", "number", "number"];
+      if (this.mod.ccall("goss_session_plane_kind", "number", args, [this.handle, planeId, kindPtr, bearingPtr]) !== GOSS_OK) return null;
+      return { kind: this.mod.HEAPU32[kindPtr >> 2]!, bearing: this.mod.HEAPU32[bearingPtr >> 2] === 1 };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [kindPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [bearingPtr, 4]);
+    }
+  }
+
+  /// The plane this session would call the floor: the lowest bearing surface it
+  /// has been shown, or null when it has been shown none.
+  floorPlaneId(): number | null {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      if (this.mod.ccall("goss_session_floor_plane", "number", ["number", "number"], [this.handle, ptr]) !== GOSS_OK) return null;
+      return this.mod.HEAPU32[ptr >> 2]!;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 8]);
+    }
+  }
+
+  /// Where a footprint fits, best surface first: the bearing plane with the most
+  /// room left afterwards. An empty array is an answer.
+  placeOn(
+    item: { width: number; depth: number; height?: number },
+    occupants: { planeId: number; x: number; z: number; width: number; depth: number }[] = [],
+  ): { planeId: number; position: [number, number, number]; freeFraction: number }[] {
+    const itemPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const occupantBytes = occupants.length * 24;
+    const occupantPtr = occupants.length === 0 ? 0 : (this.mod.ccall("goss_alloc", "number", ["number"], [occupantBytes]) as number);
+    const capacity = 32;
+    const outBytes = capacity * 24;
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [outBytes]) as number;
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      this.mod.HEAPF32.set([item.width, item.depth, item.height ?? 0], itemPtr / 4);
+      // Each occupant is a u64 id then four floats: the id is written as two words
+      // because the heap view is 32-bit and an id past 2^32 is not a plane id any
+      // platform hands out.
+      occupants.forEach((o, i) => {
+        const base = occupantPtr + i * 24;
+        this.mod.HEAPU32[base >> 2] = o.planeId;
+        this.mod.HEAPU32[(base >> 2) + 1] = 0;
+        this.mod.HEAPF32.set([o.x, o.z, o.width, o.depth], (base + 8) / 4);
+      });
+      const args = ["number", "number", "number", "number", "number", "number", "number"];
+      const status = this.mod.ccall("goss_session_place_on", "number", args, [this.handle, itemPtr, occupantPtr, occupants.length, outPtr, capacity, countPtr]) as number;
+      if (status !== GOSS_OK && status !== GOSS_AGAIN) return [];
+      const found = Math.min(this.mod.HEAPU32[countPtr >> 2]!, capacity);
+      const out: { planeId: number; position: [number, number, number]; freeFraction: number }[] = [];
+      for (let i = 0; i < found; i += 1) {
+        const base = outPtr + i * 24;
+        const floats = (base + 8) / 4;
+        out.push({
+          planeId: this.mod.HEAPU32[base >> 2]!,
+          position: [this.mod.HEAPF32[floats]!, this.mod.HEAPF32[floats + 1]!, this.mod.HEAPF32[floats + 2]!],
+          freeFraction: this.mod.HEAPF32[floats + 3]!,
+        });
+      }
+      return out;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [itemPtr, 12]);
+      if (occupantPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [occupantPtr, occupantBytes]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, outBytes]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 8]);
+    }
+  }
+
+  /// Point to point in metres with its uncertainty. `known` is false when either
+  /// end vouched for no accuracy, so a sigma of zero is never read as certainty.
+  measureBetween(
+    from: [number, number, number],
+    to: [number, number, number],
+    fromAccuracyM = 0,
+    toAccuracyM = 0,
+  ): { metres: number; sigma: number; known: boolean } | null {
+    const aPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const bPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const valuePtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const sigmaPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const knownPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    try {
+      this.mod.HEAPF32.set(from, aPtr / 4);
+      this.mod.HEAPF32.set(to, bPtr / 4);
+      const args = ["number", "number", "number", "number", "number", "number", "number", "number"];
+      const status = this.mod.ccall("goss_session_measure_between", "number", args, [this.handle, aPtr, fromAccuracyM, bPtr, toAccuracyM, valuePtr, sigmaPtr, knownPtr]) as number;
+      if (status !== GOSS_OK) return null;
+      return {
+        metres: this.mod.HEAPF32[valuePtr >> 2]!,
+        sigma: this.mod.HEAPF32[sigmaPtr >> 2]!,
+        known: this.mod.HEAPU32[knownPtr >> 2] === 1,
+      };
+    } finally {
+      for (const [ptr, bytes] of [[aPtr, 12], [bPtr, 12], [valuePtr, 4], [sigmaPtr, 4], [knownPtr, 4]] as const) {
+        this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+      }
+    }
+  }
+
+  /// What this device can offer another: one landmark per world anchor it holds,
+  /// in its own frame. A pose never crosses.
+  sharedLandmarks(): { id: number; position: [number, number, number]; confidence: number }[] {
+    const capacity = 32;
+    const bytes = capacity * 24;
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      const args = ["number", "number", "number", "number"];
+      const status = this.mod.ccall("goss_session_shared_landmarks", "number", args, [this.handle, outPtr, capacity, countPtr]) as number;
+      if (status !== GOSS_OK && status !== GOSS_AGAIN) return [];
+      const found = Math.min(this.mod.HEAPU32[countPtr >> 2]!, capacity);
+      const out: { id: number; position: [number, number, number]; confidence: number }[] = [];
+      for (let i = 0; i < found; i += 1) {
+        const base = outPtr + i * 24;
+        const floats = (base + 8) / 4;
+        out.push({
+          id: this.mod.HEAPU32[base >> 2]!,
+          position: [this.mod.HEAPF32[floats]!, this.mod.HEAPF32[floats + 1]!, this.mod.HEAPF32[floats + 2]!],
+          confidence: this.mod.HEAPF32[floats + 3]!,
+        });
+      }
+      return out;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, bytes]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 8]);
+    }
+  }
+
+  /// The transform from the sender's origin into this one, column-major, with the
+  /// fit it achieved. Null when fewer than three landmarks matched, which cannot
+  /// fix a rigid transform.
+  alignShared(theirs: { id: number; position: [number, number, number]; confidence?: number }[]): { transform: Float32Array; rmsError: number; matched: number } | null {
+    const bytes = Math.max(theirs.length, 1) * 24;
+    const listPtr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    const transformPtr = this.mod.ccall("goss_alloc", "number", ["number"], [64]) as number;
+    const rmsPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const matchedPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    try {
+      theirs.forEach((l, i) => {
+        const base = listPtr + i * 24;
+        this.mod.HEAPU32[base >> 2] = l.id;
+        this.mod.HEAPU32[(base >> 2) + 1] = 0;
+        this.mod.HEAPF32.set([l.position[0], l.position[1], l.position[2], l.confidence ?? 1], (base + 8) / 4);
+      });
+      const args = ["number", "number", "number", "number", "number", "number"];
+      const status = this.mod.ccall("goss_session_align_shared", "number", args, [this.handle, listPtr, theirs.length, transformPtr, rmsPtr, matchedPtr]) as number;
+      if (status !== GOSS_OK) return null;
+      return {
+        transform: this.mod.HEAPF32.slice(transformPtr >> 2, (transformPtr >> 2) + 16),
+        rmsError: this.mod.HEAPF32[rmsPtr >> 2]!,
+        matched: this.mod.HEAPU32[matchedPtr >> 2]!,
+      };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [listPtr, bytes]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [transformPtr, 64]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [rmsPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [matchedPtr, 4]);
+    }
+  }
+
   raycastWorldMesh(origin: [number, number, number], direction: [number, number, number]): { point: [number, number, number]; distance: number } | null {
     const oPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
     this.mod.HEAPF32.set(origin, oPtr / 4);
@@ -3011,10 +3518,531 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 
+  /// Every section this build writes, asked of the engine rather than assumed: a
+  /// hand-written mask excluded the embedding section the day it was added.
+  selectAll(): number {
+    return this.mod.ccall("goss_perception_select_all", "number", [], []) as number;
+  }
+
+  /// How many verbs this engine build knows, asked of the engine rather than taken
+  /// from the enum, so a newer engine behind this wrapper is not misread.
+  verbCount(): number {
+    return this.mod.ccall("goss_scope_verb_count", "number", [], []) as number;
+  }
+
+  /// The engine's own name for a verb, so a refusal reads as a sentence and a
+  /// permission prompt reads as words rather than a bitmask.
+  verbName(verb: GossVerb | number): string | null {
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    let outPtr = 0;
+    let needed = 0;
+    try {
+      const args = ["number", "number", "number", "number"];
+      this.mod.ccall("goss_scope_verb_name", "number", args, [verb, 0, 0, lenPtr]);
+      needed = this.mod.HEAPU32[lenPtr >> 2]!;
+      if (needed === 0) return null;
+      outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed]) as number;
+      if (this.mod.ccall("goss_scope_verb_name", "number", args, [verb, outPtr, needed, lenPtr]) !== GOSS_OK) return null;
+      return new TextDecoder().decode(this.mod.HEAPU8.subarray(outPtr, outPtr + needed));
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 8]);
+      if (outPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed]);
+    }
+  }
+
+  /// One versioned record of what the engine currently sees. Every section
+  /// carries its own tag, version and byte length, so a consumer built against an
+  /// older schema steps over what it does not know. Sized in one retry.
+  perceptionSnapshot(select = this.selectAll()): Uint8Array | null {
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    try {
+      this.mod.ccall("goss_session_perception_snapshot", "number", ["number", "number", "number", "number", "number"], [this.handle, select, 0, 0, lenPtr]);
+      const needed = this.mod.HEAPU32[lenPtr >> 2];
+      if (needed === 0) return null;
+      const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [needed]) as number;
+      try {
+        const status = this.mod.ccall("goss_session_perception_snapshot", "number", ["number", "number", "number", "number", "number"], [this.handle, select, ptr, needed, lenPtr]);
+        if (status !== GOSS_OK) return null;
+        const written = this.mod.HEAPU32[lenPtr >> 2];
+        return this.mod.HEAPU8.slice(ptr, ptr + written);
+      } finally {
+        this.mod.ccall("goss_free", null, ["number", "number"], [ptr, needed]);
+      }
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    }
+  }
+
+  /// The same record as compact JSON, for a gateway that speaks it.
+  perceptionJson(select = this.selectAll()): string | null {
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    try {
+      this.mod.ccall("goss_session_perception_json", "number", ["number", "number", "number", "number", "number"], [this.handle, select, 0, 0, lenPtr]);
+      const needed = this.mod.HEAPU32[lenPtr >> 2];
+      if (needed === 0) return null;
+      const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [needed]) as number;
+      try {
+        const status = this.mod.ccall("goss_session_perception_json", "number", ["number", "number", "number", "number", "number"], [this.handle, select, ptr, needed, lenPtr]);
+        if (status !== GOSS_OK) return null;
+        const written = this.mod.HEAPU32[lenPtr >> 2];
+        return new TextDecoder().decode(this.mod.HEAPU8.slice(ptr, ptr + written));
+      } finally {
+        this.mod.ccall("goss_free", null, ["number", "number"], [ptr, needed]);
+      }
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    }
+  }
+
+  /// Opens a screen as a source. A scale of zero takes the surface's own.
+  openScreen(surfaceId: number, scale = 0): number | null {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    try {
+      if (this.mod.ccall("goss_session_open_screen", "number", ["number", "number", "number", "number"], [this.handle, surfaceId, scale, ptr]) !== GOSS_OK) return null;
+      return this.mod.HEAPU32[ptr >> 2];
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 4]);
+    }
+  }
+
+  closeScreen(screen: number): boolean {
+    return this.mod.ccall("goss_session_close_screen", "number", ["number", "number"], [this.handle, screen]) === GOSS_OK;
+  }
+
+  /// Submits the newest frame. False when the screen has not changed, so a still
+  /// desktop costs nothing.
+  stepScreen(screen: number, source = ""): boolean {
+    const bytes = new TextEncoder().encode(source);
+    const ptr = bytes.length === 0 ? 0 : (this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]) as number);
+    try {
+      if (ptr !== 0) this.mod.HEAPU8.set(bytes, ptr);
+      return this.mod.ccall("goss_session_step_screen", "number", ["number", "number", "number", "number"], [this.handle, screen, ptr, bytes.length]) === GOSS_OK;
+    } finally {
+      if (ptr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
+    }
+  }
+
+  /// Where a normalized point lands: logical points, backing pixels, desktop.
+  screenPoint(screen: number, x: number, y: number): { logical: [number, number]; pixel: [number, number]; desktop: [number, number] } | null {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [24]) as number;
+    try {
+      if (this.mod.ccall("goss_session_screen_point", "number", ["number", "number", "number", "number", "number", "number", "number"], [this.handle, screen, x, y, ptr, ptr + 8, ptr + 16]) !== GOSS_OK) return null;
+      const f = (off: number) => this.mod.HEAPF32[(ptr + off) >> 2];
+      return { logical: [f(0), f(4)], pixel: [f(8), f(12)], desktop: [f(16), f(20)] };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 24]);
+    }
+  }
+
+  /// Narrows what this session answers. A session opens fully permissive; a read
+  /// out of scope is dropped from the record rather than failing, and a verb out
+  /// of scope is refused.
+  setScope(sections: number, verbs: number): boolean {
+    return this.mod.ccall("goss_session_set_scope", "number", ["number", "number", "number"], [this.handle, sections, verbs]) === GOSS_OK;
+  }
+
+  scope(): { sections: number; verbs: number } {
+    const sectionsPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const verbsPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    try {
+      if (this.mod.ccall("goss_session_scope", "number", ["number", "number", "number"], [this.handle, sectionsPtr, verbsPtr]) !== GOSS_OK) return { sections: 0, verbs: 0 };
+      return { sections: this.mod.HEAPU32[sectionsPtr >> 2], verbs: this.mod.HEAPU32[verbsPtr >> 2] };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [sectionsPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [verbsPtr, 4]);
+    }
+  }
+
+  /// Opens the memory plane. Nothing is remembered until this is called, and
+  /// the bound is yours, so the memory you were promised is the memory you get.
+  memoryOpen(dim: number, maxEntries = 4096): boolean {
+    return this.mod.ccall("goss_session_memory_open", "number", ["number", "number", "number"], [this.handle, dim, maxEntries]) === GOSS_OK;
+  }
+
+  memoryClose(): boolean {
+    return this.mod.ccall("goss_session_memory_close", "number", ["number"], [this.handle]) === GOSS_OK;
+  }
+
+  /// Remembers one embedding; the same id replaces rather than duplicating.
+  remember(id: number, embedding: Float32Array): boolean {
+    const bytes = embedding.length * 4;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    try {
+      this.mod.HEAPF32.set(embedding, ptr >> 2);
+      return this.mod.ccall("goss_session_memory_remember", "number", ["number", "number", "number", "number"], [this.handle, id, ptr, embedding.length]) === GOSS_OK;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+    }
+  }
+
+  forget(id: number): boolean {
+    return this.mod.ccall("goss_session_memory_forget", "number", ["number", "number"], [this.handle, id]) === GOSS_OK;
+  }
+
+  /// The nearest remembered embeddings, fewer than k on a smaller memory rather
+  /// than padded with nothing.
+  memorySearch(query: Float32Array, k = 8): { id: number; score: number }[] {
+    const queryBytes = query.length * 4;
+    const queryPtr = this.mod.ccall("goss_alloc", "number", ["number"], [queryBytes]) as number;
+    const idsPtr = this.mod.ccall("goss_alloc", "number", ["number"], [k * 8]) as number;
+    const scoresPtr = this.mod.ccall("goss_alloc", "number", ["number"], [k * 4]) as number;
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    try {
+      this.mod.HEAPF32.set(query, queryPtr >> 2);
+      if (this.mod.ccall("goss_session_memory_search", "number", ["number", "number", "number", "number", "number", "number", "number"], [this.handle, queryPtr, query.length, k, idsPtr, scoresPtr, countPtr]) !== GOSS_OK) return [];
+      const count = this.mod.HEAPU32[countPtr >> 2];
+      const out: { id: number; score: number }[] = [];
+      for (let i = 0; i < count; i += 1) {
+        // The low word of the id is the whole value at any count this engine
+        // reaches, and reading it avoids a BigInt in the hot read.
+        out.push({ id: this.mod.HEAPU32[(idsPtr + i * 8) >> 2], score: this.mod.HEAPF32[(scoresPtr + i * 4) >> 2] });
+      }
+      return out;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [queryPtr, queryBytes]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [idsPtr, k * 8]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [scoresPtr, k * 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+    }
+  }
+
+  memoryStats(): { count: number; bytes: number } {
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const bytesPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      if (this.mod.ccall("goss_session_memory_stats", "number", ["number", "number", "number"], [this.handle, countPtr, bytesPtr]) !== GOSS_OK) return { count: 0, bytes: 0 };
+      return { count: this.mod.HEAPU32[countPtr >> 2], bytes: this.mod.HEAPU32[bytesPtr >> 2] };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [bytesPtr, 8]);
+    }
+  }
+
+  /// The whole memory as bytes, so a cold start is instant.
+  memorySave(): Uint8Array {
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      this.mod.ccall("goss_session_memory_save", "number", ["number", "number", "number", "number"], [this.handle, 0, 0, lenPtr]);
+      const needed = this.mod.HEAPU32[lenPtr >> 2];
+      if (needed === 0) return new Uint8Array(0);
+      const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [needed]) as number;
+      try {
+        if (this.mod.ccall("goss_session_memory_save", "number", ["number", "number", "number", "number"], [this.handle, ptr, needed, lenPtr]) !== GOSS_OK) return new Uint8Array(0);
+        return new Uint8Array(this.mod.HEAPU8.subarray(ptr, ptr + needed));
+      } finally {
+        this.mod.ccall("goss_free", null, ["number", "number"], [ptr, needed]);
+      }
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 8]);
+    }
+  }
+
+  /// The memory sealed under a host key. The nonce is yours: reusing one under
+  /// the same key breaks the cipher.
+  memorySaveSealed(key: Uint8Array, nonce: Uint8Array): Uint8Array {
+    const keyPtr = this.mod.ccall("goss_alloc", "number", ["number"], [key.length]) as number;
+    const noncePtr = this.mod.ccall("goss_alloc", "number", ["number"], [nonce.length]) as number;
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      this.mod.HEAPU8.set(key, keyPtr);
+      this.mod.HEAPU8.set(nonce, noncePtr);
+      this.mod.ccall("goss_session_memory_save_sealed", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, keyPtr, noncePtr, 0, 0, lenPtr]);
+      const needed = this.mod.HEAPU32[lenPtr >> 2];
+      if (needed === 0) return new Uint8Array(0);
+      const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [needed]) as number;
+      try {
+        if (this.mod.ccall("goss_session_memory_save_sealed", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, keyPtr, noncePtr, ptr, needed, lenPtr]) !== GOSS_OK) return new Uint8Array(0);
+        return new Uint8Array(this.mod.HEAPU8.subarray(ptr, ptr + needed));
+      } finally {
+        this.mod.ccall("goss_free", null, ["number", "number"], [ptr, needed]);
+      }
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [keyPtr, key.length]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [noncePtr, nonce.length]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 8]);
+    }
+  }
+
+  memoryLoadSealed(key: Uint8Array, bytes: Uint8Array): boolean {
+    const keyPtr = this.mod.ccall("goss_alloc", "number", ["number"], [key.length]) as number;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]) as number;
+    try {
+      this.mod.HEAPU8.set(key, keyPtr);
+      this.mod.HEAPU8.set(bytes, ptr);
+      return this.mod.ccall("goss_session_memory_load_sealed", "number", ["number", "number", "number", "number"], [this.handle, keyPtr, ptr, bytes.length]) === GOSS_OK;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [keyPtr, key.length]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
+    }
+  }
+
+  memoryLoad(bytes: Uint8Array): boolean {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]) as number;
+    try {
+      this.mod.HEAPU8.set(bytes, ptr);
+      return this.mod.ccall("goss_session_memory_load", "number", ["number", "number", "number"], [this.handle, ptr, bytes.length]) === GOSS_OK;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
+    }
+  }
+
+  /// Turns on the text rail. A detector alone finds where the text is, which
+  /// is what a redaction or a rectified crop needs; pass a recogniser and its
+  /// dictionary to get strings back.
+  enableText(detector: Uint8Array, recognizer?: Uint8Array, dictionary?: Uint8Array, detectSide = 320): boolean {
+    const rec = recognizer ?? new Uint8Array(0);
+    const dict = dictionary ?? new Uint8Array(0);
+    const detPtr = this.mod.ccall("goss_alloc", "number", ["number"], [detector.length]) as number;
+    const recPtr = rec.length === 0 ? 0 : (this.mod.ccall("goss_alloc", "number", ["number"], [rec.length]) as number);
+    const dictPtr = dict.length === 0 ? 0 : (this.mod.ccall("goss_alloc", "number", ["number"], [dict.length]) as number);
+    try {
+      this.mod.HEAPU8.set(detector, detPtr);
+      if (recPtr !== 0) this.mod.HEAPU8.set(rec, recPtr);
+      if (dictPtr !== 0) this.mod.HEAPU8.set(dict, dictPtr);
+      return this.mod.ccall(
+        "goss_session_enable_text",
+        "number",
+        ["number", "number", "number", "number", "number", "number", "number", "number"],
+        [this.handle, detPtr, detector.length, recPtr, rec.length, dictPtr, dict.length, detectSide],
+      ) === GOSS_OK;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [detPtr, detector.length]);
+      if (recPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [recPtr, rec.length]);
+      if (dictPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [dictPtr, dict.length]);
+    }
+  }
+
+  disableText(): boolean {
+    return this.mod.ccall("goss_session_disable_text", "number", ["number"], [this.handle]) === GOSS_OK;
+  }
+
+  /// How many readings the frame holds and how many the bound turned away.
+  textCount(): { live: number; refused: number } {
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const refusedPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      if (this.mod.ccall("goss_session_text_count", "number", ["number", "number", "number"], [this.handle, countPtr, refusedPtr]) !== GOSS_OK) {
+        return { live: 0, refused: 0 };
+      }
+      return { live: this.mod.HEAPU32[countPtr >> 2], refused: this.mod.HEAPU32[refusedPtr >> 2] };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [refusedPtr, 8]);
+    }
+  }
+
+  /// Everything the frame says, each reading with its quadrilateral and string.
+  readings(): GossReading[] {
+    const { live } = this.textCount();
+    const entryBytes = 64;
+    const entryPtr = this.mod.ccall("goss_alloc", "number", ["number"], [entryBytes]) as number;
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    const out: GossReading[] = [];
+    try {
+      for (let i = 0; i < live; i += 1) {
+        if (this.mod.ccall("goss_session_text_at", "number", ["number", "number", "number"], [this.handle, i, entryPtr]) !== GOSS_OK) continue;
+        const f32 = (off: number) => this.mod.HEAPF32[(entryPtr + off) >> 2];
+        const u32 = (off: number) => this.mod.HEAPU32[(entryPtr + off) >> 2];
+        this.mod.ccall("goss_session_text_string", "number", ["number", "number", "number", "number", "number"], [this.handle, i, 0, 0, lenPtr]);
+        const needed = this.mod.HEAPU32[lenPtr >> 2];
+        let text = "";
+        if (needed > 0) {
+          const textPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed]) as number;
+          try {
+            if (this.mod.ccall("goss_session_text_string", "number", ["number", "number", "number", "number", "number"], [this.handle, i, textPtr, needed, lenPtr]) === GOSS_OK) {
+              text = new TextDecoder().decode(this.mod.HEAPU8.subarray(textPtr, textPtr + needed));
+            }
+          } finally {
+            this.mod.ccall("goss_free", null, ["number", "number"], [textPtr, needed]);
+          }
+        }
+        out.push({
+          text,
+          quad: [f32(0), f32(4), f32(8), f32(12), f32(16), f32(20), f32(24), f32(28)],
+          confidence: f32(32),
+          origin: u32(36),
+          script: u32(40),
+          direction: u32(44),
+          trackId: u32(48),
+          line: u32(52),
+          paragraph: u32(56),
+        });
+      }
+      return out;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [entryPtr, entryBytes]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 8]);
+    }
+  }
+
+  /// Adds or updates one annotation. The same id replaces rather than
+  /// duplicating, so moving one box every frame leaks no entry per frame.
+  annotate(a: GossAnnotation, text = ""): boolean {
+    const bytes = 64;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    const encoded = new TextEncoder().encode(text);
+    const textPtr = encoded.length === 0 ? 0 : (this.mod.ccall("goss_alloc", "number", ["number"], [encoded.length]) as number);
+    try {
+      const u32 = (off: number, v: number) => { this.mod.HEAPU32[(ptr + off) >> 2] = v; };
+      const f32 = (off: number, v: number) => { this.mod.HEAPF32[(ptr + off) >> 2] = v; };
+      u32(0, a.id);
+      u32(4, a.kind);
+      u32(8, a.space ?? 0);
+      for (let i = 0; i < 4; i += 1) f32(12 + i * 4, a.rect?.[i] ?? 0);
+      u32(28, a.trackId ?? 0);
+      this.mod.HEAPU8[ptr + 32] = a.colour?.[0] ?? 255;
+      this.mod.HEAPU8[ptr + 33] = a.colour?.[1] ?? 255;
+      this.mod.HEAPU8[ptr + 34] = a.colour?.[2] ?? 255;
+      this.mod.HEAPU8[ptr + 35] = a.colour?.[3] ?? 255;
+      this.mod.HEAP32[(ptr + 36) >> 2] = a.z ?? 0;
+      f32(40, a.opacity ?? 1);
+      u32(44, a.lifetimeKind ?? 0);
+      u32(48, a.lifetimeValue ?? 0);
+      u32(52, 0);
+      u32(56, a.onLost ?? 0);
+      f32(60, a.value ?? 0);
+      if (textPtr !== 0) this.mod.HEAPU8.set(encoded, textPtr);
+      return this.mod.ccall("goss_session_annotate", "number", ["number", "number", "number", "number"], [this.handle, ptr, textPtr, encoded.length]) === GOSS_OK;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+      if (textPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [textPtr, encoded.length]);
+    }
+  }
+
+  annotationRemove(id: number): boolean {
+    return this.mod.ccall("goss_session_annotation_remove", "number", ["number", "number"], [this.handle, id]) === GOSS_OK;
+  }
+
+  annotationClear(): boolean {
+    return this.mod.ccall("goss_session_annotation_clear", "number", ["number"], [this.handle]) === GOSS_OK;
+  }
+
+  /// Live count and how many adds the bound turned away.
+  annotationCount(): { live: number; refused: number } {
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const refusedPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      if (this.mod.ccall("goss_session_annotation_count", "number", ["number", "number", "number"], [this.handle, countPtr, refusedPtr]) !== GOSS_OK) {
+        return { live: 0, refused: 0 };
+      }
+      return { live: this.mod.HEAPU32[countPtr >> 2], refused: this.mod.HEAPU32[refusedPtr >> 2] };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [refusedPtr, 8]);
+    }
+  }
+
+  /// Installs the egress policy: what the brain sees and what it costs.
+  egressConfigure(config: GossEgressConfig): boolean {
+    const bytes = 48;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    try {
+      const u32 = (off: number, v: number) => { this.mod.HEAPU32[(ptr + off) >> 2] = v; };
+      u32(0, config.targetLongEdge ?? 0);
+      u32(4, config.format ?? 0);
+      u32(8, config.quality ?? 80);
+      u32(12, config.maxFps ?? 0);
+      u32(16, config.maxBytesPerSecond ?? 0);
+      u32(20, 0);
+      u32(24, config.source ?? 0);
+      u32(28, config.trigger ?? 0b1010);
+      this.mod.HEAPF32[(ptr + 32) >> 2] = config.changeThreshold ?? 0.02;
+      u32(40, config.keyframeIntervalUs ?? 5_000_000);
+      u32(44, 0);
+      return this.mod.ccall("goss_session_egress_configure", "number", ["number", "number"], [this.handle, ptr]) === GOSS_OK;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+    }
+  }
+
+  /// One frame, whatever the change score says.
+  egressRequest(): boolean {
+    return this.mod.ccall("goss_session_egress_request", "number", ["number"], [this.handle]) === GOSS_OK;
+  }
+
+  /// Whether this frame is worth sending and why. Null when there are no pixels
+  /// to score, which is not a failure.
+  egressDecide(): GossEgressDecision | null {
+    const bytes = 40;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    try {
+      if (this.mod.ccall("goss_session_egress_decide", "number", ["number", "number"], [this.handle, ptr]) !== GOSS_OK) return null;
+      const w = (off: number) => this.mod.HEAPU32[(ptr + off) >> 2];
+      return {
+        send: w(0) !== 0,
+        reason: w(4),
+        changeScore: this.mod.HEAPF32[(ptr + 8) >> 2],
+        sinceLastUs: w(16),
+        sentTotal: w(24),
+        heldTotal: w(32),
+      };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+    }
+  }
+
+  /// The session's events as an async iterable, which is how a page wants them:
+  /// `for await (const e of session.eventStream())`. Polls on an interval because
+  /// the ring is drained by the caller and there is nothing to await on the
+  /// engine side. A drop is yielded as an event of its own rather than swallowed.
+  async *eventStream(pollMs = 16, batch = 64): AsyncGenerator<GossEvent> {
+    for (;;) {
+      const drained = this.pollEvents(batch);
+      for (const event of drained.events) yield event;
+      if (drained.dropped > 0) {
+        yield { kind: 0, sequence: 0, timestampUs: 0, a: drained.dropped, b: 0, value: 0 };
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+  }
+
+  /// Drains the session's event ring in order. `dropped` says whether anything
+  /// was missed since the last drain, and is cleared by the read.
+  pollEvents(capacity = 64): { events: GossEvent[]; dropped: number } {
+    // kind u32 at 0, sequence u64 at 8, timestamp i64 at 16, a u32 at 24,
+    // b u32 at 28, value f32 at 32; forty bytes with the tail padding.
+    const stride = 40;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [capacity * stride]) as number;
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const droppedPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      if (this.mod.ccall("goss_session_poll_events", "number", ["number", "number", "number", "number", "number"], [this.handle, ptr, capacity, countPtr, droppedPtr]) !== GOSS_OK) {
+        return { events: [], dropped: 0 };
+      }
+      const n = this.mod.HEAPU32[countPtr >> 2];
+      const events: GossEvent[] = [];
+      for (let i = 0; i < n; i += 1) {
+        const base = ptr + i * stride;
+        events.push({
+          kind: this.mod.HEAPU32[base >> 2],
+          // The low word of the sequence is the whole count at any rate a session
+          // reaches, and reading it avoids a BigInt in the hot drain.
+          sequence: this.mod.HEAPU32[(base + 8) >> 2],
+          timestampUs: this.mod.HEAPU32[(base + 16) >> 2],
+          a: this.mod.HEAPU32[(base + 24) >> 2],
+          b: this.mod.HEAPU32[(base + 28) >> 2],
+          value: this.mod.HEAPF32[(base + 32) >> 2],
+        });
+      }
+      return { events, dropped: this.mod.HEAPU32[droppedPtr >> 2] };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, capacity * stride]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [droppedPtr, 8]);
+    }
+  }
+
+  /// A break the page saw and the engine cannot: the camera track ended, the
+  /// tab was hidden. Declared so the gap it leaves is the break rather than
+  /// drift counted against the engine.
+  reportInterruption(kind: GossInterruption): boolean {
+    return this.mod.ccall("goss_session_report_interruption", "number", ["number", "number"], [this.handle, kind]) === GOSS_OK;
+  }
+
   /// This session's counters: frames in and out, the rung and how often it
   /// moved, the analysis each modality ran, the nodes that are not ready.
   sessionReport(): GossSessionReport | null {
-    const bytes = 2 * 8 + 2 * 4 + 5 * 8 + 3 * 4;
+    const bytes = SESSION_REPORT_BYTES;
     const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
     try {
       if (this.mod.ccall("goss_session_read_report", "number", ["number", "number"], [this.handle, ptr]) !== 0) return null;
@@ -3034,6 +4062,8 @@ export class GossSession {
         nodesDegraded: low(64),
         nodeReportsLost: low(68),
         scriptFaults: low(72),
+        mlPlanGrowths: low(76),
+        mlPlanBytes: low(80),
       };
     } finally {
       this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
@@ -3442,3 +4472,5 @@ export { GossVideoTexture } from "./video-texture.js";
 // the way the Swift and Kotlin SDKs carry theirs.
 export { GossFaceTracker, GossHandTracker, GossPoseTracker, GossSegmenter, GOSS_FACE_BLENDSHAPE_COUNT, GOSS_MAX_HANDS } from "./tracking.js";
 export type { GossFaceResult, GossHand, GossHandResult, GossPoseResult } from "./tracking.js";
+
+export { shareScreen, type GossScreenShare, type GossDisplaySurface } from "./screen-capture.js";

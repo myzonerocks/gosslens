@@ -44,11 +44,14 @@ pub fn shapeFromDims(dims: []const i32) Shape {
     return s;
 }
 
-/// How an ml.infer input plane is normalized, matching how the model was
-/// exported: symmetric maps rgb to [-1,1] instead of [0,1], and mean/std_dev
-/// subtract and divide per channel afterward (an ImageNet-style export).
+/// Which range an ml.infer input plane is written in, matching how the model was
+/// exported, and the per-channel mean and deviation applied afterward for an
+/// ImageNet-style export. A boolean said symmetric or not and could not say byte,
+/// which is what a published detector needed and silently did not get.
+pub const Range = enum { unit, symmetric, byte };
+
 pub const Norm = struct {
-    symmetric: bool = false,
+    range: Range = .unit,
     mean: [3]f32 = .{ 0, 0, 0 },
     std_dev: [3]f32 = .{ 1, 1, 1 },
 };
@@ -59,6 +62,10 @@ pub const Bounds = struct {
     max_model_bytes: usize = 32 * 1024 * 1024,
     max_tensors: u8 = 16,
     max_tensor_bytes: u64 = 64 * 1024 * 1024,
+    /// The square side to run a model that declares none. A net exported with
+    /// symbolic spatial dims carries no size of its own, so the lens says which
+    /// one to use; zero leaves whatever shape the model declared.
+    requested_input_side: u32 = 0,
 
     /// Whether a model within these counts and sizes is allowed to load.
     pub fn admits(self: Bounds, model_bytes: usize, tensor_count: usize, largest_tensor_bytes: u64) bool {

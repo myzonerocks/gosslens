@@ -39,12 +39,14 @@ struct VideoDecoder {
   AVAssetReaderTrackOutput* output = nil;
   uint32_t width = 0;
   uint32_t height = 0;
+  int64_t duration_us = 0;
 };
 
-// A fresh reader over the retained track, positioned at the start. The
-// prior reader, if any, is cancelled first. AVAssetReader is
-// forward-only, so this is both the initial start and the loop rewind.
-bool startReader(VideoDecoder* d) {
+// A fresh reader over the retained track, positioned at a time. The prior reader,
+// if any, is cancelled first. AVAssetReader is forward-only, so rebuilding it with
+// a time range IS the seek: it decodes from the keyframe at or before the target,
+// which is what a container's index can offer and what a scrubber needs.
+bool startReaderAt(VideoDecoder* d, int64_t from_us) {
   if (d->reader) {
     [d->reader cancelReading];
     d->reader = nil;
@@ -53,6 +55,10 @@ bool startReader(VideoDecoder* d) {
   NSError* error = nil;
   AVAssetReader* reader = [[AVAssetReader alloc] initWithAsset:d->asset error:&error];
   if (reader == nil || error != nil) return false;
+  if (from_us > 0) {
+    const CMTime start = CMTimeMake(from_us, 1000000);
+    reader.timeRange = CMTimeRangeMake(start, kCMTimePositiveInfinity);
+  }
   AVAssetReaderTrackOutput* output = [[AVAssetReaderTrackOutput alloc]
       initWithTrack:d->track
      outputSettings:@{(NSString*)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA)}];
@@ -63,6 +69,8 @@ bool startReader(VideoDecoder* d) {
   d->output = output;
   return true;
 }
+
+bool startReader(VideoDecoder* d) { return startReaderAt(d, 0); }
 
 void* video_open_impl(const uint8_t* path, size_t path_len,
                       uint32_t* out_width, uint32_t* out_height) {
@@ -89,6 +97,8 @@ void* video_open_impl(const uint8_t* path, size_t path_len,
     d->track = tracks.firstObject;
     d->width = (uint32_t)d->track.naturalSize.width;
     d->height = (uint32_t)d->track.naturalSize.height;
+    const CMTime dur = d->track.timeRange.duration;
+    d->duration_us = CMTIME_IS_VALID(dur) ? (int64_t)(CMTimeGetSeconds(dur) * 1000000.0) : 0;
     if (!startReader(d)) {
       delete d;
       return nullptr;
@@ -100,13 +110,17 @@ void* video_open_impl(const uint8_t* path, size_t path_len,
 }
 
 int32_t video_read_impl(void* handle, uint8_t* out_bgra, size_t capacity,
-                        uint32_t* out_width, uint32_t* out_height) {
+                        uint32_t* out_width, uint32_t* out_height, int64_t* out_pts_us) {
   auto* d = static_cast<VideoDecoder*>(handle);
   if (d == nullptr || d->output == nullptr || out_bgra == nullptr) return -1;
   @autoreleasepool {
     CMSampleBufferRef sample = [d->output copyNextSampleBuffer];
     if (sample == nullptr) {
       return d->reader.status == AVAssetReaderStatusCompleted ? 1 : -1;
+    }
+    if (out_pts_us) {
+      const CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample);
+      *out_pts_us = CMTIME_IS_VALID(pts) ? (int64_t)(CMTimeGetSeconds(pts) * 1000000.0) : -1;
     }
     CVImageBufferRef image = CMSampleBufferGetImageBuffer(sample);
     if (image == nullptr) {
@@ -142,6 +156,22 @@ int32_t video_reset_impl(void* handle) {
   }
 }
 
+// Rebuilds the reader from the requested time. Out of range is refused rather
+// than clamped: a clamped seek returns the wrong frame and a scrubber cannot tell.
+int32_t video_seek_impl(void* handle, int64_t target_us) {
+  auto* d = static_cast<VideoDecoder*>(handle);
+  if (d == nullptr || target_us < 0) return -1;
+  if (d->duration_us > 0 && target_us > d->duration_us) return -1;
+  @autoreleasepool {
+    return startReaderAt(d, target_us) ? 0 : -1;
+  }
+}
+
+int64_t video_duration_impl(void* handle) {
+  auto* d = static_cast<VideoDecoder*>(handle);
+  return d == nullptr ? 0 : d->duration_us;
+}
+
 void video_close_impl(void* handle) {
   auto* d = static_cast<VideoDecoder*>(handle);
   if (d == nullptr) return;
@@ -174,8 +204,17 @@ extern "C" void* goss_video_open(const uint8_t* path, size_t path_len,
 // Returns 0 on a frame, 1 at end of stream (caller loops via reset), -1
 // on error.
 extern "C" int32_t goss_video_read(void* handle, uint8_t* out_bgra, size_t capacity,
-                                   uint32_t* out_width, uint32_t* out_height) {
-  GOSS_SHIM_GUARD(int32_t, -1, video_read_impl(handle, out_bgra, capacity, out_width, out_height))
+                                   uint32_t* out_width, uint32_t* out_height,
+                                   int64_t* out_pts_us) {
+  GOSS_SHIM_GUARD(int32_t, -1, video_read_impl(handle, out_bgra, capacity, out_width, out_height, out_pts_us))
+}
+
+extern "C" int32_t goss_video_seek(void* handle, int64_t target_us) {
+  GOSS_SHIM_GUARD(int32_t, -1, video_seek_impl(handle, target_us))
+}
+
+extern "C" int64_t goss_video_duration(void* handle) {
+  GOSS_SHIM_GUARD(int64_t, 0, video_duration_impl(handle))
 }
 
 extern "C" int32_t goss_video_reset(void* handle) {

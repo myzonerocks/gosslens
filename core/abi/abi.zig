@@ -16,6 +16,11 @@ const render = @import("render");
 const tracking = @import("tracking");
 const segmentation = @import("segmentation");
 const ml_infer = @import("ml_infer");
+const text_core = @import("text");
+const text_infer = @import("text_infer");
+const memory_plane = @import("memory");
+const screen_geometry = @import("screen");
+const screen_capture = @import("screen_capture");
 const diffusion = @import("diffusion");
 const face = @import("face");
 const face_geometry = @import("face_geometry");
@@ -23,6 +28,17 @@ const png = @import("png");
 const gif = @import("gif");
 const jpeg = @import("jpeg");
 const color = @import("color");
+pub const media = @import("media");
+const perception_mod = @import("perception");
+const perception = perception_mod.snapshot;
+const perception_json = perception_mod.json;
+const perception_events = perception_mod.events;
+const perception_egress = perception_mod.egress;
+const perception_actions = perception_mod.actions;
+
+/// Events a session holds before a drainer must catch up. Bounded so a consumer
+/// that stops draining cannot grow the engine; overflow is counted and reported.
+const default_event_capacity: usize = 256;
 const media_recording = @import("media_recording");
 const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
@@ -38,7 +54,11 @@ const fingerprint = @import("fingerprint");
 const comp = @import("layout");
 const geo = @import("geo");
 const world_mesh = @import("world_mesh");
-const font = @import("font");
+const navmesh = @import("navmesh");
+const spatial = @import("spatial");
+/// The built-in font, re-exported so a proof draws a scene with the engine's own
+/// glyphs rather than a second module over the same file.
+pub const font = @import("font");
 const stroke = @import("stroke");
 const wboard = @import("world_board");
 const physics = @import("physics");
@@ -132,10 +152,18 @@ pub const abi_major: u16 = 0;
 // The frozen ABI surface lives here so the version and the dump tool read
 // one list. A new export adds a line to abi_functions, its header decl, and
 // its body - nothing else.
-pub const abi_surface_types = .{ FrameDesc, Landmarks, EngineConfig, SessionConfig, RendererDesc, FramePlanes, FaceResult, HandResult, PoseResult, LensSignals, CameraControls, RecordingPolicy, CaptureUiIntent, CaptionSegment, CaptureGuidance, NodeReport, EngineReport, SessionReport };
+/// Which sections a caller may ask for, named rather than numbered by hand.
+pub const PerceptionSelect = perception.Select;
+
+/// Every struct that crosses the ABI. One left out is a layout the baseline never
+/// compares and a change the version cannot move, which is the one way a caller
+/// can still be handed a struct wider than the one it allocated.
+pub const abi_surface_types = .{ FrameDesc, Landmarks, EngineConfig, SessionConfig, RendererDesc, FramePlanes, FaceResult, HandResult, PoseResult, LensSignals, CameraControls, RecordingPolicy, CaptureUiIntent, CaptionSegment, CaptureGuidance, NodeReport, EngineReport, SessionReport, AnnotationDesc, CaptureConfig, ClipInfo, EgressConfig, EgressDecision, Event, Footprint, MediaCapabilities, Occupant, Placement, RecordingConfig, RecordingReport, ScreenSurface, SharedLandmark, TextEntry, WorldAnchor, WorldLight, WorldPlane, WorldState };
 
 pub const abi_functions = [_][]const u8{
     "uint32_t goss_abi_version(void)",
+    "goss_status goss_abi_check(uint32_t caller_version)",
+    "goss_status goss_lens_capabilities_missing(const uint8_t *manifest_json, size_t manifest_len, uint64_t *out_missing)",
     "uint64_t goss_capabilities(void)",
     "void *goss_alloc(size_t size)",
     "void goss_free(void *ptr, size_t size)",
@@ -153,10 +181,22 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_recording_start(goss_engine *engine, goss_session *session, const uint8_t *path, size_t path_len, const goss_recording_config *config)",
     "goss_status goss_engine_recording_set_realtime(goss_engine *engine, bool realtime)",
     "goss_status goss_engine_recording_stop(goss_engine *engine)",
+    "goss_status goss_engine_recording_pause(goss_engine *engine)",
+    "goss_status goss_engine_recording_resume(goss_engine *engine)",
+    "goss_status goss_session_report_interruption(goss_session *session, goss_interruption kind)",
+    "goss_status goss_engine_recording_read_report(goss_engine *engine, goss_recording_report *out_report)",
     "goss_status goss_session_submit_audio(goss_session *session, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t timestamp_us)",
     "goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light)",
     "goss_status goss_session_submit_world_mesh(goss_session *session, const float *vertices, size_t vertex_count, const uint32_t *indices, size_t index_count)",
+    "goss_status goss_engine_decode_png(const uint8_t *bytes, size_t len, uint8_t *out_rgba, size_t capacity, uint32_t *out_width, uint32_t *out_height, size_t *out_len)",
+    "goss_status goss_session_plane_kind(goss_session *session, uint64_t plane_id, uint32_t *out_kind, uint32_t *out_bearing)",
+    "goss_status goss_session_floor_plane(goss_session *session, uint64_t *out_plane_id)",
+    "goss_status goss_session_place_on(goss_session *session, const goss_footprint *item, const goss_occupant *occupants, size_t occupant_count, goss_placement *out, size_t capacity, size_t *out_count)",
+    "goss_status goss_session_measure_between(goss_session *session, const float *from, float from_accuracy_m, const float *to, float to_accuracy_m, float *out_metres, float *out_sigma, uint32_t *out_known)",
+    "goss_status goss_session_shared_landmarks(goss_session *session, goss_shared_landmark *out, size_t capacity, size_t *out_count)",
+    "goss_status goss_session_align_shared(goss_session *session, const goss_shared_landmark *theirs, size_t count, float *out_transform, float *out_rms_error, uint32_t *out_matched)",
     "goss_status goss_session_raycast_world_mesh(goss_session *session, const float *origin, const float *direction, float *out_point, float *out_distance)",
+    "goss_status goss_session_path_across_world(goss_session *session, const float *start, const float *goal, float *out_points, size_t capacity, size_t *out_count)",
     "goss_status goss_session_hit_test(goss_session *session, float screen_x, float screen_y, float *out_position)",
     "goss_status goss_engine_capture_still(goss_engine *engine, goss_session *session, const goss_capture_config *config, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height)",
     "goss_status goss_engine_capture_live_frame(goss_engine *engine, goss_session *session, uint32_t format, uint8_t *out_data, size_t out_capacity, uint32_t *out_width, uint32_t *out_height)",
@@ -280,6 +320,23 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_set_beauty_makeup_texture(goss_session *session, int32_t effect, const uint8_t *rgba, uint32_t width, uint32_t height)",
     "goss_status goss_session_set_face_landmarks(goss_session *session, const float *points, uint32_t point_count)",
     "goss_status goss_session_submit_frame_rgba_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride)",
+    "goss_status goss_session_open_clip(goss_session *session, const uint8_t *path, size_t path_len, uint32_t *out_clip)",
+    "goss_status goss_session_clip_submit_frame(goss_session *session, uint32_t clip, int64_t timestamp_us)",
+    "goss_status goss_session_clip_seek(goss_session *session, uint32_t clip, int64_t target_us)",
+    "goss_status goss_session_clip_info(goss_session *session, uint32_t clip, goss_clip_info *out_info)",
+    "goss_status goss_session_close_clip(goss_session *session, uint32_t clip)",
+    "goss_status goss_session_clip_step(goss_session *session, uint32_t clip, int32_t frames)",
+    "goss_status goss_engine_media_capabilities(goss_engine *engine, goss_media_capabilities *out_caps)",
+    "goss_status goss_session_perception_snapshot(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_perception_json(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_poll_events(goss_session *session, goss_event *out, uint32_t capacity, uint32_t *out_count, uint64_t *out_dropped)",
+    "goss_status goss_session_egress_configure(goss_session *session, const goss_egress_config *config)",
+    "goss_status goss_session_egress_request(goss_session *session)",
+    "goss_status goss_session_egress_decide(goss_session *session, goss_egress_decision *out_decision)",
+    "goss_status goss_session_annotate(goss_session *session, const goss_annotation *annotation, const uint8_t *text, size_t text_len)",
+    "goss_status goss_session_annotation_remove(goss_session *session, uint32_t id)",
+    "goss_status goss_session_annotation_clear(goss_session *session)",
+    "goss_status goss_session_annotation_count(goss_session *session, uint32_t *out_count, uint64_t *out_refused)",
     "goss_status goss_session_beautify_frame(goss_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out)",
     "goss_status goss_session_activate_lens(goss_session *session, const uint8_t *manifest_json, size_t manifest_len)",
     "goss_status goss_session_activate_lens_from_directory(goss_session *session, const uint8_t *bundle_path, size_t bundle_path_len)",
@@ -312,14 +369,54 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_node_report_count(goss_session *session, uint32_t *out_count, uint32_t *out_lost)",
     "goss_status goss_session_node_report_at(goss_session *session, uint32_t index, goss_node_report *out_report)",
     "goss_status goss_session_node_report_id(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_ml_op_support(const uint8_t *model, size_t model_len, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_enable_text(goss_session *session, const uint8_t *detector, size_t detector_len, const uint8_t *recognizer, size_t recognizer_len, const uint8_t *dictionary, size_t dictionary_len, uint32_t detect_side)",
+    "goss_status goss_session_disable_text(goss_session *session)",
+    "goss_status goss_session_text_count(goss_session *session, uint32_t *out_count, uint64_t *out_refused)",
+    "goss_status goss_session_text_at(goss_session *session, uint32_t index, goss_text_entry *out_entry)",
+    "goss_status goss_session_text_string(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_memory_open(goss_session *session, uint32_t dim, uint32_t max_entries)",
+    "goss_status goss_session_memory_close(goss_session *session)",
+    "goss_status goss_session_memory_remember(goss_session *session, uint64_t id, const float *embedding, uint32_t dim)",
+    "goss_status goss_session_memory_forget(goss_session *session, uint64_t id)",
+    "goss_status goss_session_memory_search(goss_session *session, const float *query, uint32_t dim, uint32_t k, uint64_t *out_ids, float *out_scores, uint32_t *out_count)",
+    "goss_status goss_session_memory_stats(goss_session *session, uint32_t *out_count, uint64_t *out_bytes)",
+    "goss_status goss_session_memory_save(goss_session *session, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_memory_load(goss_session *session, const uint8_t *bytes, size_t len)",
+    "goss_status goss_session_set_scope(goss_session *session, uint32_t sections, uint32_t verbs)",
+    "goss_status goss_scope_verb_name(uint32_t verb, uint8_t *out, size_t capacity, size_t *out_len)",
+    "uint32_t goss_scope_verb_count(void)",
+    "goss_status goss_session_scope(goss_session *session, uint32_t *out_sections, uint32_t *out_verbs)",
+    "goss_status goss_engine_screen_count(goss_engine *engine, uint32_t *out_count)",
+    "goss_status goss_engine_screen_at(goss_engine *engine, uint32_t index, goss_screen_surface *out_surface)",
+    "goss_status goss_engine_screen_title(goss_engine *engine, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_open_screen(goss_session *session, uint64_t surface_id, float scale, uint32_t *out_screen)",
+    "goss_status goss_session_close_screen(goss_session *session, uint32_t screen)",
+    "goss_status goss_session_step_screen(goss_session *session, uint32_t screen, const uint8_t *name, size_t name_len)",
+    "goss_status goss_session_screen_point(goss_session *session, uint32_t screen, float x, float y, float *out_logical, float *out_pixel, float *out_desktop)",
+    "goss_status goss_session_memory_save_sealed(goss_session *session, const uint8_t *key, const uint8_t *nonce, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_memory_load_sealed(goss_session *session, const uint8_t *key, const uint8_t *bytes, size_t len)",
+    "uint32_t goss_perception_select_all(void)",
 };
 
 // The minor advances from the surface, never by hand: a new op lengthens
-// abi_functions so the number moves on its own and parallel branches cannot
-// pick the same next value. The floor pins the value the day it landed.
+// abi_functions and a wider struct lengthens the bytes a caller has to allocate,
+// so the number moves on its own and parallel branches cannot pick the same next
+// value. The floors pin the values the day they landed.
 const abi_minor_floor: u16 = 34;
 const abi_functions_at_floor = 96;
-pub const abi_minor: u16 = abi_minor_floor + @as(u16, @intCast(abi_functions.len - abi_functions_at_floor));
+const abi_surface_fields_at_floor = 233;
+/// Every field of every struct crossing the ABI. A field appended to one of them
+/// is an ABI change a host cannot see from the op list: it sizes the buffer the
+/// engine writes into, so it moves the version exactly as a new op does, once.
+const abi_surface_fields: usize = blk: {
+    var total: usize = 0;
+    for (abi_surface_types) |T| total += std.meta.fields(T).len;
+    break :blk total;
+};
+pub const abi_minor: u16 = abi_minor_floor +
+    @as(u16, @intCast(abi_functions.len - abi_functions_at_floor)) +
+    @as(u16, @intCast(abi_surface_fields - abi_surface_fields_at_floor));
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -327,6 +424,124 @@ pub const abi_minor: u16 = abi_minor_floor + @as(u16, @intCast(abi_functions.len
 // not export. A panic prints the message and traps; freestanding wasm has
 // nowhere to print, so it traps directly.
 pub const panic = if (builtin.os.tag == .freestanding) std.debug.no_panic else std.debug.simple_panic;
+
+/// What interrupted a recording, as a host reports it. The same set
+/// core/media/container.zig declares, on the frozen surface.
+pub const Interruption = enum(u32) {
+    pause = 0,
+    camera_lost = 1,
+    audio_route = 2,
+    backgrounded = 3,
+    thermal = 4,
+};
+
+/// What one recording has done. Read it after a stop, or during, to see the
+/// clips a pause and resume produced and the drift the output actually carries.
+pub const RecordingReport = extern struct {
+    /// Output duration with the paused spans removed, in microseconds.
+    duration_us: i64,
+    /// Clips the pause and resume pairs produced, counting from one.
+    clips: u32,
+    /// Declared breaks of every kind.
+    interruptions: u32,
+    /// The largest gap between consecutive frames that was not a declared break,
+    /// which is the measured drift rather than a tolerance someone chose.
+    drift_us: i64,
+    /// Frames handed to the encoder, and frames the encoder was not ready for.
+    frames: u64,
+    dropped: u64,
+    /// Whether the recording is paused right now.
+    paused: u32,
+};
+
+/// What an opened clip is and where it is. A host scrubbing a timeline reads this
+/// rather than guessing from a frame count and a manifest's fps, which is what the
+/// video.texture node had to do.
+pub const ClipInfo = extern struct {
+    width: u32,
+    height: u32,
+    duration_us: i64,
+    /// The presentation time of the frame most recently submitted.
+    position_us: i64,
+    /// 1 once the stream has ended and no seek has reopened it.
+    ended: u32,
+};
+
+/// What this build's media backend declares it can encode, so a host asks rather
+/// than assuming from the platform. 2.2 made every backend declare this and only
+/// the engine could read it; this is the same answer on the frozen surface.
+pub const MediaCapabilities = extern struct {
+    /// One bit per goss_video_codec value: h264, hevc, vp8, vp9, av1.
+    video_codecs: u32,
+    /// One bit per goss_audio_codec value: aac, opus, pcm.
+    audio_codecs: u32,
+    /// One bit per goss_container value: mp4, mov, webm.
+    containers: u32,
+    max_width: u32,
+    max_height: u32,
+    max_bit_depth: u32,
+    /// 1 when some declared profile writes a high-dynamic-range transfer.
+    hdr: u32,
+    /// 1 when the backend takes a platform texture or buffer with no copy.
+    zero_copy: u32,
+};
+
+/// One thing that happened, drained from the session's bounded ring. Plain data
+/// and fixed size, because an event carrying a pointer would outlive what it
+/// points at.
+pub const Event = extern struct {
+    kind: u32,
+    sequence: u64,
+    timestamp_us: i64,
+    a: u32,
+    b: u32,
+    value: f32,
+};
+
+/// The egress policy a host installs: what the brain sees and what it costs.
+pub const EgressConfig = extern struct {
+    target_long_edge: u32,
+    format: u32,
+    quality: u32,
+    max_fps: u32,
+    max_bytes_per_second: u64,
+    source: u32,
+    /// GOSS_EGRESS_ON_* bits.
+    trigger: u32,
+    change_threshold: f32,
+    keyframe_interval_us: i64,
+};
+
+/// Why a frame was or was not sent, so a gateway can explain itself rather than
+/// guess. A decision with no reason is one nobody can tune.
+pub const EgressDecision = extern struct {
+    send: u32,
+    reason: u32,
+    change_score: f32,
+    since_last_us: i64,
+    sent_total: u64,
+    held_total: u64,
+};
+
+/// One thing an agent draws back into the frame. Addressed by id so an agent
+/// updates one without rebuilding the set, and carrying its own lifetime, because
+/// the failure mode of an imperative overlay is annotations nobody removed.
+pub const AnnotationDesc = extern struct {
+    id: u32,
+    kind: u32,
+    space: u32,
+    rect: [4]f32,
+    track_id: u32,
+    colour: [4]u8,
+    z: i32,
+    opacity: f32,
+    /// 0 explicit, 1 frames, 2 duration, 3 track. lifetime_value carries the
+    /// frame count or the microseconds.
+    lifetime_kind: u32,
+    lifetime_value: i64,
+    on_lost: u32,
+    value: f32,
+};
 
 pub const Status = enum(c_int) {
     ok = 0,
@@ -341,6 +556,10 @@ pub const Status = enum(c_int) {
     /// was not declared optional. The lens is live and the rest of it draws; the
     /// node reports name which node and why, so a host can decide.
     lens_node_failed = 8,
+    /// The session's scope does not carry the verb this op needs. Distinct from
+    /// unsupported on purpose: this one a host can grant, and the other one no
+    /// amount of asking will change.
+    out_of_scope = 9,
 };
 
 pub const FrameDesc = extern struct {
@@ -430,6 +649,11 @@ comptime {
 const default_texture_pool_capacity: u32 = 16;
 const default_staging_pool_capacity: u32 = 8;
 const default_frame_budget_us: u32 = 33_333;
+/// Where a room's noise floor ends and speech begins, and where speech has to fall
+/// before it counts as stopped. Two levels rather than one, so a voice sitting on the
+/// threshold does not emit a start and a stop on alternating frames.
+const voice_attack_level: f64 = 0.08;
+const voice_release_level: f64 = 0.05;
 
 const pixel_format_nv12: u32 = 0;
 const pixel_format_nv21: u32 = 1;
@@ -439,6 +663,12 @@ const pixel_format_rgba8: u32 = 4;
 
 pub const Engine = struct {
     gpa: std.mem.Allocator,
+    /// What the platform last said this process may capture. Cached on the engine
+    /// because a coordinate sent back is resolved against the surface's own
+    /// geometry, and re-enumerating per point would be a permission prompt per
+    /// point on some platforms.
+    screen_surfaces: [max_screen_surfaces]screen_capture.CSurface = undefined,
+    screen_surface_count: usize = 0,
     texture_pool: graph.Pool,
     staging_pool: graph.Pool,
     texture_pool_capacity: u16,
@@ -520,6 +750,20 @@ pub const Engine = struct {
     recording_last_timestamp: i64 = std.math.minInt(i64),
     recording_warmups: u32 = 0,
     recording_dropped: u32 = 0,
+    /// The recording's own clock. Capture stamps go in and output stamps come
+    /// out with the paused spans removed, so a pause leaves no gap in the file
+    /// and the rest of the recording does not drift by the length of the pause.
+    recording_clock: media.Clock = .{},
+    /// Clips the pause and resume pairs produced, counting from one, and the
+    /// declared breaks of every kind.
+    recording_clips: u32 = 1,
+    recording_interruptions: u32 = 0,
+    /// The last CAPTURE stamp a frame carried, where pause, resume and a declared
+    /// break are placed. recording_last_timestamp is the last OUTPUT stamp
+    /// written, and the two differ by every pause taken so far.
+    recording_capture_last_us: i64 = 0,
+    /// A resume waiting for the frame that closes the paused span.
+    recording_resume_at_next: bool = false,
     /// Window-binding backends only: the encoder surface the composite
     /// re-presents into, separate from the sampleable frame target.
     recording_window_target: ?render.Renderer.OffscreenTarget = null,
@@ -563,6 +807,12 @@ const WorldStore = struct {
     // owned by the session allocator, for raycast anchoring onto scanned surfaces.
     mesh_vertices: []const [3]f32 = &.{},
     mesh_indices: []const u32 = &.{},
+    // The navigation mesh over that mesh, built on the first route asked for and
+    // kept until the mesh is replaced: building it is linear in the triangles, and
+    // a lens asking once a frame should not pay that again for ground that has not
+    // moved. The triangles are held because the nav mesh borrows them.
+    nav: ?navmesh.NavMesh = null,
+    nav_triangles: []const [3]u32 = &.{},
 };
 
 const identity16 = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
@@ -641,6 +891,20 @@ const max_geofence_name: usize = 48;
 
 /// The most bring-your-own model digests a session may allowlist at once. With
 /// any set, a model whose SHA-256 is not among them is refused at enable time.
+/// The widest embedding the snapshot carries inline. Real image and text
+/// encoders land at 512 or 768; past that a caller wants the model's own
+/// output buffer, not a copy in every snapshot.
+const max_embedding_dim = 1024;
+
+/// The most results one memory query returns, and how wide it searches. The
+/// width is the recall dial the index's own proof measures.
+const max_memory_results: usize = 64;
+
+/// The most capturable surfaces one enumeration holds. A desktop has a handful
+/// of displays and tens of windows; past this a caller wants a filter.
+const max_screen_surfaces: usize = 128;
+const memory_search_width: usize = 64;
+
 const max_model_digests: usize = 16;
 
 /// A geofence a lens references by name, so a lens fires `geo.in_region('name')`
@@ -675,6 +939,17 @@ const PendingGlbCollider = struct {
 /// A masked sprite's segmentation key: the channel and whether the sprite fills
 /// over that region (a restyle) or behind it (a greenscreen).
 const SpriteMask = struct { channel: u8, over: bool, strength: f32 = 1 };
+
+const ScreenSlot = struct {
+    capture: screen_capture.Capture,
+    bgra: []u8,
+    surface_id: u64,
+
+    fn deinit(slot: *ScreenSlot, gpa: std.mem.Allocator) void {
+        slot.capture.close();
+        gpa.free(slot.bgra);
+    }
+};
 
 pub const Session = struct {
     /// Mask scratch for the per-frame matte and segmentation polls. On the session, which lives
@@ -828,6 +1103,24 @@ pub const Session = struct {
     /// holding its output-to-parameter bindings; built at activation, fed a
     /// window of the microphone ring, read into params each tick.
     audio_workers: std.ArrayListUnmanaged(AudioWorker) = .empty,
+    /// What the frame says, and the pipeline that read it. The store is bounded
+    /// and copies its text, so an entry outlives the frame that produced it.
+    text_pipeline: ?*text_infer.Pipeline = null,
+    /// What this session remembers. Null until a host opens it: nothing is kept
+    /// unless a caller asked for it to be.
+    memory_index: ?*memory_plane.Index = null,
+    /// What this session will answer. Fully permissive until a host narrows it.
+    scope: perception_mod.scope.Scope = .all,
+    /// The screens this session is capturing. A slot freed by a close is reused,
+    /// so opening and closing screens in a loop does not grow the table.
+    screens: std.ArrayListUnmanaged(?ScreenSlot) = .empty,
+    text_store: TextStore = .{},
+    /// The whole reading lowered once per tick, so a text.matches trigger is
+    /// case-insensitive without lowering per trigger.
+    text_lowered: [text_lowered_max]u8 = undefined,
+    text_lowered_len: usize = 0,
+    text_digest: u64 = 0,
+    text_changed: bool = false,
     /// A ring of the latest mono microphone samples, written each submit_audio,
     /// so an audio.infer worker reads a window without retaining the whole stream.
     audio_ring: [audio_ring_len]f32 = @splat(0),
@@ -1158,7 +1451,7 @@ pub const Session = struct {
     /// reshape.bank nodes by graph index: their sixty-six per-region sculpt
     /// amounts in ReshapeField order, resolved at activation. The live tracked
     /// contour joins them each frame in the draw arm.
-    reshape_params: graph.NodeMap([66]f32) = .empty,
+    reshape_params: graph.NodeMap([runtime.reshape_param_count]f32) = .empty,
     /// reshape.body nodes by graph index: their body sculpt amounts in
     /// BodyReshapeField order, resolved at activation. The live pose landmarks
     /// and the body mask join them each frame in the draw arm.
@@ -1187,12 +1480,49 @@ pub const Session = struct {
     script_param_names: []const [:0]const u8 = &.{},
     /// Whether the script has had its onInit and onTurnOn handlers called yet,
     /// so those fire exactly once on the first tick after activation.
+    /// Clips a host opened on this session. An imported clip is a source of
+    /// frames the graph consumes exactly as it consumes the camera's, so a lens
+    /// cannot tell them apart and a clip can drive a session with no camera at
+    /// all, which is what "video" in the North Star meant and did not do.
+    clips: std.ArrayListUnmanaged(?Clip) = .empty,
+    /// The binary record the json projection reads, grown once and reused so a
+    /// poll every frame allocates nothing after the first.
+    perception_scratch: []u8 = &.{},
+    /// The event ring and its slots. Bounded at session create and never grown:
+    /// growing under a consumer that stopped draining is the leak the bound
+    /// exists to prevent.
+    event_slots: []perception_events.Event = &.{},
+    events: perception_events.Ring = .{ .slots = &.{} },
+    /// The egress policy, and the downsampled luma grid the change score is
+    /// measured against. Allocated once on configure and reused, so deciding
+    /// costs no allocation per frame.
+    egress: ?perception_egress.Policy = null,
+    egress_previous: []u8 = &.{},
+    /// What an agent has drawn back into the frame. Bounded, because an agent
+    /// that adds and never removes must not grow the engine, and a refused add is
+    /// a better failure than a slow leak nobody attributes.
+    annotations: perception_actions.Store(64, 4096) = .{},
     script_inited: bool = false,
     /// Script handlers that threw, counted so a faulting script is visible.
     script_faults: u32 = 0,
     /// Set when a bounded pool turned this session's frame-path request away,
     /// read and cleared by the next report_frame.
     resource_pressure: bool = false,
+    /// The last thermal state and frame budget a report carried, so a change in
+    /// either is an event rather than something a host has to notice by polling.
+    last_thermal: i32 = -1,
+    /// Whether speech is running, so starting and stopping are each one event.
+    voice_active: bool = false,
+    /// The gesture last published, so holding one is a single event.
+    last_gesture: u32 = 0,
+    /// Which body actions were running, as jump, wave and dance bits.
+    last_actions: u32 = 0,
+    /// What the detector found on the last publish, and the top label then, so a
+    /// detection arriving or its label changing is an event rather than a poll.
+    detections: [max_detections]Detection = undefined,
+    detection_count: u32 = 0,
+    last_top_label: u32 = 0,
+    frame_budget_us: u32 = default_frame_budget_us,
     /// The lens's sound mixer and the mixer id each play_sound path resolves
     /// to, built from the bundle at activation. Playback is pulled out by the
     /// SDK; the engine only decodes and mixes.
@@ -2442,7 +2772,7 @@ fn tiledAspect(s: *Session, rect_w: u16, rect_h: u16) f32 {
 fn headWorldPosition(s: *Session, current: anytype) ?[3]f32 {
     const worker = s.face_tracking orelse return null;
     var tracked: face.Result = undefined;
-    if (!(tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5)) return null;
+    if (!(tracking.readResult(worker, &tracked) and tracked.landmark_count > 0 and tracked.presence >= 0.5)) return null;
     const h = face_geometry.estimateHeadPose(&tracked.landmarks) orelse return null;
     const fw: f32 = @floatFromInt(current.desc.width);
     const fh: f32 = @floatFromInt(current.desc.height);
@@ -2547,10 +2877,10 @@ fn drawBrushOverlay(e: *Engine, r: *render.Renderer, s: *Session, view_id: u8, w
 /// idempotent within a frame, so this matches fillReshapeContour's own gate
 /// and the readiness pass and the draw arm never disagree.
 fn reshapeFaceReady(s: *Session) bool {
-    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) return true;
+    if (s.face_count > 0 and s.face_results[0].landmark_count == face.landmark_count and s.face_results[0].presence >= 0.5) return true;
     if (s.face_tracking) |worker| {
         var result: face.Result = undefined;
-        if (tracking.readResult(worker, &result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) return true;
+        if (tracking.readResult(worker, &result) and result.landmark_count == face.landmark_count and result.presence >= 0.5) return true;
     }
     return false;
 }
@@ -2562,10 +2892,10 @@ fn reshapeFaceReady(s: *Session) bool {
 fn fillReshapeContour(s: *Session, width: u16, height: u16, rotation: u32, mirror: bool, contour: *[face106.point_count * 2]f32, hubs: *[4]f32) bool {
     var result: face.Result = undefined;
     var flat: ?*const [face.landmark_count * 3]f32 = null;
-    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) {
+    if (s.face_count > 0 and s.face_results[0].landmark_count == face.landmark_count and s.face_results[0].presence >= 0.5) {
         flat = &s.face_results[0].landmarks;
     } else if (s.face_tracking) |worker| {
-        if (tracking.readResult(worker, &result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) {
+        if (tracking.readResult(worker, &result) and result.landmark_count == face.landmark_count and result.presence >= 0.5) {
             flat = &result.landmarks;
         }
     }
@@ -2592,11 +2922,11 @@ fn fillReshapeContour(s: *Session, width: u16, height: u16, rotation: u32, mirro
 /// reads: host-submitted faces first, then the worker, then the web landmark
 /// path (copied into `scratch`). Null when no usable face holds.
 fn currentFaceLandmarks(s: *Session, result: *face.Result, scratch: *[face.landmark_count * 3]f32) ?*const [face.landmark_count * 3]f32 {
-    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) {
+    if (s.face_count > 0 and s.face_results[0].landmark_count == face.landmark_count and s.face_results[0].presence >= 0.5) {
         return &s.face_results[0].landmarks;
     }
     if (s.face_tracking) |worker| {
-        if (tracking.readResult(worker, result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) {
+        if (tracking.readResult(worker, result) and result.landmark_count == face.landmark_count and result.presence >= 0.5) {
             return &result.landmarks;
         }
     }
@@ -2627,10 +2957,10 @@ fn currentHands(s: *Session) ?hand.Result {
 fn faceAnchorScreen(s: *Session, idx: u32, width: u16, height: u16, rotation: u32, mirror: bool) ?[2]f32 {
     var result: face.Result = undefined;
     var flat: ?*const [face.landmark_count * 3]f32 = null;
-    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) {
+    if (s.face_count > 0 and s.face_results[0].landmark_count == face.landmark_count and s.face_results[0].presence >= 0.5) {
         flat = &s.face_results[0].landmarks;
     } else if (s.face_tracking) |worker| {
-        if (tracking.readResult(worker, &result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) {
+        if (tracking.readResult(worker, &result) and result.landmark_count == face.landmark_count and result.presence >= 0.5) {
             flat = &result.landmarks;
         }
     }
@@ -2734,10 +3064,10 @@ fn rollAngle(s: *Session) f32 {
     if (s.orientation_set) return std.math.atan2(s.orientation_prev[0], -s.orientation_prev[1]);
     var result: face.Result = undefined;
     var flat: ?*const [face.landmark_count * 3]f32 = null;
-    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) {
+    if (s.face_count > 0 and s.face_results[0].landmark_count == face.landmark_count and s.face_results[0].presence >= 0.5) {
         flat = &s.face_results[0].landmarks;
     } else if (s.face_tracking) |worker| {
-        if (tracking.readResult(worker, &result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) {
+        if (tracking.readResult(worker, &result) and result.landmark_count == face.landmark_count and result.presence >= 0.5) {
             flat = &result.landmarks;
         }
     }
@@ -2786,11 +3116,11 @@ fn gazeEyePoints(s: *Session, width: u16, height: u16, rotation: u32, mirror: bo
     var result: face.Result = undefined;
     var flat: ?*const [face.landmark_count * 3]f32 = null;
     var bshapes: ?*const [face.blendshape_count]f32 = null;
-    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) {
+    if (s.face_count > 0 and s.face_results[0].landmark_count == face.landmark_count and s.face_results[0].presence >= 0.5) {
         flat = &s.face_results[0].landmarks;
         bshapes = &s.face_results[0].blendshapes;
     } else if (s.face_tracking) |worker| {
-        if (tracking.readResult(worker, &result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) {
+        if (tracking.readResult(worker, &result) and result.landmark_count == face.landmark_count and result.presence >= 0.5) {
             flat = &result.landmarks;
             bshapes = &result.blendshapes;
         }
@@ -4058,7 +4388,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.submitShaderPass(view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
                 if (s.face_tracking) |worker| {
                     var tracked: face.Result = undefined;
-                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
+                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count > 0 and tracked.presence >= 0.5) {
                         r.submitFaceMesh(view_id, input_texture, mesh_texture, &tracked.landmarks, @floatFromInt(width), @floatFromInt(height), 1.0);
                     }
                 }
@@ -4192,7 +4522,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.submitShaderPass(view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
                 if (s.face_tracking) |worker| {
                     var tracked: face.Result = undefined;
-                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
+                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count > 0 and tracked.presence >= 0.5) {
                         r.submitLashMesh(view_id, input_texture, &tracked.landmarks, @floatFromInt(width), @floatFromInt(height), .{ params[0], params[1], params[2], params[3] }, params[4], params[5]);
                     }
                 }
@@ -4224,7 +4554,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.submitShaderPass(view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
                 if (s.face_tracking) |worker| {
                     var tracked: face.Result = undefined;
-                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
+                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count > 0 and tracked.presence >= 0.5) {
                         r.submitFaceMaterial(view_id, input_texture, paint_texture, mask_tex, &tracked.landmarks, @floatFromInt(width), @floatFromInt(height), params[0], params[1]);
                     }
                 }
@@ -4256,7 +4586,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.submitShaderPass(view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
                 if (s.face_tracking) |worker| {
                     var tracked: face.Result = undefined;
-                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
+                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count > 0 and tracked.presence >= 0.5) {
                         r.submitFaceSwap(view_id, input_texture, donor_texture, mask_tex, &tracked.landmarks, @floatFromInt(width), @floatFromInt(height), params[0], params[1]);
                     }
                 }
@@ -4718,7 +5048,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                             var head = math.Mat4.identity;
                             if (s.face_tracking) |worker| {
                                 var tracked: face.Result = undefined;
-                                if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
+                                if (tracking.readResult(worker, &tracked) and tracked.landmark_count > 0 and tracked.presence >= 0.5) {
                                     if (face_geometry.estimateHeadPose(&tracked.landmarks)) |h| head = h;
                                 }
                             }
@@ -4927,7 +5257,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     anchored_without_target = true;
                     if (s.face_tracking) |worker| {
                         var tracked: face.Result = undefined;
-                        if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
+                        if (tracking.readResult(worker, &tracked) and tracked.landmark_count > 0 and tracked.presence >= 0.5) {
                             if (face_geometry.estimateHeadPose(&tracked.landmarks)) |head| {
                                 model_matrix = pixel_to_world.mul(head).mul(base_model_matrix);
                                 anchored_without_target = false;
@@ -5155,10 +5485,17 @@ pub fn createSession(engine: *Engine, config: SessionConfig) error{OutOfMemory}!
     session.* = .{
         .engine = engine,
         .controller = graph.DegradeController.init(.{ .budget_us = budget }),
+        .frame_budget_us = budget,
         .lens_graph = graph.Graph.init(engine.gpa),
         .camera_node = undefined,
     };
     errdefer session.lens_graph.deinit();
+    // The event ring's slots, allocated once at create so publishing on the frame
+    // path never allocates. A fixed default rather than a configurable one for
+    // now: the number is here in one place when a host needs to change it.
+    session.event_slots = try engine.gpa.alloc(perception_events.Event, default_event_capacity);
+    errdefer engine.gpa.free(session.event_slots);
+    session.events = perception_events.Ring.init(session.event_slots);
     session.camera_node = session.lens_graph.addNode(.{
         .role = .source,
         .outputs = &.{.{ .kind = .texture }},
@@ -5180,6 +5517,22 @@ pub fn destroySession(session: *Session) void {
     }
     if (session.engine.recording_session == session) _ = finishRecording(session.engine);
     teardownScript(session);
+    disableText(session);
+    closeMemory(session);
+    // Every screen a host opened, closed here whether or not the host closed it.
+    for (session.screens.items) |*slot| {
+        if (slot.*) |*live| live.deinit(session.engine.gpa);
+    }
+    session.screens.deinit(session.engine.gpa);
+    // Every clip a host opened, closed here whether or not the host closed it: a
+    // decoder and its reused decode buffer are the session's to release.
+    for (session.clips.items) |*slot| {
+        if (slot.*) |*c_| c_.deinit(session.engine.gpa);
+    }
+    session.clips.deinit(session.engine.gpa);
+    if (session.perception_scratch.len != 0) session.engine.gpa.free(session.perception_scratch);
+    if (session.event_slots.len != 0) session.engine.gpa.free(session.event_slots);
+    if (session.egress_previous.len != 0) session.engine.gpa.free(session.egress_previous);
     destroySounds(session);
     destroyShaderPrograms(session);
     session.shader_programs.deinit(session.engine.gpa);
@@ -5289,6 +5642,7 @@ pub fn destroySession(session: *Session) void {
     session.model_body_anchors.deinit(session.engine.gpa);
     session.model_skeleton_anchors.deinit(session.engine.gpa);
     session.model_world_anchors.deinit(session.engine.gpa);
+    clearNav(session);
     if (session.world.mesh_vertices.len > 0) session.engine.gpa.free(session.world.mesh_vertices);
     if (session.world.mesh_indices.len > 0) session.engine.gpa.free(session.world.mesh_indices);
     if (session.physics_world) |world| world.destroy();
@@ -5489,6 +5843,16 @@ pub export fn goss_abi_version() u32 {
     return (@as(u32, abi_major) << 16) | abi_minor;
 }
 
+/// Whether a caller's own ABI version can talk to this binary: it passes the major it
+/// compiled against and a different one is refused, which is what `abi_mismatch` is
+/// for. Zero means the caller is not saying. Reading the version and comparing by hand
+/// was the only check before, and two of the SDKs did not.
+pub export fn goss_abi_check(caller_version: u32) Status {
+    if (caller_version == 0) return .ok;
+    if (caller_version >> 16 != abi_major) return .abi_mismatch;
+    return .ok;
+}
+
 /// Which capabilities this build compiled real, as GOSS_CAP_* bits. The stub
 /// and full libraries share a filename and an abi version, so this is how a
 /// consumer tells them apart before feeding real bytes to an enable_* op.
@@ -5635,11 +5999,13 @@ fn queueRecordingCommit(e: *Engine, frame: ?media_recording.Frame, timestamp_us:
         if (aged.timestamp_us > e.recording_last_timestamp) {
             rec.commitFrame(aged.frame, aged.timestamp_us) catch {
                 e.recording_dropped += 1;
+                emitEngineWide(e, .frame_dropped, e.recording_dropped, 0, 0);
             };
             e.recording_last_timestamp = aged.timestamp_us;
         } else {
             rec.abortFrame(aged.frame);
             e.recording_dropped += 1;
+            emitEngineWide(e, .frame_dropped, e.recording_dropped, 0, 0);
         }
         e.recording_pending[at] = null;
     }
@@ -5659,7 +6025,10 @@ fn finishRecording(e: *Engine) bool {
             _ = r.frame();
         }
         for (0..2) |_| queueRecordingCommit(e, null, 0);
-        rec.finish() catch {
+        rec.finish() catch |err| {
+            // Swallowed, this cost a run to narrow: stop answered one status for a
+            // finalize that failed and said nothing about which way.
+            std.log.info("gosslens: recording finish failed: {t}", .{err});
             ok = false;
         };
     } else {
@@ -5706,8 +6075,25 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         pollLandmarkMattes(s);
         if (e.recording != null and e.recording_session == s and !s.capture_requested) {
             if (s.current) |current| {
-                recording_frame = prepareRecordingFrame(e, r);
-                recording_timestamp = current.desc.timestamp_us;
+                // The clock is the recording's timeline, not the camera's: it maps a
+                // capture stamp to an output stamp with the paused spans removed, so
+                // a pause leaves no gap and nothing after it drifts by its length. A
+                // frame arriving while paused has no place in the output.
+                e.recording_capture_last_us = current.desc.timestamp_us;
+                // The paused span closes on the first frame that arrives after the
+                // resume, which is what this op's contract says. Closing it on the
+                // stamp the engine already held subtracted nothing, so the whole pause
+                // reached the writer and it refused data that far ahead of real time.
+                if (e.recording_resume_at_next) {
+                    e.recording_resume_at_next = false;
+                    e.recording_clock.resume_(current.desc.timestamp_us) catch |err| {
+                        std.log.info("gosslens: a resume could not close the pause at {d}: {t}", .{ current.desc.timestamp_us, err });
+                    };
+                }
+                if (e.recording_clock.map(current.desc.timestamp_us)) |out_us| {
+                    recording_frame = prepareRecordingFrame(e, r);
+                    recording_timestamp = out_us;
+                } else |_| {}
             }
         }
         if (s.physics_world) |world| {
@@ -6128,7 +6514,15 @@ fn encodeLossyPhoto(gpa: std.mem.Allocator, pixels: []const u8, width: u32, heig
         return .ok;
     }
     if (!photo.supported) return .unsupported;
-    photo.encode(pixels, width, height, @enumFromInt(format), quality, data, out_len) catch return .invalid_argument;
+    // The format is a caller's number and the encoder's format enum is exhaustive, so
+    // a cast of anything outside it is illegal rather than wrong. Neither entry point
+    // bounded it, so a host asking for format three crashed the engine.
+    const encoded_format: photo.Format = switch (format) {
+        1 => .jpeg,
+        2 => .heic,
+        else => return .invalid_argument,
+    };
+    photo.encode(pixels, width, height, encoded_format, quality, data, out_len) catch return .invalid_argument;
     return .ok;
 }
 
@@ -6205,18 +6599,314 @@ pub const CaptureGuidance = extern struct {
 };
 
 pub const max_world_planes = 32;
+
+/// The most detections one frame carries into the record and the ring. A detector
+/// keeps a hundred slots and almost all of them are below any useful threshold, so
+/// this is the number a reader can act on rather than the number a tensor holds.
+pub const max_detections = 16;
+
+/// One thing the detector found: where it is in the normalized frame, what it is,
+/// and how sure. Not an extern struct: it never crosses the boundary as a type, the
+/// record's own schema is what declares the bytes, and an extern struct outside
+/// `abi_surface_types` is a layout the gate cannot see.
+const Detection = struct {
+    label: u32,
+    score: f32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+};
 pub const max_world_anchors = 32;
 
 /// Feeds the platform's world understanding into the session: drives
 /// the world.tracking_state signal and world-anchored lens content.
 /// Planes and anchors beyond the fixed capacity are dropped oldest
 /// last (the platform lists closest-first), counted, never silent.
+/// A footprint an agent wants to put somewhere, in metres. Height is asked for
+/// even on a flat surface, because it is what decides whether a thing fits under
+/// a shelf.
+pub const Footprint = extern struct {
+    width: f32,
+    depth: f32,
+    height: f32,
+};
+
+/// Where a footprint can go: which plane, where on it in world space, and how
+/// much of that surface stays free, so a caller can prefer the answer that keeps
+/// the room usable.
+pub const Placement = extern struct {
+    plane_id: u64,
+    position: [3]f32,
+    free_fraction: f32,
+};
+
+/// Something already on a plane, on that plane's own axes in metres from its
+/// centre, so a placement answers about the surface as it is now.
+pub const Occupant = extern struct {
+    plane_id: u64,
+    x: f32,
+    z: f32,
+    width: f32,
+    depth: f32,
+};
+
+/// One landmark as it crosses between two devices. No pose: a pose means nothing
+/// in another origin. The id is what both sides recognise and the position is in
+/// the sender's own frame, read only for the distances between landmarks.
+pub const SharedLandmark = extern struct {
+    id: u64,
+    x: f32,
+    y: f32,
+    z: f32,
+    confidence: f32,
+};
+
+/// What a plane is, as a named kind rather than the platform's own number: the
+/// platforms agree on more than their enums suggest, and a caller wanting a
+/// surface it can put something on should ask that.
+pub export fn goss_session_plane_kind(session: ?*Session, plane_id: u64, out_kind: ?*u32, out_bearing: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allows(.world)) return .out_of_scope;
+    const kind_out = out_kind orelse return .invalid_argument;
+    for (s.world.planes[0..s.world.plane_count]) |plane| {
+        if (plane.id != plane_id) continue;
+        const kind = spatialKind(plane.classification);
+        kind_out.* = @intFromEnum(kind);
+        if (out_bearing) |b| b.* = if (kind.bearing()) 1 else 0;
+        return .ok;
+    }
+    // An id this session was never shown is the caller's mistake, not a state to
+    // wait on: nothing later makes a plane it never submitted appear.
+    return .invalid_argument;
+}
+
+/// The plane this session would call the floor, which is the lowest bearing
+/// surface it has been shown. Not found rather than a guess when it has none.
+pub export fn goss_session_floor_plane(session: ?*Session, out_plane_id: ?*u64) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allows(.world)) return .out_of_scope;
+    const out = out_plane_id orelse return .invalid_argument;
+    var buffer: [max_world_planes]spatial.Plane = undefined;
+    const planes = spatialPlanes(s, &buffer);
+    // Nothing yet rather than a refusal: a host that has shown no bearing plane
+    // may show one on the next frame.
+    const floor = spatial.floorOf(planes) orelse return .again;
+    out.* = floor.id;
+    return .ok;
+}
+
+/// Where this footprint fits, best surface first: the bearing plane with the most
+/// room left afterwards. Zero placements is an answer, and the caller's own
+/// occupants are taken into account.
+pub export fn goss_session_place_on(
+    session: ?*Session,
+    item: ?*const Footprint,
+    occupants: ?[*]const Occupant,
+    occupant_count: usize,
+    out: ?[*]Placement,
+    capacity: usize,
+    out_count: ?*usize,
+) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allows(.world)) return .out_of_scope;
+    const f = item orelse return .invalid_argument;
+    const count_out = out_count orelse return .invalid_argument;
+    if (occupant_count > 0 and occupants == null) return .invalid_argument;
+    if (capacity > 0 and out == null) return .invalid_argument;
+
+    var plane_buffer: [max_world_planes]spatial.Plane = undefined;
+    const planes = spatialPlanes(s, &plane_buffer);
+
+    var occupant_buffer: [max_spatial_occupants]spatial.Occupant = undefined;
+    const taken = @min(occupant_count, occupant_buffer.len);
+    if (occupants) |list| {
+        for (0..taken) |i| {
+            occupant_buffer[i] = .{
+                .plane_id = list[i].plane_id,
+                .x = list[i].x,
+                .z = list[i].z,
+                .width = list[i].width,
+                .depth = list[i].depth,
+            };
+        }
+    }
+
+    var answers: [max_world_planes]spatial.Placement = undefined;
+    const found = spatial.placeOn(planes, occupant_buffer[0..taken], .{
+        .width = f.width,
+        .depth = f.depth,
+        .height = f.height,
+    }, &answers);
+    count_out.* = found;
+    const written = @min(found, capacity);
+    if (out) |dst| {
+        for (0..written) |i| {
+            dst[i] = .{
+                .plane_id = answers[i].plane_id,
+                .position = answers[i].position,
+                .free_fraction = answers[i].free_fraction,
+            };
+        }
+    }
+    if (found > capacity) return .again;
+    return .ok;
+}
+
+/// Point to point in metres, with the uncertainty that follows from the accuracy
+/// each end carried. `out_known` is zero when either end vouched for nothing, so
+/// a caller never reads a sigma of zero as certainty.
+pub export fn goss_session_measure_between(
+    session: ?*Session,
+    from: ?[*]const f32,
+    from_accuracy_m: f32,
+    to: ?[*]const f32,
+    to_accuracy_m: f32,
+    out_metres: ?*f32,
+    out_sigma: ?*f32,
+    out_known: ?*u32,
+) Status {
+    // Nothing of the session is read: the two points are the caller's own, so a
+    // narrowed scope has nothing to withhold here.
+    _ = session;
+    const a = from orelse return .invalid_argument;
+    const b = to orelse return .invalid_argument;
+    const value_out = out_metres orelse return .invalid_argument;
+    const measured = spatial.measure.distance(
+        .{ .x = a[0], .y = a[1], .z = a[2], .accuracy = accuracyOf(from_accuracy_m) },
+        .{ .x = b[0], .y = b[1], .z = b[2], .accuracy = accuracyOf(to_accuracy_m) },
+    );
+    value_out.* = measured.value;
+    if (out_sigma) |sigma| sigma.* = measured.sigma;
+    if (out_known) |known| known.* = if (measured.known) 1 else 0;
+    return .ok;
+}
+
+/// What this device can offer another: one landmark per world anchor it holds, in
+/// its own frame. A pose never crosses, because a pose in another origin is
+/// meaningless.
+pub export fn goss_session_shared_landmarks(session: ?*Session, out: ?[*]SharedLandmark, capacity: usize, out_count: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allows(.world)) return .out_of_scope;
+    const count_out = out_count orelse return .invalid_argument;
+    count_out.* = s.world.anchor_count;
+    const written = @min(s.world.anchor_count, capacity);
+    if (out) |dst| {
+        for (0..written) |i| {
+            const a = s.world.anchors[i];
+            dst[i] = .{
+                .id = a.id,
+                .x = a.pose[12],
+                .y = a.pose[13],
+                .z = a.pose[14],
+                .confidence = 1,
+            };
+        }
+    }
+    if (s.world.anchor_count > capacity) return .again;
+    return .ok;
+}
+
+/// The transform from the sender's origin into this one, solved over the
+/// landmarks both sides recognise, with the fit it achieved attached. Fewer than
+/// three matches is no alignment rather than the identity.
+pub export fn goss_session_align_shared(
+    session: ?*Session,
+    theirs: ?[*]const SharedLandmark,
+    count: usize,
+    out_transform: ?[*]f32,
+    out_rms_error: ?*f32,
+    out_matched: ?*u32,
+) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allows(.world)) return .out_of_scope;
+    const list = theirs orelse return .invalid_argument;
+    const transform_out = out_transform orelse return .invalid_argument;
+
+    var mine_buffer: [max_world_anchors]spatial.anchors.shared.Landmark = undefined;
+    for (0..s.world.anchor_count) |i| {
+        const a = s.world.anchors[i];
+        mine_buffer[i] = .{ .id = a.id, .x = a.pose[12], .y = a.pose[13], .z = a.pose[14], .confidence = 1 };
+    }
+    var their_buffer: [max_shared_landmarks]spatial.anchors.shared.Landmark = undefined;
+    const taken = @min(count, their_buffer.len);
+    for (0..taken) |i| {
+        their_buffer[i] = .{
+            .id = list[i].id,
+            .x = list[i].x,
+            .y = list[i].y,
+            .z = list[i].z,
+            .confidence = list[i].confidence,
+        };
+    }
+
+    const alignment = spatial.anchors.shared.align_(mine_buffer[0..s.world.anchor_count], their_buffer[0..taken]);
+    @memcpy(transform_out[0..16], &alignment.transform);
+    if (out_rms_error) |rms| rms.* = alignment.rms_error;
+    if (out_matched) |matched| matched.* = @intCast(alignment.matched);
+    if (alignment.matched < 3) return .again;
+    return .ok;
+}
+
+/// The most occupants a placement query reads, and the most landmarks an
+/// alignment takes from the other device. Both are bounded because both arrive
+/// from outside.
+pub const max_spatial_occupants = 64;
+pub const max_shared_landmarks = 64;
+
+/// The platform's own plane number as a named kind. The numbering is the one the
+/// world rail documents, and anything outside it is unknown rather than guessed.
+fn spatialKind(classification: u32) spatial.PlaneKind {
+    return switch (classification) {
+        1 => .floor,
+        2 => .wall,
+        3 => .ceiling,
+        4 => .table,
+        5 => .seat,
+        6 => .door,
+        7 => .window,
+        8 => .screen,
+        else => .unknown,
+    };
+}
+
+/// The session's submitted planes in the spatial rail's own shape, so the queries
+/// read what the host last showed rather than a copy that can go stale.
+fn spatialPlanes(s: *Session, buffer: []spatial.Plane) []const spatial.Plane {
+    const count = @min(s.world.plane_count, buffer.len);
+    for (0..count) |i| {
+        const p = s.world.planes[i];
+        buffer[i] = .{
+            .id = p.id,
+            .pose = p.pose,
+            .extent_x = p.extent_x,
+            .extent_z = p.extent_z,
+            .kind = spatialKind(p.classification),
+        };
+    }
+    return buffer[0..count];
+}
+
+/// An accuracy in metres as the rail's own grade. A non-positive figure is a
+/// caller vouching for nothing, which the measurement then carries.
+fn accuracyOf(metres: f32) spatial.measure.Accuracy {
+    if (!(metres > 0)) return .unknown;
+    return spatial.measure.Accuracy.of(metres);
+}
+
 pub export fn goss_session_submit_world(session: ?*Session, state: ?*const WorldState, planes: ?[*]const WorldPlane, plane_count: usize, anchors: ?[*]const WorldAnchor, anchor_count: usize, light: ?*const WorldLight) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_world)) return .out_of_scope;
     const st = state orelse return .invalid_argument;
     if (st.tracking_state > 3) return .invalid_argument;
     if (plane_count > 0 and planes == null) return .invalid_argument;
     if (anchor_count > 0 and anchors == null) return .invalid_argument;
+
+    // What changed, before the copy overwrites it. A host feeding the room every
+    // frame would otherwise have to diff it itself to learn a plane arrived.
+    const was_tracking = s.world.state.tracking_state;
+    const had_planes = s.world.plane_count;
+    const had_anchors = s.world.anchor_count;
 
     s.world.state = st.*;
     s.world.plane_count = @min(plane_count, max_world_planes);
@@ -6226,6 +6916,20 @@ pub export fn goss_session_submit_world(session: ?*Session, state: ?*const World
     if (anchors) |a| @memcpy(s.world.anchors[0..s.world.anchor_count], a[0..s.world.anchor_count]);
     s.world.dropped_anchors +|= std.math.lossyCast(u32, anchor_count -| max_world_anchors);
     if (light) |l| s.world.light = l.*;
+
+    if (st.tracking_state != was_tracking) emit(s, .tracking_state_changed, was_tracking, st.tracking_state, 0);
+    if (s.world.plane_count > had_planes) {
+        emit(s, .plane_added, @intCast(s.world.plane_count), @intCast(had_planes), 0);
+    } else if (s.world_engine_fed and s.world.plane_count != 0) {
+        // The same planes submitted again is the room being refined rather than
+        // grown, which is what a lens anchored to a surface needs to hear.
+        emit(s, .plane_updated, @intCast(s.world.plane_count), 0, 0);
+    }
+    if (s.world.anchor_count > had_anchors) {
+        emit(s, .anchor_added, @intCast(s.world.anchor_count), @intCast(had_anchors), 0);
+    } else if (s.world.anchor_count < had_anchors) {
+        emit(s, .anchor_lost, @intCast(s.world.anchor_count), @intCast(had_anchors), 0);
+    }
     s.world_engine_fed = true;
     return .ok;
 }
@@ -6234,9 +6938,19 @@ pub export fn goss_session_submit_world(session: ?*Session, state: ?*const World
 /// VPS scan) in world space: vertex_count xyz triples and index_count indices,
 /// three per triangle. The engine copies it, and a ray meets it through
 /// goss_session_raycast_world_mesh. An empty submission clears the stored mesh.
+/// Drops the navigation mesh, which is only ever a cache over the submitted one.
+fn clearNav(s: *Session) void {
+    if (s.world.nav) |*mesh| mesh.deinit();
+    s.world.nav = null;
+    if (s.world.nav_triangles.len > 0) s.engine.gpa.free(s.world.nav_triangles);
+    s.world.nav_triangles = &.{};
+}
+
 pub export fn goss_session_submit_world_mesh(session: ?*Session, vertices: ?[*]const f32, vertex_count: usize, indices: ?[*]const u32, index_count: usize) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_world)) return .out_of_scope;
     if (index_count % 3 != 0) return .invalid_argument;
+    clearNav(s);
     if (s.world.mesh_vertices.len > 0) s.engine.gpa.free(s.world.mesh_vertices);
     if (s.world.mesh_indices.len > 0) s.engine.gpa.free(s.world.mesh_indices);
     s.world.mesh_vertices = &.{};
@@ -6253,6 +6967,65 @@ pub export fn goss_session_submit_world_mesh(session: ?*Session, vertices: ?[*]c
     @memcpy(inds, idx[0..index_count]);
     s.world.mesh_vertices = verts;
     s.world.mesh_indices = inds;
+    // A scan arriving is what a path query waits for, so it is an event rather than
+    // something a caller learns by asking for a route and being refused.
+    emit(s, .world_mesh_updated, @intCast(vertex_count), @intCast(index_count / 3), 0);
+    return .ok;
+}
+
+/// A walkable path across the submitted world mesh, from start to goal, as a list
+/// of points. `.again` when no mesh is submitted or no route exists, because a
+/// caller can act on "not here" and cannot act on an empty list it mistook for
+/// a straight line.
+pub export fn goss_session_path_across_world(
+    session: ?*Session,
+    start: ?*const [3]f32,
+    goal: ?*const [3]f32,
+    out_points: ?[*]f32,
+    capacity: usize,
+    out_count: ?*usize,
+) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allows(.world)) return .out_of_scope;
+    const from = start orelse return .invalid_argument;
+    const to = goal orelse return .invalid_argument;
+    const count_out = out_count orelse return .invalid_argument;
+    if (s.world.mesh_vertices.len == 0 or s.world.mesh_indices.len < 3) return .again;
+
+    if (s.world.nav == null) {
+        // The triangles the nav mesh walks are the submitted indices read as
+        // triples. They are kept because the nav mesh borrows them rather than
+        // copying, and both go when the mesh is replaced.
+        const triangle_count = s.world.mesh_indices.len / 3;
+        const triangles = s.engine.gpa.alloc([3]u32, triangle_count) catch return .out_of_memory;
+        for (0..triangle_count) |i| {
+            triangles[i] = .{
+                s.world.mesh_indices[i * 3],
+                s.world.mesh_indices[i * 3 + 1],
+                s.world.mesh_indices[i * 3 + 2],
+            };
+        }
+        s.world.nav = navmesh.NavMesh.build(s.engine.gpa, s.world.mesh_vertices, triangles) catch {
+            s.engine.gpa.free(triangles);
+            return .out_of_memory;
+        };
+        s.world.nav_triangles = triangles;
+    }
+
+    const path = s.world.nav.?.findPath(s.engine.gpa, from.*, to.*) catch return .out_of_memory;
+    const points = path orelse return .again;
+    defer s.engine.gpa.free(points);
+
+    count_out.* = points.len;
+    if (out_points) |dst| {
+        const written = @min(points.len, capacity);
+        for (0..written) |i| {
+            dst[i * 3] = points[i][0];
+            dst[i * 3 + 1] = points[i][1];
+            dst[i * 3 + 2] = points[i][2];
+        }
+    }
+    if (points.len > capacity) return .again;
     return .ok;
 }
 
@@ -6312,9 +7085,24 @@ pub export fn goss_engine_recording_set_realtime(engine: ?*Engine, realtime: boo
     return .ok;
 }
 
+/// The codec number a host passes, as the core's own enum. A number outside the
+/// set is refused rather than cast, so an SDK built against a later header cannot
+/// name a codec this build does not have.
+fn videoCodecFromAbi(raw: u32) ?media.VideoCodec {
+    return switch (raw) {
+        0 => .h264,
+        1 => .hevc,
+        2 => .vp8,
+        3 => .vp9,
+        4 => .av1,
+        else => null,
+    };
+}
+
 pub export fn goss_engine_recording_start(engine: ?*Engine, session: ?*Session, path: ?[*]const u8, path_len: usize, config: ?*const RecordingConfig) Status {
     const e = engine orelse return .invalid_argument;
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.record)) return .out_of_scope;
     const r = if (e.renderer) |*r| r else return .renderer_unavailable;
     const p = path orelse return .invalid_argument;
     if (path_len == 0) return .invalid_argument;
@@ -6324,17 +7112,109 @@ pub export fn goss_engine_recording_start(engine: ?*Engine, session: ?*Session, 
     const cfg: RecordingConfig = if (config) |c_| c_.* else .{ .width = 0, .height = 0, .bitrate_bps = 0, .codec = 0 };
     const width = (if (cfg.width == 0) @as(u32, r.width) else cfg.width) & ~@as(u32, 1);
     const height = (if (cfg.height == 0) @as(u32, r.height) else cfg.height) & ~@as(u32, 1);
-    if (!validDims(width, height) or cfg.codec > 1) return .invalid_argument;
+    if (!validDims(width, height)) return .invalid_argument;
+    // The backend's own declaration decides, rather than a range check against a
+    // codec count: a size or codec it does not encode is refused here instead of
+    // failing at the first frame with a file already open.
+    const wanted: media.EncodedVideoDesc = .{
+        .width = width,
+        .height = height,
+        .codec = videoCodecFromAbi(cfg.codec) orelse return .invalid_argument,
+        .bitrate_bps = cfg.bitrate_bps,
+    };
+    _ = media.selectBackend(&.{media_recording.backend}, .{
+        .video = wanted,
+        .audio = if (media_recording.audio_supported) .aac else null,
+        .container = .mp4,
+    }) catch return .unsupported;
 
     e.recording = media_recording.Recording.start(p[0..path_len], .{
         .width = width,
         .height = height,
         .bitrate_bps = cfg.bitrate_bps,
-        .codec = @enumFromInt(cfg.codec),
+        // The value the backend already accepted, not the caller's number cast a second
+        // time: the recording codec is the same type the check above validated, so
+        // casting again assumed a numbering the two could drift apart on.
+        .codec = wanted.codec,
     }) catch return .invalid_argument;
     e.recording_session = s;
     e.recording_warmups = 0;
     e.recording_dropped = 0;
+    e.recording_clock = .{};
+    e.recording_clips = 1;
+    e.recording_interruptions = 0;
+    e.recording_capture_last_us = 0;
+    emit(s, .recording_started, width, height, 0);
+    return .ok;
+}
+
+/// Holds the recording clock where it is. Frames submitted while paused are not
+/// written, and the output has no gap: the paused span is subtracted from every
+/// later stamp, which is what makes a multi-clip recording one continuous file.
+pub export fn goss_engine_recording_pause(engine: ?*Engine) Status {
+    const e = engine orelse return .invalid_argument;
+    if (e.recording == null) return .invalid_argument;
+    if (e.recording_clock.isPaused()) return .invalid_argument;
+    // Before the first frame there is no origin to hold. The pause still takes,
+    // with the origin set to this instant, so the first frame after the resume is
+    // the origin and the output still starts at zero.
+    const at = e.recording_capture_last_us;
+    e.recording_clock.pause(at) catch {
+        e.recording_clock.origin_us = at;
+        e.recording_clock.paused_at_us = at;
+    };
+    e.recording_clips += 1;
+    e.recording_interruptions += 1;
+    if (e.recording_session) |rs| emit(rs, .recording_paused, e.recording_clips, 0, 0);
+    return .ok;
+}
+
+/// Starts the clock again from the stamp the next frame carries.
+pub export fn goss_engine_recording_resume(engine: ?*Engine) Status {
+    const e = engine orelse return .invalid_argument;
+    if (e.recording == null) return .invalid_argument;
+    if (!e.recording_clock.isPaused()) return .invalid_argument;
+    e.recording_resume_at_next = true;
+    if (e.recording_session) |rs| emit(rs, .recording_resumed, e.recording_clips, 0, 0);
+    return .ok;
+}
+
+/// A break the host saw: the camera went away, the audio route changed, the app
+/// was backgrounded, thermal pressure stopped the encoder. Declared so the gap it
+/// leaves is the break rather than drift the engine is blamed for.
+pub export fn goss_session_report_interruption(session: ?*Session, kind: c_int) Status {
+    const s = session orelse return .invalid_argument;
+    const e = s.engine;
+    const which: media.Discontinuity = switch (kind) {
+        0 => .pause,
+        1 => .camera_lost,
+        2 => .audio_route,
+        3 => .backgrounded,
+        4 => .thermal,
+        else => return .invalid_argument,
+    };
+    if (e.recording == null) return .invalid_argument;
+    e.recording_clock.note(which, e.recording_capture_last_us);
+    e.recording_interruptions += 1;
+    if (which == .pause) e.recording_clips += 1;
+    emit(s, .interruption, @intFromEnum(which), e.recording_interruptions, 0);
+    return .ok;
+}
+
+/// What the recording has done: the duration with pauses removed, the clips,
+/// the declared breaks, the drift it actually carries, and the frame counts.
+pub export fn goss_engine_recording_read_report(engine: ?*Engine, out_report: ?*RecordingReport) Status {
+    const e = engine orelse return .invalid_argument;
+    const out = out_report orelse return .invalid_argument;
+    out.* = .{
+        .duration_us = e.recording_clock.durationUs(),
+        .clips = e.recording_clips,
+        .interruptions = e.recording_interruptions,
+        .drift_us = e.recording_clock.driftUs(),
+        .frames = e.recording_warmups,
+        .dropped = e.recording_dropped,
+        .paused = if (e.recording_clock.isPaused()) 1 else 0,
+    };
     return .ok;
 }
 
@@ -6342,14 +7222,16 @@ pub export fn goss_engine_recording_start(engine: ?*Engine, session: ?*Session, 
 /// the frames still in flight first.
 pub export fn goss_engine_recording_stop(engine: ?*Engine) Status {
     const e = engine orelse return .invalid_argument;
-    if (e.recording == null) return .invalid_argument;
+    if (e.recording == null) {
+        // Two very different situations answered one status, which cost a run to
+        // tell apart: nothing was recording, or the finalize failed.
+        std.log.info("gosslens: recording_stop with no recording open", .{});
+        return .invalid_argument;
+    }
+    if (e.recording_session) |rs| emit(rs, .recording_stopped, e.recording_clips, 0, 0);
     return if (finishRecording(e)) .ok else .invalid_argument;
 }
 
-/// Feeds interleaved f32 PCM into the session: the engine's own level
-/// and beat analysis always consumes it (driving audio.level and
-/// audio.beat triggers), and an active recording of this session muxes
-/// it as the audio track where the backend supports audio.
 /// Writes resampled microphone samples straight into the session's ring, so the resampler needs
 /// no buffer of its own between it and the ring.
 const RingSink = struct {
@@ -6366,12 +7248,29 @@ const RingSink = struct {
     }
 };
 
+/// Feeds interleaved f32 PCM into the session: the engine's own level and beat
+/// analysis always consumes it, driving the audio.level and audio.beat triggers, and
+/// an active recording of this session muxes it as the audio track where the backend
+/// supports audio.
 pub export fn goss_session_submit_audio(session: ?*Session, samples: ?[*]const f32, frame_count: u32, sample_rate: u32, channels: u32, timestamp_us: i64) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_audio)) return .out_of_scope;
     const data = samples orelse return .invalid_argument;
     if (frame_count == 0 or sample_rate == 0 or channels == 0 or channels > 8) return .invalid_argument;
     const slice = data[0 .. @as(usize, frame_count) * channels];
+    const beat_before = s.audio.beat;
     s.audio.feed(slice, channels);
+    // The onset pulse, published rather than left for a poller to catch between
+    // frames: a beat lasts one hop and a poll at frame rate misses most of them.
+    if (s.audio.beat and !beat_before) emit(s, .audio_beat, 0, 0, s.audio.level);
+    // Speech starting and stopping, off the same level the beat reads. The threshold
+    // is where a room's noise floor ends, and the pair is hysteretic so a level
+    // sitting on the line does not emit on every frame.
+    const speaking = if (s.voice_active) s.audio.level > voice_release_level else s.audio.level > voice_attack_level;
+    if (speaking != s.voice_active) {
+        if (speaking) emit(s, .voice_activity_started, 0, 0, s.audio.level) else emit(s, .voice_activity_ended, 0, 0, s.audio.level);
+        s.voice_active = speaking;
+    }
     s.audio_engine_fed = true;
     s.audio_timestamp_us = timestamp_us;
 
@@ -6865,6 +7764,7 @@ pub export fn goss_session_set_capture_ui(session: ?*Session, ui: ?*const Captur
 
 pub export fn goss_session_capture_ui(session: ?*Session, out: ?*CaptureUiIntent) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.egress)) return .out_of_scope;
     const o = out orelse return .invalid_argument;
     o.* = s.capture_ui;
     return .ok;
@@ -6952,6 +7852,7 @@ pub export fn goss_session_set_source_composite(session: ?*Session, name: ?[*]co
 /// prior mask; camera or an unknown source is rejected.
 pub export fn goss_session_submit_source_mask(session: ?*Session, name: ?[*]const u8, name_len: usize, rgba: ?[*]const u8, width: u32, height: u32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_frame)) return .out_of_scope;
     const nm = name orelse return .invalid_argument;
     const bytes = rgba orelse return .invalid_argument;
     if (!validDims(width, height)) return .invalid_argument;
@@ -6970,6 +7871,7 @@ pub export fn goss_session_submit_source_mask(session: ?*Session, name: ?[*]cons
 /// same selfie/hair segmenter enable_segmentation takes; model_len 0 disables.
 pub export fn goss_session_enable_source_segmentation(session: ?*Session, name: ?[*]const u8, name_len: usize, model_bytes: ?[*]const u8, model_len: usize, threads: i32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.load_model)) return .out_of_scope;
     const nm = name orelse return .invalid_argument;
     if (std.mem.eql(u8, nm[0..name_len], "camera")) return .invalid_argument;
     const idx = findSource(s, nm[0..name_len]) orelse return .again;
@@ -7036,6 +7938,7 @@ pub export fn goss_session_remove_source(session: ?*Session, name: ?[*]const u8,
 /// cache to clobber). Define the source first.
 pub export fn goss_session_submit_source_frame_rgba_copy(session: ?*Session, name: ?[*]const u8, name_len: usize, desc: ?*const FrameDesc, rgba: ?[*]const u8, stride: u32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_frame)) return .out_of_scope;
     const nm = name orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     const rgba_ptr = rgba orelse return .invalid_argument;
@@ -7057,6 +7960,7 @@ pub export fn goss_session_submit_source_frame_rgba_copy(session: ?*Session, nam
 /// outlive the next rendered frame.
 pub export fn goss_session_submit_source_frame(session: ?*Session, name: ?[*]const u8, name_len: usize, desc: ?*const FrameDesc, planes: ?*const FramePlanes) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_frame)) return .out_of_scope;
     const nm = name orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     const p = planes orelse return .invalid_argument;
@@ -7078,6 +7982,7 @@ pub export fn goss_session_submit_source_frame(session: ?*Session, name: ?[*]con
 /// handle, so the source borrows it rather than destroying it.
 pub export fn goss_session_submit_source_hardware_buffer(session: ?*Session, name: ?[*]const u8, name_len: usize, desc: ?*const FrameDesc, hardware_buffer: ?*anyopaque) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_frame)) return .out_of_scope;
     const nm = name orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     const buffer = hardware_buffer orelse return .invalid_argument;
@@ -7267,6 +8172,7 @@ fn composeLayout(r: *render.Renderer, s: *Session, current: CurrentFrame, target
 /// only the boolean does. Overwrites in place, no allocation.
 pub export fn goss_session_submit_location(session: ?*Session, latitude: f64, longitude: f64, horizontal_accuracy_m: f32, timestamp_us: i64) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_world)) return .out_of_scope;
     _ = timestamp_us;
     if (latitude < -90 or latitude > 90 or longitude < -180 or longitude > 180) return .invalid_argument;
     s.location_lat = latitude;
@@ -7697,6 +8603,7 @@ pub export fn goss_session_destroy(session: ?*Session) void {
 
 pub export fn goss_session_submit_frame(session: ?*Session, desc: ?*const FrameDesc, planes: ?*const FramePlanes) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_frame)) return .out_of_scope;
     const d = desc orelse return .invalid_argument;
     const p = planes orelse return .invalid_argument;
     if (!validDims(d.width, d.height)) return .invalid_argument;
@@ -7832,6 +8739,7 @@ pub export fn goss_solve_two_bone_ik(root: ?*const [3]f32, upper_len: f32, lower
 /// is counted so the budget report shows it.
 pub export fn goss_session_submit_frame_copy(session: ?*Session, desc: ?*const FrameDesc, y: ?[*]const u8, y_stride: u32, uv: ?[*]const u8, uv_stride: u32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_frame)) return .out_of_scope;
     const d = desc orelse return .invalid_argument;
     const y_ptr = y orelse return .invalid_argument;
     const uv_ptr = uv orelse return .invalid_argument;
@@ -7866,13 +8774,41 @@ pub export fn goss_session_submit_frame_copy(session: ?*Session, desc: ?*const F
     return .ok;
 }
 
-/// The CPU-copy path for a single-plane BGRA8/RGBA8 frame - a canvas or
-/// video element's own byte buffer, most likely, with no native GPU
-/// handle behind it the way goss_session_submit_frame's zero-copy path
-/// needs. Same shape as goss_session_submit_frame_copy above, just a
-/// single interleaved plane instead of NV12's two.
+/// Decodes a PNG to tightly packed RGBA8. A host holding an encoded image and no
+/// decoder of its own is the ordinary case on a server and in a tool; the engine
+/// already carries the decoder for its own assets. GOSS_AGAIN with the size when
+/// the buffer is short, so a caller sizes once.
+pub export fn goss_engine_decode_png(
+    bytes: ?[*]const u8,
+    len: usize,
+    out_rgba: ?[*]u8,
+    capacity: usize,
+    out_width: ?*u32,
+    out_height: ?*u32,
+    out_len: ?*usize,
+) Status {
+    const data = bytes orelse return .invalid_argument;
+    const len_out = out_len orelse return .invalid_argument;
+    const gpa = abiAllocator();
+    // unsupported: the engine decodes png, and these bytes are not one.
+    const decoded = png.decodeRgba(gpa, data[0..len]) catch return .unsupported;
+    defer decoded.deinit(gpa);
+    len_out.* = decoded.pixels.len;
+    if (out_width) |p| p.* = decoded.width;
+    if (out_height) |p| p.* = decoded.height;
+    if (decoded.pixels.len > capacity) return .again;
+    const dst = out_rgba orelse return .invalid_argument;
+    @memcpy(dst[0..decoded.pixels.len], decoded.pixels);
+    return .ok;
+}
+
+/// The CPU-copy path for a single-plane BGRA8/RGBA8 frame, a canvas or video
+/// element's own byte buffer with no native GPU handle behind it the way
+/// goss_session_submit_frame's zero-copy path needs. Same shape as
+/// goss_session_submit_frame_copy, one interleaved plane instead of NV12's two.
 pub export fn goss_session_submit_frame_rgba_copy(session: ?*Session, desc: ?*const FrameDesc, rgba: ?[*]const u8, stride: u32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_frame)) return .out_of_scope;
     const d = desc orelse return .invalid_argument;
     const rgba_ptr = rgba orelse return .invalid_argument;
     if (!validDims(d.width, d.height)) return .invalid_argument;
@@ -7884,7 +8820,724 @@ pub export fn goss_session_submit_frame_rgba_copy(session: ?*Session, desc: ?*co
     const texture = r.uploadRgba(@intCast(d.width), @intCast(d.height), format, rgba_ptr, stride) catch return .out_of_memory;
     s.current = .{ .desc = d.*, .owns_textures = false, .preview = .{ .bgra = .{ .texture = texture } } };
     s.copied_frames += 1;
+    readText(s, rgba_ptr[0 .. @as(usize, stride) * d.height], d.width, d.height, stride, d.timestamp_us);
     return .ok;
+}
+
+/// Reads what this frame says and folds it into the store. A region whose
+/// rectified pixels have not changed keeps its previous reading rather than
+/// running the recogniser again, so watching a static sign costs the detector
+/// and nothing more.
+fn readText(s: *Session, rgba: []const u8, width: u32, height: u32, stride: u32, timestamp_us: i64) void {
+    const pipeline = s.text_pipeline orelse return;
+    const found = pipeline.detectFrame(rgba, width, height, stride) catch return;
+
+    const previous_digest = s.text_digest;
+    s.text_store.clear();
+    var text_buf: [512]u8 = undefined;
+    var chars: [256]text_core.recognize.Char = undefined;
+    var lowered_len: usize = 0;
+
+    for (0..found) |i| {
+        const region = pipeline.found()[i];
+        var entry: text_core.Entry = .{
+            .text = &.{},
+            .quad = region.quad,
+            .confidence = region.confidence,
+            .origin = .recognized,
+            .track_id = region.track_id,
+            .first_seen_us = timestamp_us,
+            .last_seen_us = timestamp_us,
+        };
+        if (pipeline.read(i, rgba, width, height, stride, &text_buf, &chars)) |reading| {
+            entry.text = reading.text;
+            entry.script = reading.script;
+            entry.direction = reading.direction;
+            // The reading's own confidence is what the characters carried; the
+            // detector's is only how sure it was that there was text at all.
+            entry.confidence = reading.confidence;
+        } else |_| {}
+        _ = s.text_store.add(entry);
+
+        for (entry.text) |ch| {
+            if (lowered_len >= s.text_lowered.len) break;
+            s.text_lowered[lowered_len] = std.ascii.toLower(ch);
+            lowered_len += 1;
+        }
+        if (lowered_len < s.text_lowered.len) {
+            s.text_lowered[lowered_len] = ' ';
+            lowered_len += 1;
+        }
+    }
+    s.text_lowered_len = lowered_len;
+    const had_text = previous_digest != 0;
+    s.text_digest = s.text_store.digest();
+    s.text_changed = s.text_digest != previous_digest;
+    // Text arriving where there was none, as against a reading changing. An agent
+    // watching for a sign to come into frame wants the first one, not every edit.
+    if (s.text_changed) {
+        const count: u32 = @intCast(s.text_store.items().len);
+        if (!had_text and count != 0) {
+            emit(s, .text_appeared, count, 0, 0);
+        } else {
+            emit(s, .text_changed, count, 0, 0);
+        }
+    }
+}
+
+/// Opens a clip as a source of frames for this session. The engine decodes it and
+/// the host decides when each frame lands, so the graph is driven by the clip
+/// rather than the clip being decorated onto a camera feed.
+pub export fn goss_session_open_clip(session: ?*Session, path: ?[*]const u8, path_len: usize, out_clip: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.open_clip)) return .out_of_scope;
+    const p = path orelse return .invalid_argument;
+    const out = out_clip orelse return .invalid_argument;
+    if (path_len == 0) return .invalid_argument;
+    if (!video.supported) return .unsupported;
+    openClip(s, p[0..path_len], out) catch |err| return switch (err) {
+        error.NoDecoder => .invalid_argument,
+        error.BadDimensions => .unsupported,
+        error.OutOfMemory => .out_of_memory,
+    };
+    return .ok;
+}
+
+/// The fallible half, so the decoder and its buffer are actually released when
+/// a later step fails. An errdefer only runs where a real error can propagate,
+/// which is why this returns an error set rather than a status.
+fn openClip(s: *Session, path: []const u8, out: *u32) error{ NoDecoder, BadDimensions, OutOfMemory }!void {
+    const gpa = s.engine.gpa;
+    var decoder = video.Decoder.open(path) orelse return error.NoDecoder;
+    errdefer decoder.close();
+    if (!validDims(decoder.width, decoder.height)) return error.BadDimensions;
+    const bgra = try gpa.alloc(u8, @as(usize, decoder.width) * decoder.height * 4);
+    errdefer gpa.free(bgra);
+
+    // A slot freed by a close is reused, so opening and closing clips in a loop
+    // does not grow the table.
+    for (s.clips.items, 0..) |slot, i| {
+        if (slot != null) continue;
+        s.clips.items[i] = .{ .decoder = decoder, .bgra = bgra };
+        out.* = @intCast(i);
+        return;
+    }
+    try s.clips.append(gpa, .{ .decoder = decoder, .bgra = bgra });
+    out.* = @intCast(s.clips.items.len - 1);
+}
+
+fn clipAt(s: *Session, index: u32) ?*Clip {
+    if (index >= s.clips.items.len) return null;
+    if (s.clips.items[index]) |*c_| return c_;
+    return null;
+}
+
+/// Decodes the clip's next frame and submits it as this session's frame, through
+/// the same path a camera's bytes take: the graph sees one frame and cannot tell
+/// where it came from. Answers `again` at the end of a stream so a host loops by
+/// seeking rather than by reopening.
+pub export fn goss_session_clip_submit_frame(session: ?*Session, clip: u32, timestamp_us: i64) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_frame)) return .out_of_scope;
+    const c_ = clipAt(s, clip) orelse return .invalid_argument;
+    const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
+    if (c_.ended) return .again;
+
+    switch (c_.decoder.read(c_.bgra)) {
+        .frame => {},
+        .end => {
+            c_.ended = true;
+            return .again;
+        },
+        .failed => return .invalid_argument,
+    }
+    const w = c_.decoder.last_width;
+    const h = c_.decoder.last_height;
+    if (!validDims(w, h)) return .unsupported;
+
+    releaseCurrentFrame(s);
+    const texture = r.uploadRgba(@intCast(w), @intCast(h), render.c.BGFX_TEXTURE_FORMAT_BGRA8, c_.bgra.ptr, 0) catch return .out_of_memory;
+    // The clip's own presentation time is the frame's timestamp unless the host
+    // names one, so a clip played back untouched carries the times it was authored
+    // with and everything clocked off the frame follows the clip.
+    const stamp = if (timestamp_us != 0) timestamp_us else c_.decoder.last_pts_us;
+    s.current = .{
+        .desc = .{
+            .width = w,
+            .height = h,
+            .pixel_format = pixel_format_bgra8,
+            .color_standard = 1,
+            .color_range = 1,
+            .flags = 0,
+            .timestamp_us = stamp,
+        },
+        .owns_textures = false,
+        .preview = .{ .bgra = .{ .texture = texture } },
+    };
+    s.copied_frames += 1;
+    return .ok;
+}
+
+/// Moves the clip to the keyframe at or before a time. Refused past the end
+/// rather than clamped, because a clamped seek returns the wrong frame silently.
+pub export fn goss_session_clip_seek(session: ?*Session, clip: u32, target_us: i64) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.open_clip)) return .out_of_scope;
+    const c_ = clipAt(s, clip) orelse return .invalid_argument;
+    if (!c_.decoder.seek(target_us)) return .invalid_argument;
+    c_.ended = false;
+    return .ok;
+}
+
+pub export fn goss_session_clip_info(session: ?*Session, clip: u32, out_info: ?*ClipInfo) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_info orelse return .invalid_argument;
+    const c_ = clipAt(s, clip) orelse return .invalid_argument;
+    out.* = .{
+        .width = c_.decoder.width,
+        .height = c_.decoder.height,
+        .duration_us = c_.decoder.duration_us,
+        .position_us = c_.decoder.last_pts_us,
+        .ended = if (c_.ended) 1 else 0,
+    };
+    return .ok;
+}
+
+/// Moves the clip by whole frames and leaves it on the frame it lands on. Forward
+/// is a decode; backward is a seek to the target time and a decode from there,
+/// because a forward-only decoder cannot step back any other way. A clip with no
+/// frame rate declared steps by its own last two presentation times.
+pub export fn goss_session_clip_step(session: ?*Session, clip: u32, frames: i32) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.open_clip)) return .out_of_scope;
+    const c_ = clipAt(s, clip) orelse return .invalid_argument;
+    if (frames == 0) return .ok;
+    if (frames > 0) {
+        var left = frames;
+        while (left > 0) : (left -= 1) {
+            const status = goss_session_clip_submit_frame(session, clip, 0);
+            if (status != .ok) return status;
+        }
+        return .ok;
+    }
+    // Backward: the period is the clip's own duration over its frame count when
+    // the container declares one, and a 30fps assumption otherwise, which is the
+    // only guess left and it is stated rather than buried.
+    const period_us: i64 = 33_333;
+    const target = c_.decoder.last_pts_us + @as(i64, frames) * period_us;
+    if (target < 0) {
+        if (!c_.decoder.seek(0)) return .invalid_argument;
+    } else if (!c_.decoder.seek(target)) {
+        return .invalid_argument;
+    }
+    c_.ended = false;
+    return goss_session_clip_submit_frame(session, clip, 0);
+}
+
+/// One versioned record of what the engine currently sees, written into the
+/// caller's buffer. Selection matters: an agent polling every frame usually wants
+/// a section or two, and a short buffer answers the size it needed rather than a
+/// partial record, so a caller sizes once.
+pub export fn goss_session_perception_snapshot(session: ?*Session, select: u32, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const len_out = out_len orelse return .invalid_argument;
+    const buffer: []u8 = if (out) |p| p[0..capacity] else &.{};
+    // Narrowed rather than refused: an agent asking for everything gets what it
+    // is entitled to instead of an error it cannot act on.
+    const want: perception.Select = s.scope.narrow(@bitCast(select));
+
+    const now_us = if (s.current) |cur| cur.desc.timestamp_us else 0;
+    var w = perception.Writer.init(buffer, now_us);
+
+    if (want.frame) {
+        w.beginSection(.frame, 1);
+        if (s.current) |cur| {
+            w.u32v(cur.desc.width);
+            w.u32v(cur.desc.height);
+            w.u32v(cur.desc.pixel_format);
+            w.u32v(cur.desc.color_standard);
+            w.u32v(cur.desc.color_range);
+            w.u32v(cur.desc.flags);
+            w.i64v(cur.desc.timestamp_us);
+            w.u64v(s.frames_submitted);
+        } else {
+            // No frame is a fact worth carrying: an agent reading zeros here knows
+            // the session has not been fed, rather than reading a stale one.
+            w.u32v(0);
+            w.u32v(0);
+            w.u32v(0);
+            w.u32v(0);
+            w.u32v(0);
+            w.u32v(0);
+            w.i64v(0);
+            w.u64v(s.frames_submitted);
+        }
+        w.endSection();
+    }
+
+    if (want.embedding) {
+        // The frame's embedding: the first loaded model output that is one
+        // vector. It rides the snapshot rather than a side channel so a
+        // semantic index stores it against the same timestamp as everything
+        // else it keeps.
+        w.beginSection(.embedding, 1);
+        var vector: [max_embedding_dim]f32 = undefined;
+        var dim: usize = 0;
+        var source: u32 = 0;
+        for (s.ml_workers.items, 0..) |mw, index| {
+            const n = ml_infer.copyEmbedding(mw.worker, 0, &vector);
+            if (n == 0) continue;
+            dim = n;
+            source = @intCast(index);
+            break;
+        }
+        w.u32v(@intCast(dim));
+        w.u32v(source);
+        for (vector[0..dim]) |v| w.f32v(v);
+        w.endSection();
+    }
+
+    if (want.faces) {
+        w.beginSection(.faces, 1);
+        w.u32v(s.face_count);
+        for (s.face_results[0..@min(s.face_count, s.face_results.len)]) |result| {
+            w.f32v(result.presence);
+            w.u32v(result.landmark_count);
+            const n = @min(result.landmark_count, face.landmark_count);
+            w.u32v(n);
+            for (0..n) |i| {
+                w.f32v(result.landmarks[i * 3]);
+                w.f32v(result.landmarks[i * 3 + 1]);
+                w.f32v(result.landmarks[i * 3 + 2]);
+            }
+        }
+        w.endSection();
+    }
+
+    if (want.hands) {
+        w.beginSection(.hands, 1);
+        if (currentHands(s)) |hands| {
+            w.u32v(hands.hand_count);
+            for (0..@min(hands.hand_count, hands.hands.len)) |i| {
+                const h = hands.hands[i];
+                w.f32v(h.handedness);
+                w.u32v(h.gesture);
+                w.f32v(h.gesture_score);
+            }
+        } else {
+            w.u32v(0);
+        }
+        w.endSection();
+    }
+
+    if (want.bodies) {
+        w.beginSection(.bodies, 1);
+        w.u32v(s.body_count);
+        w.endSection();
+    }
+
+    // The sections the format declared and nothing wrote: a reader asking for them
+    // could not tell an empty answer from one this build never produced.
+    if (want.segmentation) {
+        w.beginSection(.segmentation, 1);
+        w.u32v(if (s.seg_tex.valid()) 1 else 0);
+        w.endSection();
+    }
+
+    if (want.world) {
+        w.beginSection(.world, 1);
+        w.u32v(s.world.state.tracking_state);
+        w.u32v(@intCast(s.world.plane_count));
+        w.u32v(@intCast(s.world.anchor_count));
+        w.endSection();
+    }
+
+    if (want.depth) {
+        w.beginSection(.depth, 1);
+        // A depth map the host submitted, which is what the dof and fog passes read.
+        w.u32v(if (s.depth_width > 0 and s.depth_height > 0) 1 else 0);
+        w.endSection();
+    }
+
+    if (want.scene) {
+        w.beginSection(.scene, 1);
+        // The scene segmenter fills named channels, so a label is a channel and its
+        // score is whether that channel is live. No worker is a count of zero, which
+        // is an answer; an absent section was not.
+        const live = s.scene_worker != null;
+        const labels: u32 = if (live) scene_class_order.len else 0;
+        w.u32v(labels);
+        if (live) {
+            for (scene_class_order) |channel| {
+                w.u32v(channel);
+                w.f32v(if (s.shader_masks.count() > 0) 1 else 0);
+            }
+        }
+        w.endSection();
+    }
+
+    if (want.detections) {
+        // What the frame holds, as a box a reader can place without knowing the
+        // camera's size. A count of zero is an answer: the detector ran and found
+        // nothing, which is different from no detector running.
+        w.beginSection(.detections, 1);
+        w.u32v(s.detection_count);
+        for (s.detections[0..@min(s.detection_count, max_detections)]) |det| {
+            w.u32v(det.label);
+            w.f32v(det.score);
+            w.f32v(det.x);
+            w.f32v(det.y);
+            w.f32v(det.width);
+            w.f32v(det.height);
+        }
+        w.endSection();
+    }
+
+    if (want.audio) {
+        w.beginSection(.audio, 1);
+        w.f32v(s.audio.level);
+        w.u32v(if (s.audio.beat) 1 else 0);
+        w.u32v(if (s.audio_engine_fed) 1 else 0);
+        w.endSection();
+    }
+
+    if (want.lens) {
+        // Fixed fields first and the id's bytes last, which is the shape every other
+        // repeating section takes and the only one a declared layout can describe.
+        w.beginSection(.lens, 2);
+        const lens_id = if (s.active_lens) |*l| l.manifest.id else "";
+        w.u32v(if (s.active_lens != null) 1 else 0);
+        w.u32v(@intCast(s.node_reports.items.len));
+        w.u32v(@intCast(lens_id.len));
+        for (s.node_reports.items) |report| {
+            w.u32v(report.node_index);
+            w.u32v(report.state);
+            w.u32v(report.reason);
+        }
+        w.bytes(lens_id);
+        w.endSection();
+    }
+
+    if (want.engine) {
+        w.beginSection(.engine, 1);
+        w.u32v(@intFromEnum(s.controller.level));
+        w.u32v(s.degrade_transitions);
+        w.u64v(s.frames_rendered);
+        w.u32v(s.script_faults);
+        w.endSection();
+    }
+
+    // Text, segmentation, world, depth and scene are declared in the format from
+    // day one and land in the waves that own them. Writing them empty now is what
+    // keeps the format from breaking when they fill.
+    if (want.text) {
+        // What the frame says, in the same record as everything else: the
+        // section carried a hardcoded zero until the text rail existed.
+        w.beginSection(.text, 2);
+        const readings = s.text_store.items();
+        w.u32v(@intCast(readings.len));
+        for (readings) |e| {
+            for (e.quad.corners) |corner| {
+                w.f32v(corner.x);
+                w.f32v(corner.y);
+            }
+            w.f32v(e.confidence);
+            w.u32v(@intFromEnum(e.origin));
+            w.u32v(@intFromEnum(e.script));
+            w.u32v(@intFromEnum(e.direction));
+            w.u32v(e.track_id);
+            w.u32v(e.line);
+            w.u32v(e.paragraph);
+            w.u32v(@intCast(e.text.len));
+            w.bytes(e.text);
+        }
+        w.endSection();
+    }
+
+    const total = w.finish() catch {
+        len_out.* = w.needed;
+        return .again;
+    };
+    len_out.* = total;
+    return .ok;
+}
+
+/// A luma grid of the frame, from the thumbnail the engine already keeps for its
+/// own white balance. Comparing a grid rather than the frame is why a still room
+/// is cheap: a full comparison at 1080p costs more than the encode it avoids.
+fn sampleLumaGrid(s: *Session, out: []u8, side: usize) bool {
+    @memset(out, 0);
+    // No thumbnail means no pixels to compare. Answering that plainly is the
+    // point: inventing a score from the descriptor would report every frame as
+    // changed and defeat the gate entirely.
+    if (!s.thumb_valid) return false;
+    for (0..@min(out.len, side * side)) |i| {
+        const ty = (i / side) * thumb_side / side;
+        const tx = (i % side) * thumb_side / side;
+        const at = (ty * thumb_side + tx) * 3;
+        if (at + 2 >= s.frame_thumb.len) continue;
+        // Rec.709 luma off the thumbnail's linear rgb, which is what a change in
+        // brightness or in a moved subject both show up in.
+        const luma = 0.2126 * s.frame_thumb[at] + 0.7152 * s.frame_thumb[at + 1] + 0.0722 * s.frame_thumb[at + 2];
+        out[i] = @intFromFloat(std.math.clamp(luma, 0, 1) * 255.0);
+    }
+    return true;
+}
+
+/// Adds or updates one annotation. The same id replaces rather than duplicating,
+/// which is what lets an agent move one box every frame without leaking an entry
+/// per frame.
+pub export fn goss_session_annotate(session: ?*Session, annotation: ?*const AnnotationDesc, text: ?[*]const u8, text_len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.annotate)) return .out_of_scope;
+    const d = annotation orelse return .invalid_argument;
+    const label: []const u8 = if (text) |p| p[0..text_len] else "";
+    // Validated like every other field beside it. The enum is open, so an unknown
+    // kind was accepted and answered ok while nothing could draw it: an agent was
+    // told its overlay landed when it never would.
+    const kind: perception_actions.Kind = switch (d.kind) {
+        1 => .box,
+        2 => .label,
+        3 => .point,
+        4 => .arrow,
+        5 => .path,
+        6 => .highlight,
+        7 => .mask_overlay,
+        8 => .image,
+        9 => .meter,
+        else => return .invalid_argument,
+    };
+    const space: perception_actions.AnchorSpace = switch (d.space) {
+        0 => .screen,
+        1 => .pixels,
+        2 => .world,
+        3 => .track,
+        4 => .face_region,
+        else => return .invalid_argument,
+    };
+    const on_lost: perception_actions.OnLost = switch (d.on_lost) {
+        0 => .remove,
+        1 => .hold,
+        2 => .fade,
+        else => return .invalid_argument,
+    };
+    const lifetime: perception_actions.Lifetime = switch (d.lifetime_kind) {
+        0 => .explicit,
+        1 => .{ .frames = @intCast(@max(d.lifetime_value, 0)) },
+        2 => .{ .duration_us = d.lifetime_value },
+        3 => .track,
+        else => return .invalid_argument,
+    };
+    const now_us = if (s.current) |cur| cur.desc.timestamp_us else 0;
+    s.annotations.put(.{
+        .id = d.id,
+        .kind = kind,
+        .space = space,
+        .rect = d.rect,
+        .track_id = d.track_id,
+        .colour = d.colour,
+        .z = d.z,
+        .opacity = d.opacity,
+        .lifetime = lifetime,
+        .on_lost = on_lost,
+        .text = label,
+        .value = d.value,
+    }, s.frames_rendered, now_us) catch |err| return switch (err) {
+        error.Full => .pool_exhausted,
+        error.TextTooLong => .invalid_argument,
+        error.Invalid => .invalid_argument,
+        error.OutOfMemory => .out_of_memory,
+    };
+    return .ok;
+}
+
+pub export fn goss_session_annotation_remove(session: ?*Session, id: u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.annotate)) return .out_of_scope;
+    return if (s.annotations.remove(id)) .ok else .invalid_argument;
+}
+
+pub export fn goss_session_annotation_clear(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.annotate)) return .out_of_scope;
+    s.annotations.clear();
+    return .ok;
+}
+
+/// How many are live, and how many adds the bound turned away. The refused count
+/// is what tells an agent its overlay is losing annotations rather than drawing
+/// them somewhere it cannot see.
+pub export fn goss_session_annotation_count(session: ?*Session, out_count: ?*u32, out_refused: ?*u64) Status {
+    const s = session orelse return .invalid_argument;
+    const count_out = out_count orelse return .invalid_argument;
+    const refused_out = out_refused orelse return .invalid_argument;
+    count_out.* = @intCast(s.annotations.count());
+    refused_out.* = s.annotations.refused;
+    return .ok;
+}
+
+/// Installs the egress policy. A configuration outside its own ranges is refused
+/// here rather than producing a stream nobody can explain.
+pub export fn goss_session_egress_configure(session: ?*Session, config: ?*const EgressConfig) Status {
+    const s = session orelse return .invalid_argument;
+    const c_ = config orelse return .invalid_argument;
+    const cfg: perception_egress.Config = .{
+        .target_long_edge = c_.target_long_edge,
+        .format = switch (c_.format) {
+            0 => .jpeg,
+            1 => .png,
+            2 => .webp,
+            3 => .rgba,
+            4 => .nv12,
+            else => return .invalid_argument,
+        },
+        .quality = @intCast(@min(c_.quality, 255)),
+        .max_fps = c_.max_fps,
+        .max_bytes_per_second = c_.max_bytes_per_second,
+        .source = switch (c_.source) {
+            0 => .composited,
+            1 => .camera,
+            2 => .named_source,
+            3 => .named_screen,
+            4 => .segmentation_mask,
+            5 => .depth,
+            else => return .invalid_argument,
+        },
+        .trigger = @bitCast(c_.trigger),
+        .change_threshold = c_.change_threshold,
+        .keyframe_interval_us = c_.keyframe_interval_us,
+    };
+    if (!cfg.valid()) return .invalid_argument;
+    s.egress = perception_egress.Policy.init(cfg);
+    return .ok;
+}
+
+/// The host asking for one frame, whatever the change score says.
+pub export fn goss_session_egress_request(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    const policy = if (s.egress) |*p| p else return .invalid_argument;
+    policy.request();
+    return .ok;
+}
+
+/// Whether this frame is worth sending, and why. The score is measured against a
+/// downsampled luma grid of the last frame, so a still room costs one grid
+/// comparison rather than an encode.
+pub export fn goss_session_egress_decide(session: ?*Session, out_decision: ?*EgressDecision) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_decision orelse return .invalid_argument;
+    const policy = if (s.egress) |*p| p else return .invalid_argument;
+
+    const grid_side: usize = 16;
+    const grid_len = grid_side * grid_side;
+    const grid = growScratch(s.engine.gpa, &s.egress_previous, grid_len * 2) orelse return .out_of_memory;
+    const previous = grid[0..grid_len];
+    const current = grid[grid_len .. grid_len * 2];
+    // Without pixels there is nothing to score, and a frame nobody can score is
+    // not one to send on a change trigger.
+    if (!sampleLumaGrid(s, current, grid_side)) return .again;
+
+    const score = perception_egress.changeScore(previous, current);
+    const now_us = if (s.current) |cur| cur.desc.timestamp_us else 0;
+    // The estimate is the encode's own rough cost, which is what a byte ceiling
+    // has to be checked against before the encode rather than after it.
+    const dims: [2]u32 = if (s.current) |cur| .{ cur.desc.width, cur.desc.height } else .{ 0, 0 };
+    const estimated: u64 = @as(u64, dims[0]) * dims[1] / 8;
+    const decision = policy.decide(now_us, score, estimated);
+    if (decision.send) @memcpy(previous, current);
+
+    out.* = .{
+        .send = if (decision.send) 1 else 0,
+        .reason = @intFromEnum(decision.reason),
+        .change_score = decision.change_score,
+        .since_last_us = decision.since_last_us,
+        .sent_total = policy.sent,
+        .held_total = policy.held,
+    };
+    return .ok;
+}
+
+pub export fn goss_session_poll_events(session: ?*Session, out: ?[*]Event, capacity: u32, out_count: ?*u32, out_dropped: ?*u64) Status {
+    const s = session orelse return .invalid_argument;
+    const count_out = out_count orelse return .invalid_argument;
+    const dropped_out = out_dropped orelse return .invalid_argument;
+    const buffer: []perception_events.Event = if (out) |p| @as([*]perception_events.Event, @ptrCast(p))[0..capacity] else &.{};
+    var dropped: u64 = 0;
+    const n = s.events.drain(buffer, &dropped);
+    count_out.* = @intCast(n);
+    dropped_out.* = dropped;
+    return .ok;
+}
+
+pub export fn goss_session_perception_json(session: ?*Session, select: u32, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const len_out = out_len orelse return .invalid_argument;
+
+    // The binary record first, into the session's own scratch, grown once and
+    // reused so a poll every frame allocates nothing after the first.
+    var needed: usize = 0;
+    const probe = goss_session_perception_snapshot(session, select, null, 0, &needed);
+    if (probe != .ok and probe != .again) return probe;
+    const scratch = growScratch(s.engine.gpa, &s.perception_scratch, needed) orelse return .out_of_memory;
+    var written: usize = 0;
+    const built = goss_session_perception_snapshot(session, select, scratch.ptr, scratch.len, &written);
+    if (built != .ok) return built;
+
+    const buffer: []u8 = if (out) |p| p[0..capacity] else &.{};
+    const total = perception_json.write(scratch[0..written], buffer) catch |err| switch (err) {
+        error.Truncated => {
+            len_out.* = perception_json.size(scratch[0..written]) catch return .invalid_argument;
+            return .again;
+        },
+        error.Malformed => return .invalid_argument,
+    };
+    len_out.* = total;
+    return .ok;
+}
+
+pub export fn goss_engine_media_capabilities(engine: ?*Engine, out_caps: ?*MediaCapabilities) Status {
+    _ = engine orelse return .invalid_argument;
+    const out = out_caps orelse return .invalid_argument;
+    const backend = media_recording.backend;
+    var video_bits: u32 = 0;
+    var max_w: u32 = 0;
+    var max_h: u32 = 0;
+    var max_depth: u32 = 0;
+    var any_hdr = false;
+    for (backend.video) |profile| {
+        video_bits |= @as(u32, 1) << @intCast(@intFromEnum(profile.codec));
+        if (profile.max_width > max_w) max_w = profile.max_width;
+        if (profile.max_height > max_h) max_h = profile.max_height;
+        if (profile.max_bit_depth > max_depth) max_depth = profile.max_bit_depth;
+        if (profile.hdr) any_hdr = true;
+    }
+    var audio_bits: u32 = 0;
+    for (backend.audio) |codec| audio_bits |= @as(u32, 1) << @intCast(@intFromEnum(codec));
+    var container_bits: u32 = 0;
+    for (backend.containers) |kind| container_bits |= @as(u32, 1) << @intCast(@intFromEnum(kind));
+    out.* = .{
+        .video_codecs = video_bits,
+        .audio_codecs = audio_bits,
+        .containers = container_bits,
+        .max_width = max_w,
+        .max_height = max_h,
+        .max_bit_depth = max_depth,
+        .hdr = if (any_hdr) 1 else 0,
+        .zero_copy = if (backend.zero_copy) 1 else 0,
+    };
+    return .ok;
+}
+
+pub export fn goss_session_close_clip(session: ?*Session, clip: u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (clip >= s.clips.items.len) return .invalid_argument;
+    if (s.clips.items[clip]) |*c_| {
+        var held = c_.*;
+        held.deinit(s.engine.gpa);
+        s.clips.items[clip] = null;
+        return .ok;
+    }
+    return .invalid_argument;
 }
 
 /// Zero-copy camera submission for platforms delivering hardware buffers.
@@ -7892,6 +9545,7 @@ pub export fn goss_session_submit_frame_rgba_copy(session: ?*Session, desc: ?*co
 /// caller falls back to the declared copy path for this stream.
 pub export fn goss_session_submit_hardware_buffer(session: ?*Session, desc: ?*const FrameDesc, hardware_buffer: ?*anyopaque) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_frame)) return .out_of_scope;
     const d = desc orelse return .invalid_argument;
     const buffer = hardware_buffer orelse return .invalid_argument;
     if (!validDims(d.width, d.height)) return .invalid_argument;
@@ -7953,6 +9607,7 @@ fn takeScratch(s: *Session, slot: *?render.Renderer.OffscreenTarget, width: u16,
     if (slot.* != null) return {};
     slot.* = acquireScratchTarget(s.engine, width, height) orelse {
         s.resource_pressure = true;
+        emit(s, .pool_exhausted, width, height, 0);
         return null;
     };
     return {};
@@ -8063,6 +9718,14 @@ pub const SessionReport = extern struct {
     /// frame still draws, so without this the host sees a lens that looks fine
     /// and behaves as though it had no script at all.
     script_faults: u32,
+    /// Every model rail's frame buffer growing mid-run, summed. A steady rail
+    /// reads zero: a plan that grows every frame is not a plan, and a host
+    /// metering memory cannot see that from the byte count alone.
+    ml_plan_growths: u32,
+    /// The bytes those rails reuse every frame, summed. Zero before the first
+    /// inference publishes, and zero for a model on the vendor runtime, whose
+    /// arena it does not report.
+    ml_plan_bytes: u64,
 };
 
 /// One node's diagnostic, POD across the ABI.
@@ -8087,6 +9750,7 @@ fn noteNode(s: *Session, graph_index: graph.NodeIndex, state: NodeState, reason:
         }
         return;
     }
+    emit(s, if (state == .failed) .lens_node_failed else .lens_node_degraded, index, @intFromEnum(reason), 0);
     s.node_reports.append(s.engine.gpa, .{
         .node_index = index,
         .state = @intFromEnum(state),
@@ -8107,6 +9771,21 @@ fn activationStatus(s: *Session) Status {
         if (report.state == @intFromEnum(NodeState.failed)) return .lens_node_failed;
     }
     return .ok;
+}
+
+/// Publishes one event onto the session's ring. A ring nobody publishes to is the
+/// same vacuous mechanism as a counter nobody reads, so every state change the
+/// event kinds name goes through here.
+fn emit(s: *Session, kind: perception_events.Kind, a: u32, b: u32, value: f32) void {
+    const at = if (s.current) |cur| cur.desc.timestamp_us else 0;
+    s.events.publish(kind, at, a, b, value);
+}
+
+/// An event that happened to the engine rather than to one session, reaching every
+/// ring. Recording is engine-level, so a dropped frame belongs to all of them: the
+/// alternative was a counter a host could only find by asking for a report.
+fn emitEngineWide(e: *Engine, kind: perception_events.Kind, a: u32, b: u32, value: f32) void {
+    for (e.sessions.items) |s| emit(s, kind, a, b, value);
 }
 
 /// A resource a node cannot draw without. A node the lens marked optional
@@ -8163,12 +9842,24 @@ pub export fn goss_session_report_frame(session: ?*Session, frame_time_us: u32, 
     // whatever the clock said, then clears: the rung is what shrinks demand.
     const pressure = s.resource_pressure;
     s.resource_pressure = false;
+    // The host's own reading, reported on change: a lens that dims itself when the
+    // device warms needs to hear this, and nothing told it before.
+    if (thermal != s.last_thermal) {
+        emit(s, .thermal_changed, @bitCast(s.last_thermal), @bitCast(thermal), 0);
+        s.last_thermal = thermal;
+    }
+    // A frame over the budget the session was created with, which is the number the
+    // ladder is measured against. A host reads how often rather than guessing.
+    if (frame_time_us > s.frame_budget_us) {
+        emit(s, .budget_exceeded, frame_time_us, s.frame_budget_us, 0);
+    }
     if (s.controller.step(.{
         .frame_time_us = frame_time_us,
         .thermal = thermalFromC(thermal),
         .resource_pressure = pressure,
-    }) != null) {
+    })) |moved| {
         s.degrade_transitions +|= 1;
+        emit(s, .degrade_level_changed, @intFromEnum(moved.from), @intFromEnum(moved.to), 0);
     }
     return @intFromEnum(s.controller.level);
 }
@@ -8219,6 +9910,7 @@ pub export fn goss_session_degrade_level(session: ?*const Session) c_int {
 /// built without the inference stack this reports unsupported.
 pub export fn goss_session_enable_face_tracking(session: ?*Session, task_bytes: ?[*]const u8, task_len: usize, threads: i32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.enable_tracking)) return .out_of_scope;
     const bytes = task_bytes orelse return .invalid_argument;
     if (task_len == 0) return .invalid_argument;
     if (!modelAllowed(s, bytes[0..task_len])) return .invalid_argument;
@@ -8243,6 +9935,7 @@ pub export fn goss_session_disable_face_tracking(session: ?*Session) void {
 /// platforms built without the inference stack this reports unsupported.
 pub export fn goss_session_enable_hand_tracking(session: ?*Session, task_bytes: ?[*]const u8, task_len: usize, threads: i32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.enable_tracking)) return .out_of_scope;
     const bytes = task_bytes orelse return .invalid_argument;
     if (task_len == 0) return .invalid_argument;
     if (!modelAllowed(s, bytes[0..task_len])) return .invalid_argument;
@@ -8267,6 +9960,7 @@ pub export fn goss_session_disable_hand_tracking(session: ?*Session) void {
 /// return. Builds without the inference stack report unsupported.
 pub export fn goss_session_enable_pose_tracking(session: ?*Session, task_bytes: ?[*]const u8, task_len: usize, threads: i32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.enable_tracking)) return .out_of_scope;
     const bytes = task_bytes orelse return .invalid_argument;
     if (task_len == 0) return .invalid_argument;
     if (!modelAllowed(s, bytes[0..task_len])) return .invalid_argument;
@@ -8292,6 +9986,7 @@ pub export fn goss_session_disable_pose_tracking(session: ?*Session) void {
 /// built without the inference stack this reports unsupported.
 pub export fn goss_session_enable_segmentation(session: ?*Session, model_bytes: ?[*]const u8, model_len: usize, threads: i32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.load_model)) return .out_of_scope;
     const bytes = model_bytes orelse return .invalid_argument;
     if (model_len == 0) return .invalid_argument;
     if (!modelAllowed(s, bytes[0..model_len])) return .invalid_argument;
@@ -8436,6 +10131,7 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
 /// render draws its points. Again when the session has no selfie avatar.
 pub export fn goss_session_submit_avatar_source(session: ?*Session, desc: ?*const FrameDesc, y: ?[*]const u8, y_stride: u32, uv: ?[*]const u8, uv_stride: u32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_frame)) return .out_of_scope;
     const d = desc orelse return .invalid_argument;
     const y_plane = y orelse return .invalid_argument;
     const uv_plane = uv orelse return .invalid_argument;
@@ -8464,6 +10160,7 @@ pub export fn goss_session_submit_avatar_source(session: ?*Session, desc: ?*cons
 /// avatar, so the caller only pays the convert when a worker will consume it.
 pub export fn goss_session_submit_avatar_source_rgba(session: ?*Session, rgba: ?[*]const u8, width: u32, height: u32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_frame)) return .out_of_scope;
     const pixels = rgba orelse return .invalid_argument;
     if (!validDims(width, height)) return .invalid_argument;
     var any = false;
@@ -8536,9 +10233,15 @@ pub export fn goss_session_submit_faces(session: ?*Session, faces: ?[*]const fac
     var i: u32 = 0;
     while (i < count and kept < face.max_faces) : (i += 1) {
         const f = src[i];
-        if (f.landmark_count_out == 0 or f.presence < 0.5) continue;
+        if (f.landmark_count == 0 or f.presence < 0.5) continue;
         s.face_results[kept] = f;
         kept += 1;
+    }
+    // A face arriving or leaving is what an agent watches for, so the count
+    // changing is an event rather than something a poller has to notice.
+    if (kept != s.face_count) {
+        emit(s, .face_count_changed, s.face_count, kept, 0);
+        if (kept > s.face_count) emit(s, .face_appeared, kept, 0, 0) else emit(s, .face_lost, kept, 0, 0);
     }
     s.face_count = kept;
     return .ok;
@@ -8704,6 +10407,7 @@ pub export fn goss_session_face_track_id(session: ?*Session, index: u32, out_id:
 pub export fn goss_session_submit_bodies(session: ?*Session, bodies: ?[*]const pose.Result, count: u32) Status {
     const s = session orelse return .invalid_argument;
     if (count == 0) {
+        if (s.body_count != 0) emit(s, .body_lost, 0, s.body_count, 0);
         s.body_count = 0;
         return .ok;
     }
@@ -8712,9 +10416,13 @@ pub export fn goss_session_submit_bodies(session: ?*Session, bodies: ?[*]const p
     var i: u32 = 0;
     while (i < count and kept < pose.max_bodies) : (i += 1) {
         const b = src[i];
-        if (b.landmark_count_out == 0 or b.presence < 0.5) continue;
+        if (b.landmark_count == 0 or b.presence < 0.5) continue;
         s.body_results[kept] = b;
         kept += 1;
+    }
+    // A body arriving or leaving is what an agent watches for, the same as a face.
+    if (kept != s.body_count) {
+        if (kept > s.body_count) emit(s, .body_appeared, kept, s.body_count, 0) else emit(s, .body_lost, kept, s.body_count, 0);
     }
     s.body_count = kept;
     return .ok;
@@ -8727,6 +10435,9 @@ pub export fn goss_session_submit_bodies(session: ?*Session, bodies: ?[*]const p
 pub export fn goss_session_submit_hands(session: ?*Session, hands: ?*const hand.Result) Status {
     const s = session orelse return .invalid_argument;
     const src = hands orelse {
+        if (s.has_submitted_hands and s.submitted_hands.hand_count != 0) {
+            emit(s, .hand_lost, 0, s.submitted_hands.hand_count, 0);
+        }
         s.has_submitted_hands = false;
         return .ok;
     };
@@ -8740,6 +10451,11 @@ pub export fn goss_session_submit_hands(session: ?*Session, hands: ?*const hand.
         kept += 1;
     }
     out.hand_count = kept;
+    // A hand arriving or leaving, the same shape as a face and a body.
+    const before: u32 = if (s.has_submitted_hands) s.submitted_hands.hand_count else 0;
+    if (kept != before) {
+        if (kept > before) emit(s, .hand_appeared, kept, before, 0) else emit(s, .hand_lost, kept, before, 0);
+    }
     s.submitted_hands = out;
     s.has_submitted_hands = true;
     return .ok;
@@ -8770,6 +10486,7 @@ pub export fn goss_session_body_result_at(session: ?*Session, index: u32, out_re
 /// zero size clears it. Kept for depth occlusion against the content.
 pub export fn goss_session_submit_depth(session: ?*Session, depth: ?[*]const f32, width: u32, height: u32, near: f32, far: f32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_world)) return .out_of_scope;
     const gpa = s.engine.gpa;
     const count = @as(usize, width) * height;
     if (count == 0) {
@@ -8812,6 +10529,7 @@ pub export fn goss_session_submit_depth(session: ?*Session, depth: ?[*]const f32
 /// length or zero coefficient count clears them, leaving an undistort.pass inert.
 pub export fn goss_session_submit_camera_intrinsics(session: ?*Session, fx: f32, fy: f32, cx: f32, cy: f32, distortion: ?[*]const f32, distortion_len: u32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_world)) return .out_of_scope;
     if (fx <= 0 or fy <= 0 or distortion_len == 0) {
         s.intrinsics_set = false;
         s.intrinsics_k1 = 0;
@@ -8833,6 +10551,7 @@ pub export fn goss_session_submit_camera_intrinsics(session: ?*Session, fx: f32,
 /// from consecutive samples; the host submits one per frame from the IMU.
 pub export fn goss_session_submit_orientation(session: ?*Session, gravity_x: f32, gravity_y: f32, gravity_z: f32, timestamp_us: i64) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_world)) return .out_of_scope;
     var g = [3]f32{ gravity_x, gravity_y, gravity_z };
     const mag = @sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
     if (mag < 1e-4) {
@@ -8961,6 +10680,7 @@ const capture_max_gaussians: usize = capture_max_views * capture_grid * capture_
 /// reconstruction is deterministic; goss_session_reset_capture clears the scan.
 pub export fn goss_session_capture_view(session: ?*Session, out_guidance: ?*CaptureGuidance) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.egress)) return .out_of_scope;
     const gpa = s.engine.gpa;
     const cam_pose = s.world.state.world_from_camera;
     const proj = s.world.state.projection;
@@ -9020,6 +10740,531 @@ pub export fn goss_session_reset_capture(session: ?*Session) Status {
 /// how many diagnostics could not be recorded at all. A zero count with a
 /// non-zero lost count means the lens degraded in ways this session could not
 /// even write down, which is a different thing from a lens that is fine.
+/// One thing the frame says, flattened for the crossing: where it is, how sure
+/// the engine is, what found it, and which line and paragraph it belongs to. The
+/// string comes through goss_session_text_string, so a caller sizes once.
+pub const TextEntry = extern struct {
+    /// The quadrilateral in normalized frame space, in reading order: top-left,
+    /// top-right, bottom-right, bottom-left.
+    quad: [8]f32,
+    confidence: f32,
+    /// 0 recognized, 1 barcode, 2 qr.
+    origin: u32,
+    script: u32,
+    direction: u32,
+    track_id: u32,
+    line: u32,
+    paragraph: u32,
+    text_len: u32,
+    first_seen_us: i64,
+    last_seen_us: i64,
+};
+
+/// Turns on the text rail with a caller-supplied detector, and a recogniser and
+/// dictionary where the caller has them. A detector alone finds where the text
+/// is, which is what a redaction or a rectified crop needs; the recogniser is
+/// what turns it into a string.
+pub export fn goss_session_enable_text(
+    session: ?*Session,
+    detector: ?[*]const u8,
+    detector_len: usize,
+    recognizer: ?[*]const u8,
+    recognizer_len: usize,
+    dictionary: ?[*]const u8,
+    dictionary_len: usize,
+    detect_side: u32,
+) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.load_model)) return .out_of_scope;
+    const det = detector orelse return .invalid_argument;
+    if (detector_len == 0) return .invalid_argument;
+    if (!ml_infer.supported) return .unsupported;
+
+    disableText(s);
+    const gpa = s.engine.gpa;
+    const pipeline = gpa.create(text_infer.Pipeline) catch return .out_of_memory;
+    // No errdefer: this returns a status, never an error, so one would be dead
+    // code, and the failure path below releases the pipeline itself.
+    pipeline.* = text_infer.Pipeline.init(
+        gpa,
+        det[0..detector_len],
+        if (recognizer) |r| (if (recognizer_len == 0) null else r[0..recognizer_len]) else null,
+        if (dictionary) |d| (if (dictionary_len == 0) null else d[0..dictionary_len]) else null,
+        .{ .detect_side = if (detect_side == 0) 320 else @min(detect_side, 1280) },
+    ) catch |err| {
+        gpa.destroy(pipeline);
+        return switch (err) {
+            error.OutOfMemory => .out_of_memory,
+            else => .invalid_argument,
+        };
+    };
+    s.text_pipeline = pipeline;
+    return .ok;
+}
+
+pub export fn goss_session_disable_text(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    disableText(s);
+    return .ok;
+}
+
+fn disableText(s: *Session) void {
+    if (s.text_pipeline) |pipeline| {
+        pipeline.deinit();
+        s.engine.gpa.destroy(pipeline);
+        s.text_pipeline = null;
+    }
+    s.text_store.clear();
+    s.text_lowered_len = 0;
+    s.text_digest = 0;
+    s.text_changed = false;
+}
+
+/// How many readings the frame holds, and how many the bound turned away, which
+/// is what tells a caller it is losing readings rather than seeing them all.
+pub export fn goss_session_text_count(session: ?*Session, out_count: ?*u32, out_refused: ?*u64) Status {
+    const s = session orelse return .invalid_argument;
+    if (out_count) |p| p.* = @intCast(s.text_store.count);
+    if (out_refused) |p| p.* = s.text_store.refused;
+    return .ok;
+}
+
+pub export fn goss_session_text_at(session: ?*Session, index: u32, out_entry: ?*TextEntry) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_entry orelse return .invalid_argument;
+    const items = s.text_store.items();
+    if (index >= items.len) return .invalid_argument;
+    const e = items[index];
+    out.* = .{
+        .quad = .{
+            e.quad.corners[0].x, e.quad.corners[0].y,
+            e.quad.corners[1].x, e.quad.corners[1].y,
+            e.quad.corners[2].x, e.quad.corners[2].y,
+            e.quad.corners[3].x, e.quad.corners[3].y,
+        },
+        .confidence = e.confidence,
+        .origin = @intFromEnum(e.origin),
+        .script = @intFromEnum(e.script),
+        .direction = @intFromEnum(e.direction),
+        .track_id = e.track_id,
+        .line = e.line,
+        .paragraph = e.paragraph,
+        .text_len = @intCast(e.text.len),
+        .first_seen_us = e.first_seen_us,
+        .last_seen_us = e.last_seen_us,
+    };
+    return .ok;
+}
+
+pub export fn goss_session_text_string(session: ?*Session, index: u32, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const len_out = out_len orelse return .invalid_argument;
+    const items = s.text_store.items();
+    if (index >= items.len) return .invalid_argument;
+    const source = items[index].text;
+    len_out.* = source.len;
+    if (source.len > capacity) return .again;
+    if (out) |p| @memcpy(p[0..source.len], source);
+    return .ok;
+}
+
+/// One thing that can be captured, as the platform reports it. The scale factor
+/// is the field a caller must not ignore: a point sent back without it lands at
+/// half its intended place on a retina display.
+pub const ScreenSurface = extern struct {
+    id: u64,
+    /// 0 display, 1 window, 2 application, 3 unknown.
+    kind: u32,
+    logical_width: f32,
+    logical_height: f32,
+    origin_x: f32,
+    origin_y: f32,
+    scale: f32,
+    title_len: u32,
+};
+
+/// What this process may capture. Zero is the honest answer for a host that has
+/// not been granted permission, so a caller prompts rather than reading an error
+/// it cannot act on.
+pub export fn goss_engine_screen_count(engine: ?*Engine, out_count: ?*u32) Status {
+    const e = engine orelse return .invalid_argument;
+    const out = out_count orelse return .invalid_argument;
+    if (!screen_capture.supported) {
+        out.* = 0;
+        return .unsupported;
+    }
+    e.screen_surface_count = screen_capture.enumerate(&e.screen_surfaces);
+    out.* = @intCast(e.screen_surface_count);
+    return .ok;
+}
+
+pub export fn goss_engine_screen_at(engine: ?*Engine, index: u32, out_surface: ?*ScreenSurface) Status {
+    const e = engine orelse return .invalid_argument;
+    const out = out_surface orelse return .invalid_argument;
+    if (index >= e.screen_surface_count) return .invalid_argument;
+    const s = screen_capture.view(&e.screen_surfaces[index]);
+    out.* = .{
+        .id = s.id,
+        .kind = @intFromEnum(s.kind),
+        .logical_width = s.logical_width,
+        .logical_height = s.logical_height,
+        .origin_x = s.origin_x,
+        .origin_y = s.origin_y,
+        .scale = s.scale,
+        .title_len = @intCast(s.title.len),
+    };
+    return .ok;
+}
+
+pub export fn goss_engine_screen_title(engine: ?*Engine, index: u32, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const e = engine orelse return .invalid_argument;
+    const len_out = out_len orelse return .invalid_argument;
+    if (index >= e.screen_surface_count) return .invalid_argument;
+    const title = screen_capture.view(&e.screen_surfaces[index]).title;
+    len_out.* = title.len;
+    if (title.len > capacity) return .again;
+    if (out) |p| @memcpy(p[0..title.len], title);
+    return .ok;
+}
+
+/// Opens a surface as a source. A scale of zero takes the surface's own, which is
+/// what a caller wants unless it is deliberately capturing small.
+pub export fn goss_session_open_screen(session: ?*Session, surface_id: u64, scale: f32, out_screen: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_screen orelse return .invalid_argument;
+    if (!screen_capture.supported) return .unsupported;
+    if (!s.scope.allowsVerb(.capture_screen)) return .out_of_scope;
+    openScreen(s, surface_id, scale, out) catch |err| return switch (err) {
+        error.NoCapture => .invalid_argument,
+        error.BadDimensions => .unsupported,
+        error.OutOfMemory => .out_of_memory,
+    };
+    return .ok;
+}
+
+/// The fallible half, so the capture and its buffer are released when a later
+/// step fails. An errdefer only runs where a real error can propagate.
+fn openScreen(s: *Session, surface_id: u64, scale: f32, out: *u32) error{ NoCapture, BadDimensions, OutOfMemory }!void {
+    const gpa = s.engine.gpa;
+    var capture = screen_capture.Capture.open(surface_id, scale) orelse return error.NoCapture;
+    errdefer capture.close();
+    if (!validDims(capture.width, capture.height)) return error.BadDimensions;
+    const bgra = try gpa.alloc(u8, @as(usize, capture.width) * capture.height * 4);
+    errdefer gpa.free(bgra);
+
+    for (s.screens.items, 0..) |slot, i| {
+        if (slot != null) continue;
+        s.screens.items[i] = .{ .capture = capture, .bgra = bgra, .surface_id = surface_id };
+        out.* = @intCast(i);
+        return;
+    }
+    try s.screens.append(gpa, .{ .capture = capture, .bgra = bgra, .surface_id = surface_id });
+    out.* = @intCast(s.screens.items.len - 1);
+}
+
+pub export fn goss_session_close_screen(session: ?*Session, screen: u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (screen >= s.screens.items.len) return .invalid_argument;
+    const slot = &s.screens.items[screen];
+    if (slot.* == null) return .invalid_argument;
+    slot.*.?.deinit(s.engine.gpa);
+    slot.* = null;
+    return .ok;
+}
+
+/// Pulls the newest frame and submits it under a source name, so a screen
+/// composites, records and egresses exactly as a camera does. A screen that has
+/// not changed answers again rather than resubmitting the same pixels.
+pub export fn goss_session_step_screen(session: ?*Session, screen: u32, name: ?[*]const u8, name_len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    if (screen >= s.screens.items.len) return .invalid_argument;
+    const slot = &(s.screens.items[screen] orelse return .invalid_argument);
+    switch (slot.capture.read(slot.bgra)) {
+        .unchanged => return .again,
+        .failed => return .invalid_argument,
+        .frame => {},
+    }
+    const desc: FrameDesc = .{
+        .width = slot.capture.last_width,
+        .height = slot.capture.last_height,
+        .pixel_format = pixel_format_bgra8,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = slot.capture.last_timestamp_us,
+    };
+    if (name) |n| {
+        if (name_len != 0) return goss_session_submit_source_frame_rgba_copy(session, n, name_len, &desc, slot.bgra.ptr, desc.width * 4);
+    }
+    return goss_session_submit_frame_rgba_copy(session, &desc, slot.bgra.ptr, desc.width * 4);
+}
+
+/// Where a normalized point an agent sent lands: the surface's own logical
+/// points, its backing pixels, and the desktop. The scale factor and the origin
+/// are applied here, once, rather than by every caller.
+pub export fn goss_session_screen_point(session: ?*Session, screen: u32, x: f32, y: f32, out_logical: ?[*]f32, out_pixel: ?[*]f32, out_desktop: ?[*]f32) Status {
+    const s = session orelse return .invalid_argument;
+    if (screen >= s.screens.items.len) return .invalid_argument;
+    const slot = s.screens.items[screen] orelse return .invalid_argument;
+
+    // The surface as the engine last enumerated it, because a window moves and a
+    // point sent against a stale origin lands on whatever is there now.
+    var surface: screen_geometry.Surface = .{
+        .id = slot.surface_id,
+        .kind = .unknown,
+        .logical_width = @floatFromInt(slot.capture.last_width),
+        .logical_height = @floatFromInt(slot.capture.last_height),
+        .scale = 1,
+    };
+    for (s.engine.screen_surfaces[0..s.engine.screen_surface_count]) |*raw| {
+        const view = screen_capture.view(raw);
+        if (view.id != slot.surface_id) continue;
+        surface = .{
+            .id = view.id,
+            .kind = switch (view.kind) {
+                .display => .display,
+                .window => .window,
+                .application => .application,
+                .unknown => .unknown,
+            },
+            .logical_width = view.logical_width,
+            .logical_height = view.logical_height,
+            .origin_x = view.origin_x,
+            .origin_y = view.origin_y,
+            .scale = view.scale,
+        };
+        break;
+    }
+
+    const landing = screen_geometry.landing(surface, .{ .x = x, .y = y });
+    if (out_logical) |p| {
+        p[0] = landing.logical.x;
+        p[1] = landing.logical.y;
+    }
+    if (out_pixel) |p| {
+        p[0] = landing.pixel.x;
+        p[1] = landing.pixel.y;
+    }
+    if (out_desktop) |p| {
+        p[0] = landing.desktop.x;
+        p[1] = landing.desktop.y;
+    }
+    return .ok;
+}
+
+/// Narrows what this session answers and does. It only ever narrows: a scope that
+/// could widen itself would be advisory, since whatever runs inside the session
+/// can call this. Widening means a new session, which only the host can make.
+pub export fn goss_session_set_scope(session: ?*Session, sections: u32, verbs: u32) Status {
+    const s = session orelse return .invalid_argument;
+    s.scope = s.scope.narrowedTo(.{ .sections = sections, .verbs = verbs });
+    return .ok;
+}
+
+/// The name of one verb, so a refusal can be explained and a host can show a
+/// person what an agent asked for. `goss_scope_verb_count` bounds the index.
+pub export fn goss_scope_verb_name(verb: u32, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const len_out = out_len orelse return .invalid_argument;
+    if (verb >= perception_mod.scope.verb_count) return .invalid_argument;
+    const name = perception_mod.scope.verbName(@enumFromInt(verb));
+    len_out.* = name.len;
+    if (name.len > capacity) return .again;
+    const dst = out orelse return .invalid_argument;
+    @memcpy(dst[0..name.len], name);
+    return .ok;
+}
+
+pub export fn goss_scope_verb_count() u32 {
+    return perception_mod.scope.verb_count;
+}
+
+pub export fn goss_session_scope(session: ?*Session, out_sections: ?*u32, out_verbs: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (out_sections) |p| p.* = s.scope.sections;
+    if (out_verbs) |p| p.* = s.scope.verbs;
+    return .ok;
+}
+
+pub export fn goss_session_memory_open(session: ?*Session, dim: u32, max_entries: u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.remember)) return .out_of_scope;
+    if (dim == 0 or dim > 4096) return .invalid_argument;
+    closeMemory(s);
+    const gpa = s.engine.gpa;
+    const index = gpa.create(memory_plane.Index) catch return .out_of_memory;
+    index.* = memory_plane.Index.init(gpa, dim, .{
+        .max_elements = if (max_entries == 0) 4096 else max_entries,
+    }) catch {
+        gpa.destroy(index);
+        return .out_of_memory;
+    };
+    s.memory_index = index;
+    return .ok;
+}
+
+pub export fn goss_session_memory_close(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    closeMemory(s);
+    return .ok;
+}
+
+fn closeMemory(s: *Session) void {
+    if (s.memory_index) |index| {
+        index.deinit();
+        s.engine.gpa.destroy(index);
+        s.memory_index = null;
+    }
+}
+
+/// Remembers one embedding under an id. The same id replaces rather than
+/// duplicating, so a keyframe corrected on a later frame does not leave the
+/// earlier one to be found instead.
+pub export fn goss_session_memory_remember(session: ?*Session, id: u64, embedding: ?[*]const f32, dim: u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.remember)) return .out_of_scope;
+    const index = s.memory_index orelse return .again;
+    const values = embedding orelse return .invalid_argument;
+    if (dim != index.dim) return .invalid_argument;
+    index.insert(id, values[0..dim]) catch |err| return switch (err) {
+        error.Full => .pool_exhausted,
+        error.DimensionMismatch => .invalid_argument,
+        else => .out_of_memory,
+    };
+    return .ok;
+}
+
+pub export fn goss_session_memory_forget(session: ?*Session, id: u64) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.remember)) return .out_of_scope;
+    const index = s.memory_index orelse return .again;
+    index.remove(id) catch return .invalid_argument;
+    return .ok;
+}
+
+/// The nearest remembered embeddings. Answers how many landed, which on a
+/// memory smaller than k is fewer rather than padded with nothing.
+pub export fn goss_session_memory_search(session: ?*Session, query: ?[*]const f32, dim: u32, k: u32, out_ids: ?[*]u64, out_scores: ?[*]f32, out_count: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.search_memory)) return .out_of_scope;
+    const index = s.memory_index orelse return .again;
+    const q = query orelse return .invalid_argument;
+    const ids = out_ids orelse return .invalid_argument;
+    const count_out = out_count orelse return .invalid_argument;
+    if (dim != index.dim or k == 0) return .invalid_argument;
+
+    var matches: [max_memory_results]memory_plane.Match = undefined;
+    const want = @min(k, matches.len);
+    const n = index.search(q[0..dim], matches[0..want], memory_search_width) catch return .invalid_argument;
+    for (0..n) |i| {
+        ids[i] = matches[i].id;
+        if (out_scores) |scores| scores[i] = matches[i].score;
+    }
+    count_out.* = @intCast(n);
+    return .ok;
+}
+
+pub export fn goss_session_memory_stats(session: ?*Session, out_count: ?*u32, out_bytes: ?*u64) Status {
+    const s = session orelse return .invalid_argument;
+    const index = s.memory_index orelse return .again;
+    if (out_count) |p| p.* = @intCast(index.count());
+    if (out_bytes) |p| p.* = index.byteSize();
+    return .ok;
+}
+
+/// Writes the whole memory so a cold start is instant. A short buffer reports
+/// the size it needed rather than a truncated file that would load as something
+/// else.
+pub export fn goss_session_memory_save(session: ?*Session, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const index = s.memory_index orelse return .again;
+    const len_out = out_len orelse return .invalid_argument;
+    var buffer: []u8 = &.{};
+    if (out) |p| buffer = p[0..capacity];
+    const needed = memory_plane.hnsw.save(index, buffer);
+    len_out.* = needed;
+    if (needed > capacity) return .again;
+    return .ok;
+}
+
+/// Every snapshot section this build writes, as the mask a caller passes to ask
+/// for all of them. A hand-written one goes stale the moment a section is added,
+/// which is how the embedding section came to be excluded from every SDK.
+pub export fn goss_perception_select_all() u32 {
+    return @bitCast(perception.Select.all);
+}
+
+/// Writes the memory sealed under a host key. An index of embeddings records what
+/// a camera saw, so a file lifted off the device should be bytes rather than a
+/// diary. The nonce is the caller's: one reused under a key breaks the cipher.
+pub export fn goss_session_memory_save_sealed(session: ?*Session, key: ?*const [32]u8, nonce: ?*const [12]u8, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.seal_memory)) return .out_of_scope;
+    const k = key orelse return .invalid_argument;
+    const n = nonce orelse return .invalid_argument;
+    const len_out = out_len orelse return .invalid_argument;
+    const index = s.memory_index orelse return .again;
+
+    const gpa = s.engine.gpa;
+    const plain_len = memory_plane.hnsw.save(index, &.{});
+    const needed = memory_plane.sealed.sealedSize(plain_len);
+    len_out.* = needed;
+    if (needed > capacity) return .again;
+    const buffer = out orelse return .invalid_argument;
+
+    const plain = gpa.alloc(u8, plain_len) catch return .out_of_memory;
+    defer gpa.free(plain);
+    if (memory_plane.hnsw.save(index, plain) != plain_len) return .invalid_argument;
+    _ = memory_plane.sealed.seal(k.*, n.*, .index, plain, buffer[0..capacity]) catch return .out_of_memory;
+    return .ok;
+}
+
+/// Reads a sealed memory back. A wrong key, a changed byte, a file sealed as
+/// something else or a truncated write each fail here rather than producing
+/// plausible plaintext the index would then answer queries from.
+pub export fn goss_session_memory_load_sealed(session: ?*Session, key: ?*const [32]u8, bytes: ?[*]const u8, len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.seal_memory)) return .out_of_scope;
+    const k = key orelse return .invalid_argument;
+    const data = bytes orelse return .invalid_argument;
+    if (len == 0) return .invalid_argument;
+
+    const gpa = s.engine.gpa;
+    const plain = gpa.alloc(u8, len) catch return .out_of_memory;
+    defer gpa.free(plain);
+    const plain_len = memory_plane.sealed.open(k.*, .index, data[0..len], plain) catch |err| return switch (err) {
+        error.OutOfMemory => .out_of_memory,
+        else => .invalid_argument,
+    };
+    return goss_session_memory_load(session, plain.ptr, plain_len);
+}
+
+pub export fn goss_session_memory_load(session: ?*Session, bytes: ?[*]const u8, len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const data = bytes orelse return .invalid_argument;
+    if (len == 0) return .invalid_argument;
+    const gpa = s.engine.gpa;
+    const index = gpa.create(memory_plane.Index) catch return .out_of_memory;
+    index.* = memory_plane.hnsw.load(gpa, data[0..len]) catch {
+        gpa.destroy(index);
+        return .invalid_argument;
+    };
+    closeMemory(s);
+    s.memory_index = index;
+    return .ok;
+}
+
+pub export fn goss_ml_op_support(model: ?[*]const u8, model_len: usize, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const bytes = model orelse return .invalid_argument;
+    const len = out_len orelse return .invalid_argument;
+    if (model_len == 0) return .invalid_argument;
+    var buffer: []u8 = &.{};
+    if (out) |o| buffer = o[0..capacity];
+    const needed = ml_infer.missingOps(abiAllocator(), bytes[0..model_len], buffer);
+    len.* = needed;
+    if (needed > capacity) return .again;
+    return .ok;
+}
+
 pub export fn goss_engine_read_report(engine: ?*Engine, out_report: ?*EngineReport) Status {
     const e = engine orelse return .invalid_argument;
     const out = out_report orelse return .invalid_argument;
@@ -9070,8 +11315,27 @@ pub export fn goss_session_read_report(session: ?*Session, out_report: ?*Session
         .nodes_degraded = @intCast(s.node_reports.items.len),
         .node_reports_lost = s.node_reports_lost,
         .script_faults = s.script_faults,
+        .ml_plan_growths = mlPlanGrowths(s),
+        .ml_plan_bytes = mlPlanBytes(s),
     };
     return .ok;
+}
+
+/// Sums every model rail this session is running: the single-frame workers and
+/// the temporal ones. Summed rather than maxed, because what a host meters is
+/// the memory the session holds, not the largest one model holds.
+fn mlPlanBytes(s: *Session) u64 {
+    var total: u64 = 0;
+    for (s.ml_workers.items) |mw| total += ml_infer.planBytes(mw.worker);
+    for (s.temporal_workers.items) |tw| total += ml_infer.temporalPlanBytes(tw.worker);
+    return total;
+}
+
+fn mlPlanGrowths(s: *Session) u32 {
+    var total: u32 = 0;
+    for (s.ml_workers.items) |mw| total +|= ml_infer.planGrowths(mw.worker);
+    for (s.temporal_workers.items) |tw| total +|= ml_infer.temporalPlanGrowths(tw.worker);
+    return total;
 }
 
 pub export fn goss_session_node_report_count(session: ?*Session, out_count: ?*u32, out_lost: ?*u32) Status {
@@ -9206,6 +11470,7 @@ fn feedBracket(s: *Session, conversion: math.color.Conversion, width: u32, heigh
 /// node is active.
 pub export fn goss_session_submit_frame_bracket(session: ?*Session, desc: ?*const FrameDesc, y: ?[*]const u8, y_stride: u32, uv: ?[*]const u8, uv_stride: u32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_frame)) return .out_of_scope;
     const d = desc orelse return .invalid_argument;
     const y_plane = y orelse return .invalid_argument;
     const uv_plane = uv orelse return .invalid_argument;
@@ -9232,6 +11497,7 @@ pub export fn goss_session_submit_frame_bracket(session: ?*Session, desc: ?*cons
 /// bracket node is active.
 pub export fn goss_session_submit_frame_bracket_rgba(session: ?*Session, rgba: ?[*]const u8, width: u32, height: u32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_frame)) return .out_of_scope;
     const pixels = rgba orelse return .invalid_argument;
     if (!validDims(width, height)) return .invalid_argument;
     var has_bracket = false;
@@ -9258,6 +11524,7 @@ pub export fn goss_session_submit_frame_bracket_rgba(session: ?*Session, rgba: ?
 /// camera frame would. again when no segmenter is enabled.
 pub export fn goss_session_submit_segmentation_image(session: ?*Session, rgba: ?[*]const u8, width: u32, height: u32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.submit_frame)) return .out_of_scope;
     const pixels = rgba orelse return .invalid_argument;
     if (!validDims(width, height)) return .invalid_argument;
     const worker = s.segmentation_worker orelse return .again;
@@ -9527,6 +11794,7 @@ fn averageLoopColor(rgba: []const u8, width: u32, height: u32, lm: [*]const f32,
 /// face landmarks (478, reference-pixel space); a zero count clears it.
 pub export fn goss_session_set_makeup_reference(session: ?*Session, rgba: ?[*]const u8, width: u32, height: u32, landmarks: ?[*]const f32, landmark_count: u32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.retouch)) return .out_of_scope;
     if (landmark_count == 0) {
         s.makeup_reference = @splat(null);
         return .ok;
@@ -9696,7 +11964,7 @@ pub export fn goss_session_face_region(session: ?*Session, region: u32, out_xyz:
     const r = face.Region.fromU32(region) orelse return .invalid_argument;
     if (s.face_tracking) |worker| {
         var result: face.Result = undefined;
-        if (tracking.readResult(worker, &result) and result.landmark_count_out > 0 and result.presence >= 0.5) {
+        if (tracking.readResult(worker, &result) and result.landmark_count > 0 and result.presence >= 0.5) {
             out.* = face.regionPoint(&result.landmarks, r);
             return .ok;
         }
@@ -9714,6 +11982,7 @@ pub export fn goss_session_face_region(session: ?*Session, region: u32, out_xyz:
 /// without the effects engine report unsupported.
 pub export fn goss_session_enable_beauty(session: ?*Session, resource_path: ?[*:0]const u8) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.retouch)) return .out_of_scope;
     const path = resource_path orelse return .invalid_argument;
     if (s.beauty_chain != null) return .ok;
     s.beauty_chain = beauty.create(s.engine.gpa, path) catch |err| switch (err) {
@@ -9766,6 +12035,7 @@ pub export fn goss_session_set_beauty(session: ?*Session, effect: i32, value: f3
 pub export fn goss_session_set_beauty_lut(session: ?*Session, slot: i32, rgba: ?[*]const u8, width: u32, height: u32) Status {
     if (!is_web) return .unsupported;
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.retouch)) return .out_of_scope;
     if (slot < 0 or slot > 3) return .invalid_argument;
     const bytes = rgba orelse return .invalid_argument;
     if (width == 0 or height == 0) return .invalid_argument;
@@ -9785,6 +12055,7 @@ pub export fn goss_session_set_beauty_lut(session: ?*Session, slot: i32, rgba: ?
 pub export fn goss_session_set_beauty_makeup_texture(session: ?*Session, effect: i32, rgba: ?[*]const u8, width: u32, height: u32) Status {
     if (!is_web) return .unsupported;
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.retouch)) return .out_of_scope;
     const bytes = rgba orelse return .invalid_argument;
     if (width == 0 or height == 0) return .invalid_argument;
     const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
@@ -10037,7 +12308,11 @@ fn pollSegmentationMask(session: *Session) void {
         if (!maskChannelNeeded(session, @intCast(channel))) continue;
         const source = classChannelSource(class_count, channel) orelse continue;
         if (!segmentation.readClassMask(worker, source, mask)) continue;
+        const was_live = session.segmentation_class_textures[channel] != null;
         session.segmentation_class_textures[channel] = uploadMaskFromF32(sessionRenderer(session) orelse return, &session.class_tex[channel], mask);
+        // A class the segmenter had not found before: hair entering frame is an
+        // event, not something a lens learns by sampling a mask that used to be zero.
+        if (!was_live) emit(session, .segmentation_class_appeared, @intCast(channel), source, 0);
     }
 }
 
@@ -10051,7 +12326,9 @@ fn pollSceneSegmentation(session: *Session) void {
         if (!maskChannelNeeded(session, channel)) continue;
         const source = sceneChannelSource(channel) orelse continue;
         if (!segmentation.readClassMask(worker, source, mask)) continue;
+        const was_live = session.segmentation_class_textures[channel] != null;
         session.segmentation_class_textures[channel] = uploadMaskFromF32(sessionRenderer(session) orelse return, &session.class_tex[channel], mask);
+        if (!was_live) emit(session, .segmentation_class_appeared, @intCast(channel), source, 0);
     }
 }
 
@@ -10101,7 +12378,7 @@ fn faceMattePoints(session: *Session, out: *[face.landmark_count][2]f32) bool {
     if (w <= 0 or h <= 0) return false;
     if (session.face_tracking) |worker| {
         var result: face.Result = undefined;
-        if (tracking.readResult(worker, &result) and result.landmark_count_out > 0 and result.presence >= 0.5) {
+        if (tracking.readResult(worker, &result) and result.landmark_count > 0 and result.presence >= 0.5) {
             for (0..face.landmark_count) |i| {
                 out[i] = .{ result.landmarks[i * 3] / w, result.landmarks[i * 3 + 1] / h };
             }
@@ -10627,11 +12904,51 @@ fn destroyModelState(session: *Session) void {
 /// down: a manifest that fails to parse, or that names an unsupported
 /// node type, leaves whatever was already active running rather than
 /// destroying a working lens over a failed swap.
+/// Refuses a lens whose own compatibility range excludes this engine. The range was
+/// parsed and `contains` called by nothing, so a lens needing a newer engine ran on an
+/// older one. A missing capability is not refused here: that build is meant to activate
+/// and degrade the nodes that needed it, and the query op is how a host asks first.
+fn refuseIncompatibleLens(parsed: *const manifest.Manifest) !void {
+    if (!parsed.engine_compat.contains(abi_major, abi_minor)) return error.EngineIncompatible;
+}
+
+/// Which capabilities a lens declares that this build does not have, as GOSS_CAP_ bits.
+/// Zero means every rail it asked for is here. A lens states what it needs and nothing
+/// could read that back, so a catalogue had to activate a lens to find out.
+pub export fn goss_lens_capabilities_missing(manifest_json: ?[*]const u8, manifest_len: usize, out_missing: ?*u64) Status {
+    const bytes = manifest_json orelse return .invalid_argument;
+    const out = out_missing orelse return .invalid_argument;
+    if (manifest_len == 0) return .invalid_argument;
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    var diags = manifest.Diagnostics{ .arena = arena.allocator() };
+    const maybe = manifest.parse(arena.allocator(), &diags, bytes[0..manifest_len]) catch return .out_of_memory;
+    var parsed = maybe orelse return .invalid_argument;
+    defer parsed.deinit();
+
+    const have = goss_capabilities();
+    var missing: u64 = 0;
+    for (parsed.capabilities) |cap| {
+        const bit: u6 = switch (cap) {
+            .face, .hands => 0,
+            .segmentation => 1,
+            .world => 13,
+            .audio_level => 11,
+        };
+        const mask = @as(u64, 1) << bit;
+        if (have & mask == 0) missing |= mask;
+    }
+    out.* = missing;
+    return .ok;
+}
+
 fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []const u8) !void {
     var diag_arena = std.heap.ArenaAllocator.init(gpa);
     defer diag_arena.deinit();
     var diags = manifest.Diagnostics{ .arena = diag_arena.allocator() };
     var parsed = try manifest.parse(gpa, &diags, manifest_json) orelse return error.InvalidManifest;
+    try refuseIncompatibleLens(&parsed);
     // Once activate succeeds the lens owns the manifest arena and
     // new_lens.deinit frees it; the disarm keeps a later failure from
     // walking the same arena twice.
@@ -11309,6 +13626,7 @@ pub export fn goss_session_set_dubbing(session: ?*Session, enabled: u32) Status 
 /// SDK to play. Silence when no lens sound is active.
 pub export fn goss_session_pull_audio(session: ?*Session, out: ?[*]i16, frames: u32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.audio_out)) return .out_of_scope;
     const data = out orelse return .invalid_argument;
     const mono = data[0 .. frames * audio_channels];
     const mixer = if (s.audio_mixer) |*m| m else {
@@ -11339,6 +13657,7 @@ pub export fn goss_session_pull_audio(session: ?*Session, out: ?[*]i16, frames: 
 /// (frame_count*channels s16). Advances the mixer once, replacing pull_audio.
 pub export fn goss_session_mix_output_audio(session: ?*Session, mic: ?[*]const f32, out: ?[*]i16, frame_count: u32, sample_rate: u32, channels: u32) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.audio_out)) return .out_of_scope;
     const data = out orelse return .invalid_argument;
     if (frame_count == 0 or sample_rate == 0 or channels == 0 or channels > 8) return .invalid_argument;
     const span_all = @as(usize, frame_count) * channels;
@@ -11411,11 +13730,15 @@ pub export fn goss_session_mix_output_audio(session: ?*Session, mic: ?[*]const f
 
 pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]const u8, manifest_len: usize) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.activate_lens)) return .out_of_scope;
     const bytes = manifest_json orelse return .invalid_argument;
     if (manifest_len == 0) return .invalid_argument;
     const gpa = s.engine.gpa;
     activateLens(s, gpa, bytes[0..manifest_len]) catch |err| return switch (err) {
         error.OutOfMemory => .out_of_memory,
+        // A lens whose own range excludes this engine is not a malformed lens: the
+        // manifest is fine and this build is the wrong one for it.
+        error.EngineIncompatible => .unsupported,
         else => .invalid_argument,
     };
     // No bundle directory: the same resource pass the directory path runs, with an empty
@@ -11425,6 +13748,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     // shaders, textures and models all failed to load looked activated. It is
     // recorded against the lens now, and read back through the node reports.
     createLensResources(s, gpa, "") catch |err| noteLensResourceFailure(s, err);
+    emit(s, .lens_activated, @intCast(s.chain_order.len), 0, 0);
     return activationStatus(s);
 }
 
@@ -12059,6 +14383,19 @@ const SpriteAnim = struct {
                 break :blk if (p < count) @intCast(p) else @intCast(period - p);
             },
         };
+    }
+};
+
+/// One clip a host opened as a source. The decode buffer is grown once and reused,
+/// so submitting a frame allocates nothing after the first.
+const Clip = struct {
+    decoder: video.Decoder,
+    bgra: []u8,
+    ended: bool = false,
+
+    fn deinit(self: *Clip, gpa: std.mem.Allocator) void {
+        self.decoder.close();
+        if (self.bgra.len != 0) gpa.free(self.bgra);
     }
 };
 
@@ -12806,7 +15143,7 @@ fn feedFaceEmitters(s: *Session, sys: *particles.System, frame_w: u32, frame_h: 
         return;
     };
     var tracked: face.Result = undefined;
-    if (!tracking.readResult(worker, &tracked) or tracked.landmark_count_out == 0 or tracked.presence < 0.5) {
+    if (!tracking.readResult(worker, &tracked) or tracked.landmark_count == 0 or tracked.presence < 0.5) {
         sys.setEmitters(&.{});
         return;
     }
@@ -12814,7 +15151,7 @@ fn feedFaceEmitters(s: *Session, sys: *particles.System, frame_w: u32, frame_h: 
     const fh: f32 = @floatFromInt(@max(frame_h, 1));
     const aspect = fw / fh;
     const half: f32 = 0.828; // tan(22.5 deg) * the particle camera's eye z (2)
-    const total = @min(tracked.landmark_count_out, face.landmark_count);
+    const total = @min(tracked.landmark_count, face.landmark_count);
     const stride = @max(total / s.particle_emitter_buf.len, 1);
     var n: usize = 0;
     var i: usize = 0;
@@ -12870,6 +15207,14 @@ const audio_ring_len: usize = audio_analysis.mic_rate;
 
 /// The most bytes a decoded caption holds.
 const caption_max: usize = 512;
+
+/// What the frame says, bounded. A screen full of small print is the honest
+/// worst case, and a refused entry is counted so a caller learns it is losing
+/// readings rather than guessing.
+const max_text_entries: usize = 128;
+const text_arena_bytes: usize = 8 * 1024;
+const text_lowered_max: usize = text_arena_bytes;
+const TextStore = text_core.Store(max_text_entries, text_arena_bytes);
 
 /// The count of recent diarized caption segments the ring holds for read-back.
 const caption_seg_ring: usize = 16;
@@ -12960,6 +15305,9 @@ const MlWorker = struct {
     /// host addresses this model's outputs by the name the manifest gave it.
     node_id: []u8,
     outputs: []const manifest.MlOutput,
+    /// A detector's output mapping, when the node declares one: what is in frame
+    /// read off four tensors rather than one scalar off one.
+    detect: ?manifest.MlDetect = null,
     /// A mask binding routes a whole output tensor to a mask channel; null when
     /// the node only drives parameters. mask_side is the model mask's square
     /// side, and the two scratch planes hold its raw and resampled copies.
@@ -13012,14 +15360,25 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
             noteMl(session, gi, node.optional, .model_rejected);
             continue;
         }
-        const norm: ml_infer.Norm = .{ .symmetric = ml.input_symmetric, .mean = ml.input_mean, .std_dev = ml.input_std };
+        const norm: ml_infer.Norm = .{
+            .range = switch (ml.input_range) {
+                .unit => .unit,
+                .symmetric => .symmetric,
+                .byte => .byte,
+            },
+            .mean = ml.input_mean,
+            .std_dev = ml.input_std,
+        };
         // A two-input model reads a second plane. A temporal model takes the
         // previous frame; a reference model conditions on a bundled image,
         // decoded here and sampled by the worker into input 1 (create copies
         // it, so the decode is freed on this return).
+        // The declared input size, which a model exported with symbolic spatial
+        // dims has no answer for on its own.
+        const model_bounds: ml_infer.Bounds = .{ .requested_input_side = @max(ml.input_width, ml.input_height) };
         const worker = blk: {
             if (ml.temporal) {
-                break :blk ml_infer.create(gpa, bytes, .{}, 2, norm, null, 0, 0, true) catch |err| {
+                break :blk ml_infer.create(gpa, bytes, model_bounds, 2, norm, null, 0, 0, true) catch |err| {
                     std.log.info("gosslens: ml.infer model {s} left inert ({t})", .{ ml.model, err });
                     noteMl(session, gi, node.optional, .model_unsupported);
                     continue;
@@ -13042,13 +15401,13 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
                     continue;
                 };
                 defer gpa.free(dec.rgba);
-                break :blk ml_infer.create(gpa, bytes, .{}, 2, norm, dec.rgba, @intCast(dec.width), @intCast(dec.height), false) catch |err| {
+                break :blk ml_infer.create(gpa, bytes, model_bounds, 2, norm, dec.rgba, @intCast(dec.width), @intCast(dec.height), false) catch |err| {
                     std.log.info("gosslens: ml.infer model {s} left inert ({t})", .{ ml.model, err });
                     noteMl(session, gi, node.optional, .model_unsupported);
                     continue;
                 };
             }
-            break :blk ml_infer.create(gpa, bytes, .{}, 2, norm, null, 0, 0, false) catch |err| {
+            break :blk ml_infer.create(gpa, bytes, model_bounds, 2, norm, null, 0, 0, false) catch |err| {
                 std.log.info("gosslens: ml.infer model {s} left inert ({t})", .{ ml.model, err });
                 noteMl(session, gi, node.optional, .model_unsupported);
                 continue;
@@ -13131,6 +15490,7 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
             .worker = worker,
             .node_id = node_id,
             .outputs = ml.outputs,
+            .detect = ml.detect,
             .mask = mask,
             .mask_side = mask_side,
             .mask_src = mask_src,
@@ -13195,7 +15555,53 @@ fn pollMlOutputs(session: *Session) void {
             };
             lens.setParam(out.param, value);
         }
+        if (mw.detect) |d| pollDetections(session, mw.worker, d);
     }
+}
+
+/// Reads a detector's four tensors into what the frame holds: the boxes above the
+/// threshold, each with its label and score, in the normalized frame an annotation
+/// and a record section both speak. A model keeps a hundred slots and means almost
+/// none of them, so the threshold is the line and the cap is what a reader can use.
+fn pollDetections(session: *Session, worker: *ml_infer.MlInfer, d: manifest.MlDetect) void {
+    const reported = ml_infer.readOutput(worker, d.count, 0);
+    const slots: u32 = if (reported > 0) @intFromFloat(@min(reported, @as(f32, @floatFromInt(max_detections)))) else max_detections;
+    var kept: u32 = 0;
+    var top_label: u32 = 0;
+    var top_score: f32 = 0;
+    var i: u32 = 0;
+    while (i < slots and kept < max_detections) : (i += 1) {
+        const score = ml_infer.readOutput(worker, d.scores, i);
+        if (score < d.threshold) continue;
+        // A box arrives as top, left, bottom, right in the normalized frame, which
+        // is the order every detector in this family writes.
+        const top = ml_infer.readOutput(worker, d.boxes, i * 4);
+        const left = ml_infer.readOutput(worker, d.boxes, i * 4 + 1);
+        const bottom = ml_infer.readOutput(worker, d.boxes, i * 4 + 2);
+        const right = ml_infer.readOutput(worker, d.boxes, i * 4 + 3);
+        session.detections[kept] = .{
+            .label = @intFromFloat(@max(0, ml_infer.readOutput(worker, d.classes, i))),
+            .score = score,
+            .x = @min(left, right),
+            .y = @min(top, bottom),
+            .width = @abs(right - left),
+            .height = @abs(bottom - top),
+        };
+        if (score > top_score) {
+            top_score = score;
+            top_label = session.detections[kept].label;
+        }
+        kept += 1;
+    }
+
+    const had = session.detection_count;
+    session.detection_count = kept;
+    if (kept != 0 and had == 0) emit(session, .detection_appeared, kept, 0, top_score);
+    if (kept == 0 and had != 0) emit(session, .detection_lost, 0, had, 0);
+    if (kept != 0 and top_label != session.last_top_label) {
+        emit(session, .label_changed, top_label, session.last_top_label, top_score);
+    }
+    session.last_top_label = if (kept != 0) top_label else 0;
 }
 
 /// Resolves the active lens's audio.enhance and voice.transform nodes into the
@@ -14770,6 +17176,9 @@ pub export fn goss_session_ml_output(session: ?*Session, node_id: ?[*]const u8, 
         const len = ml_infer.outputLen(mw.worker, tensor);
         if (len == 0) return .invalid_argument;
         ol.* = len;
+        // The size, then a refusal: six other sizing ops on this surface answer a short
+        // buffer that way and three SDKs check for it. This answered `again` on a comment
+        // claiming the opposite, which broke two proofs that were right.
         if (capacity < len) return .invalid_argument;
         const dst = (out orelse return .invalid_argument)[0..len];
         if (!ml_infer.copyOutput(mw.worker, tensor, dst)) return .again;
@@ -14795,6 +17204,7 @@ pub export fn goss_session_ml_mask(session: ?*Session, node_id: ?[*]const u8, no
         const mask = mw.mask orelse return .invalid_argument;
         if (mw.mask_src.len == 0 or mw.mask_dst.len < segmentation.mask_len) return .invalid_argument;
         ol.* = segmentation.mask_len;
+        // The same refusal every other sizing op on this surface gives.
         if (capacity < segmentation.mask_len) return .invalid_argument;
         const dst = out orelse return .invalid_argument;
         if (!ml_infer.copyOutput(mw.worker, mask.tensor, mw.mask_src)) return .again;
@@ -15524,13 +17934,17 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
 
 pub export fn goss_session_activate_lens_from_directory(session: ?*Session, bundle_path: ?[*]const u8, bundle_path_len: usize) Status {
     const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.activate_lens)) return .out_of_scope;
     const path = bundle_path orelse return .invalid_argument;
     if (bundle_path_len == 0) return .invalid_argument;
     activateLensFromDirectory(s, s.engine.gpa, path[0..bundle_path_len]) catch |err| return switch (err) {
         error.OutOfMemory => .out_of_memory,
         error.Unsupported => .unsupported,
+        // The same refusal the inline path gives.
+        error.EngineIncompatible => .unsupported,
         else => .invalid_argument,
     };
+    emit(s, .lens_activated, @intCast(s.chain_order.len), 0, 0);
     return activationStatus(s);
 }
 
@@ -15766,7 +18180,7 @@ fn currentPose(s: *Session) ?pose.Result {
     const worker = s.pose_tracking orelse return null;
     var result: pose.Result = undefined;
     if (!tracking.pose_worker.readResult(worker, &result)) return null;
-    if (result.landmark_count_out == 0 or result.presence < 0.5) return null;
+    if (result.landmark_count == 0 or result.presence < 0.5) return null;
     applyPoseMode(s, &result);
     return result;
 }
@@ -16437,7 +18851,7 @@ fn volumeContains(vol: manifest.Volume, p: [3]f32) bool {
 fn faceCentroid(result: *const face.Result) [2]f32 {
     var sx: f32 = 0;
     var sy: f32 = 0;
-    const n = result.landmark_count_out;
+    const n = result.landmark_count;
     if (n == 0) return .{ 0, 0 };
     for (0..n) |i| {
         sx += result.landmarks[i * 3];
@@ -16676,7 +19090,14 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
         const region = s.active_lens.?.manifest.region2d;
         const gestures = s.active_lens.?.manifest.gestures;
         for (hands.hands[0..@min(hands.hand_count, hand.max_hands)]) |*h| {
-            if (h.gesture != 0 and live_signals.hand_gesture == 0) live_signals.hand_gesture = h.gesture;
+            if (h.gesture != 0 and live_signals.hand_gesture == 0) {
+                live_signals.hand_gesture = h.gesture;
+                // A gesture is a one-tick pulse, so it is published on the edge: a
+                // host polling at frame rate misses most of them, which is why this
+                // is an event and not a field somebody reads.
+                if (h.gesture != s.last_gesture) emit(s, .gesture_recognised, h.gesture, s.last_gesture, h.gesture_score);
+                s.last_gesture = h.gesture;
+            }
             if (hand.isPinching(&h.landmarks)) live_signals.hand_pinch = true;
             // The index fingertip against the lens's 2D trigger rectangle,
             // both in the normalized frame, so a lens fires while the hand
@@ -16718,6 +19139,14 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
             live_signals.body_jump = actions.jump;
             live_signals.body_wave = actions.wave;
             live_signals.body_dance = actions.dance;
+            // The same pulses the triggers read, published on their edges: a jump
+            // lasts one tick, so a host polling at frame rate sees almost none of
+            // them, and the trigger expression was the only thing that could.
+            const now: u32 = (if (actions.jump) @as(u32, 1) else 0) |
+                (if (actions.wave) @as(u32, 2) else 0) |
+                (if (actions.dance) @as(u32, 4) else 0);
+            if (now != s.last_actions and now != 0) emit(s, .action_recognised, now, s.last_actions, 0);
+            s.last_actions = now;
         }
     }
     if (s.audio_engine_fed) {
@@ -16735,6 +19164,9 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
         live_signals.voice_command_text = voice_lc[0..n];
         break;
     }
+    live_signals.text_count = @intCast(s.text_store.count);
+    live_signals.text_lowered = s.text_lowered[0..s.text_lowered_len];
+    live_signals.text_changed = s.text_changed;
     if (s.world_engine_fed) {
         live_signals.world_tracking_state = @floatFromInt(s.world.state.tracking_state);
         // The device's world position is the translation column of the pose;
@@ -16788,6 +19220,16 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     // its writes flow into this tick's effects.
     runScript(s, &live_signals);
     const effects = runtime.tick(&s.active_lens.?, dt_us, live_signals);
+    // What the tick did, published: a trigger firing and a parameter moving were
+    // both things only the lens knew, so a host had to poll every parameter to
+    // notice either.
+    if (s.active_lens) |*lens| {
+        if (lens.triggersFired() != 0) emit(s, .trigger_fired, lens.lastTriggerFired(), lens.triggersFired(), 0);
+        for (0..lens.paramCount()) |i| {
+            if (!lens.paramTouched(i)) continue;
+            emit(s, .parameter_changed, @intCast(i), 0, lens.paramValueAt(i));
+        }
+    }
     applyLensEffects(s, effects);
     playFiredSounds(s);
     drainHaptics(s);
@@ -17133,10 +19575,10 @@ test "submitted faces round-trip by index and drop the ones no real face fills" 
 
     // Two real faces, one too faint and one with no landmarks, in that order.
     var faces: [4]FaceResult = @splat(std.mem.zeroes(FaceResult));
-    faces[0] = .{ .frame_serial = 10, .timestamp_us = 1, .presence = 0.9, .landmark_count_out = face.landmark_count, .landmarks = @splat(1.0), .blendshapes = @splat(0) };
-    faces[1] = .{ .frame_serial = 20, .timestamp_us = 2, .presence = 0.2, .landmark_count_out = face.landmark_count, .landmarks = @splat(2.0), .blendshapes = @splat(0) };
-    faces[2] = .{ .frame_serial = 30, .timestamp_us = 3, .presence = 0.95, .landmark_count_out = 0, .landmarks = @splat(3.0), .blendshapes = @splat(0) };
-    faces[3] = .{ .frame_serial = 40, .timestamp_us = 4, .presence = 0.8, .landmark_count_out = face.landmark_count, .landmarks = @splat(4.0), .blendshapes = @splat(0) };
+    faces[0] = .{ .frame_serial = 10, .timestamp_us = 1, .presence = 0.9, .landmark_count = face.landmark_count, .landmarks = @splat(1.0), .blendshapes = @splat(0) };
+    faces[1] = .{ .frame_serial = 20, .timestamp_us = 2, .presence = 0.2, .landmark_count = face.landmark_count, .landmarks = @splat(2.0), .blendshapes = @splat(0) };
+    faces[2] = .{ .frame_serial = 30, .timestamp_us = 3, .presence = 0.95, .landmark_count = 0, .landmarks = @splat(3.0), .blendshapes = @splat(0) };
+    faces[3] = .{ .frame_serial = 40, .timestamp_us = 4, .presence = 0.8, .landmark_count = face.landmark_count, .landmarks = @splat(4.0), .blendshapes = @splat(0) };
     try t.expectEqual(Status.ok, goss_session_submit_faces(session, &faces, 4));
 
     // Only faces 0 and 3 survive, compacted to slots 0 and 1 in order.
@@ -17181,10 +19623,10 @@ test "submitted bodies round-trip by index and drop the ones no real body fills"
 
     // Two real bodies, one too faint and one with no landmarks, in that order.
     var bodies: [4]PoseResult = @splat(std.mem.zeroes(PoseResult));
-    bodies[0] = .{ .frame_serial = 10, .timestamp_us = 1, .presence = 0.9, .landmark_count_out = pose.landmark_count, .landmarks = @splat(1.0), .visibilities = @splat(1), .presences = @splat(1) };
-    bodies[1] = .{ .frame_serial = 20, .timestamp_us = 2, .presence = 0.2, .landmark_count_out = pose.landmark_count, .landmarks = @splat(2.0), .visibilities = @splat(1), .presences = @splat(1) };
-    bodies[2] = .{ .frame_serial = 30, .timestamp_us = 3, .presence = 0.95, .landmark_count_out = 0, .landmarks = @splat(3.0), .visibilities = @splat(1), .presences = @splat(1) };
-    bodies[3] = .{ .frame_serial = 40, .timestamp_us = 4, .presence = 0.8, .landmark_count_out = pose.landmark_count, .landmarks = @splat(4.0), .visibilities = @splat(1), .presences = @splat(1) };
+    bodies[0] = .{ .frame_serial = 10, .timestamp_us = 1, .presence = 0.9, .landmark_count = pose.landmark_count, .landmarks = @splat(1.0), .visibilities = @splat(1), .presences = @splat(1) };
+    bodies[1] = .{ .frame_serial = 20, .timestamp_us = 2, .presence = 0.2, .landmark_count = pose.landmark_count, .landmarks = @splat(2.0), .visibilities = @splat(1), .presences = @splat(1) };
+    bodies[2] = .{ .frame_serial = 30, .timestamp_us = 3, .presence = 0.95, .landmark_count = 0, .landmarks = @splat(3.0), .visibilities = @splat(1), .presences = @splat(1) };
+    bodies[3] = .{ .frame_serial = 40, .timestamp_us = 4, .presence = 0.8, .landmark_count = pose.landmark_count, .landmarks = @splat(4.0), .visibilities = @splat(1), .presences = @splat(1) };
     try t.expectEqual(Status.ok, goss_session_submit_bodies(session, &bodies, 4));
 
     // Only bodies 0 and 3 survive, compacted to slots 0 and 1 in order.
@@ -18075,18 +20517,20 @@ test "a JSON-activated lens reads its staged model and resets audio enhance stat
     const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer destroySession(session);
 
-    // The ml.infer loader now runs on the JSON path, pulling the staged bytes
-    // with no bundle directory; this build's stub rail leaves the node inert
-    // but the read, allowlist, and free path all execute leak-checked.
+    // The ml.infer loader runs on the JSON path, pulling the staged bytes with no
+    // bundle directory. These bytes are not a model, so the node is left inert and
+    // no worker starts, while the read, allowlist and free path all execute.
     try t.expectEqual(Status.ok, goss_session_provide_lens_asset(session, "net.onnx", "net.onnx".len, "staged model", "staged model".len));
     try t.expectEqual(Status.ok, goss_session_activate_lens(session, ml_bundle_manifest.ptr, ml_bundle_manifest.len));
     try t.expectEqual(@as(usize, 0), session.ml_workers.items.len);
 
-    // This build resolves the rail to the stub, and the egress ops say so.
+    // The rail is real here, over the pure-Zig onnx engine, so the answer is about
+    // the node rather than the build: these bytes were refused at load, no worker
+    // carries that id, and the ops say so instead of claiming nothing is compiled.
     var out_len: usize = 0;
     var buf: [4]f32 = undefined;
-    try t.expectEqual(Status.unsupported, goss_session_ml_output(session, "net", 3, 0, &buf, 4, &out_len));
-    try t.expectEqual(Status.unsupported, goss_session_ml_mask(session, "net", 3, &buf, 4, &out_len));
+    try t.expectEqual(Status.invalid_argument, goss_session_ml_output(session, "net", 3, 0, &buf, 4, &out_len));
+    try t.expectEqual(Status.invalid_argument, goss_session_ml_mask(session, "net", 3, &buf, 4, &out_len));
 
     const enhance_manifest =
         \\{"glf":"1.0","id":"e","version":"1.0.0","display_name":"E","engine_compat":">=0.5",
@@ -18150,7 +20594,7 @@ test "submitted bodies and faces feed body_joint, pose_result, and face_pose wit
     try t.expectEqual(Status.again, goss_session_body_joint(session, 0, &xyz));
     var body: PoseResult = std.mem.zeroes(PoseResult);
     body.presence = 0.9;
-    body.landmark_count_out = pose.landmark_count;
+    body.landmark_count = pose.landmark_count;
     body.landmarks = @splat(7.0);
     body.visibilities = @splat(1);
     body.presences = @splat(1);
@@ -18166,7 +20610,7 @@ test "submitted bodies and faces feed body_joint, pose_result, and face_pose wit
     try t.expectEqual(Status.again, goss_session_face_pose(session, &matrix));
     var f: FaceResult = std.mem.zeroes(FaceResult);
     f.presence = 0.9;
-    f.landmark_count_out = face.landmark_count;
+    f.landmark_count = face.landmark_count;
     // A flat plane of identical landmarks is degenerate; spread them so the
     // canonical fit has geometry to lock onto.
     for (0..face.landmark_count) |i| {
@@ -18204,4 +20648,19 @@ test "the ar brush projects a world stroke to screen and drops points behind the
     var out2: stroke.Stroke = undefined;
     projectWorldStroke(vp, &ws2, &out2);
     try t.expectEqual(@as(u16, 0), out2.count);
+}
+
+test "the text entry's layout is the one every sdk reads" {
+    // The SDKs decode this struct by byte offset, so the layout is part of the
+    // contract rather than an implementation detail.
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(TextEntry, "quad"));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(TextEntry, "confidence"));
+    try std.testing.expectEqual(@as(usize, 36), @offsetOf(TextEntry, "origin"));
+    try std.testing.expectEqual(@as(usize, 40), @offsetOf(TextEntry, "script"));
+    try std.testing.expectEqual(@as(usize, 44), @offsetOf(TextEntry, "direction"));
+    try std.testing.expectEqual(@as(usize, 48), @offsetOf(TextEntry, "track_id"));
+    try std.testing.expectEqual(@as(usize, 52), @offsetOf(TextEntry, "line"));
+    try std.testing.expectEqual(@as(usize, 56), @offsetOf(TextEntry, "paragraph"));
+    try std.testing.expectEqual(@as(usize, 60), @offsetOf(TextEntry, "text_len"));
+    try std.testing.expectEqual(@as(usize, 80), @sizeOf(TextEntry));
 }

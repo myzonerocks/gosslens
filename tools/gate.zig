@@ -6,6 +6,7 @@
 //!   --commit-msg <file> commit-msg hook: scan the message being written
 //!   --log <range>       CI: scan commit messages in a rev range
 //!   --diff <range>      CI: scan added lines in a rev range for comment hygiene
+//!   --pr-title <file>   CI: scan a PR title for provenance, counts and shape
 //!   --pr-body <file>    CI: scan a PR body for provenance and shape
 //!
 //! Direction one, outbound: no layer of ignore (repo, .git/info/exclude, or a
@@ -22,7 +23,11 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
-const max_file_scan_bytes: usize = 1 << 20;
+/// The most one file this reads. The ABI crossed a megabyte in this wave and two
+/// checks quietly stopped seeing it, which is a gate that reports green because it
+/// did not look. Generous enough for every source file here, and a file past it is
+/// reported rather than skipped.
+const max_file_scan_bytes: usize = 8 << 20;
 const max_staged_file_bytes: u64 = 4 << 20;
 
 // Trees whose contents must never be committed. Anything staged under these
@@ -171,6 +176,21 @@ const platform_acquire_release = [_]struct { acquire: []const u8, release: []con
 // A PR body is a short paragraph, not a report: what changed and why,
 // nothing about how the change was proven out. Modeled on how ghostty's
 // own PRs read - three sentences, no headers, no checklist.
+const counted_numbers = [_][]const u8{
+    "two",      "three",     "four",      "five",     "six",
+    "seven",    "eight",     "nine",      "ten",      "eleven",
+    "twelve",   "thirteen",  "fourteen",  "fifteen",  "sixteen",
+    "seventeen", "eighteen", "nineteen",  "twenty",   "thirty",
+};
+// Sets that grow. A platform or a backend count is the shape of the world
+// rather than a tally, so neither is here.
+const countable_nouns = [_][]const u8{
+    "tools",   "ops",    "operations", "verbs",  "operators",
+    "SDKs",    "proofs", "checks",     "shapes", "models",
+    "tests",   "sections", "fields",   "structs",
+    "kinds",   "stages",   "entry points",
+};
+const max_pr_title_bytes: usize = 120;
 const max_pr_body_lines: usize = 12;
 const max_pr_body_bytes: usize = 900;
 
@@ -178,6 +198,23 @@ const banned_pr_body_headers = [_][]const u8{
     "summary",     "test plan",  "testing",   "changes",
     "overview",    "background", "motivation", "what changed",
     "how tested",  "verification",
+};
+
+const Seam = struct {
+    module: []const u8,
+    real: []const u8,
+    substitutes: []const []const u8,
+};
+
+const seam_families = [_]Seam{
+    .{ .module = "ml_infer", .real = "adapters/tracking/ml_infer.zig", .substitutes = &.{ "adapters/tracking/ml_infer_sync.zig", "adapters/tracking/ml_infer_stub.zig" } },
+    .{ .module = "render", .real = "adapters/bgfx/render.zig", .substitutes = &.{"adapters/bgfx/render_stub.zig"} },
+    .{ .module = "tracking", .real = "adapters/tracking/tracking.zig", .substitutes = &.{"adapters/tracking/tracking_stub.zig"} },
+    .{ .module = "screen_capture", .real = "adapters/screen/screen_capture.zig", .substitutes = &.{"adapters/screen/screen_capture_stub.zig"} },
+    .{ .module = "physics", .real = "adapters/physics/physics.zig", .substitutes = &.{"adapters/physics/physics_stub.zig"} },
+    .{ .module = "media_video", .real = "adapters/media/video.zig", .substitutes = &.{"adapters/media/video_stub.zig"} },
+    .{ .module = "image", .real = "adapters/image/image.zig", .substitutes = &.{"adapters/image/image_stub.zig"} },
+    .{ .module = "audio_playback", .real = "adapters/audio/audio_playback.zig", .substitutes = &.{"adapters/audio/audio_playback_stub.zig"} },
 };
 
 const Gate = struct {
@@ -357,8 +394,30 @@ const Gate = struct {
             if (findVerboseMarker(content)) |marker| {
                 try g.flag("comment-hygiene: '{s}' has a verbose comment (matched '{s}'): {s}", .{ current_path, marker, std.mem.trim(u8, content, " \t") });
             }
+            // Markdown is scanned whole by checkProseDashes; a comment in source
+            // was read by nothing, which is how four files kept a long dash.
+            const ctx = try std.fmt.allocPrint(g.arena, "the comment in '{s}'", .{current_path});
+            try g.checkClauseDashes(content, ctx);
         }
         try g.flagOverlongCommentBlock(current_path, run_len, run_first);
+    }
+
+    /// A change that reaches a user says so under Unreleased. The release notes
+    /// are that section, so a change with no line there ships without one.
+    fn checkChangelog(g: *Gate, range: []const u8) !void {
+        const out = try g.git(&.{ "git", "diff", "--diff-filter=ACMR", "--name-only", range }, &.{0});
+        var shipped: ?[]const u8 = null;
+        var logged = false;
+        var it = std.mem.splitScalar(u8, out, '\n');
+        while (it.next()) |raw| {
+            const path = std.mem.trim(u8, raw, " \t\r");
+            if (path.len == 0) continue;
+            if (std.mem.eql(u8, path, changelog_path)) logged = true;
+            if (shipped == null and shipsToUsers(path)) shipped = path;
+        }
+        if (shipped) |first| {
+            if (!logged) try g.flag("changelog: '{s}' changes what ships without a line under Unreleased in {s}", .{ first, changelog_path });
+        }
     }
 
     fn flagOverlongCommentBlock(g: *Gate, path: []const u8, run_len: usize, first_line: []const u8) !void {
@@ -409,15 +468,55 @@ const Gate = struct {
         }
     }
 
+    // Every merged title in this repository is a plain sentence saying what changed, and
+    // the only colons belong to a release prefix. A label with a flourish after it is
+    // the shape this refuses: it reads as written by a machine, and nothing saw titles.
+    fn checkTitleShape(g: *Gate, title: []const u8) !void {
+        if (title.len == 0) {
+            try g.flag("title-shape: the PR title is empty", .{});
+            return;
+        }
+        if (title.len > max_pr_title_bytes) {
+            try g.flag("title-shape: the PR title is {d} bytes; keep it to {d}, one plain sentence", .{ title.len, max_pr_title_bytes });
+        }
+        if (std.mem.indexOfScalar(u8, title, ':') != null and !std.mem.startsWith(u8, title, "release ")) {
+            try g.flag("title-shape: '{s}' puts a label before a colon; say what changed in one plain sentence, the way every merged title here does", .{title});
+        }
+        for (counted_numbers) |number| {
+            var at: usize = 0;
+            while (indexOfWord(title, number, at)) |found| {
+                at = found + number.len;
+                if (nearbyCountable(title, at, &countable_nouns)) |noun| {
+                    try g.flag("count-prose: the PR title says \"{s} {s}\"; name the thing, not how many", .{ number, noun });
+                }
+            }
+        }
+    }
+
     fn checkProseDashes(g: *Gate, paths: []const []const u8) !void {
         for (paths) |path| {
-            if (!isMarkdownDoc(path)) continue;
+            if (!isScannedProse(path)) continue;
             const stat = Io.Dir.cwd().statFile(g.io, path, .{}) catch continue;
-            if (stat.size > max_file_scan_bytes) continue;
+            if (stat.size > max_file_scan_bytes) {
+                try g.flag("unscanned: '{s}' is {d} bytes, past what this gate reads, so nothing checked it; split it or raise the bound deliberately", .{ path, stat.size });
+                continue;
+            }
             const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch continue;
             const ctx = try std.fmt.allocPrint(g.arena, "'{s}'", .{path});
             try g.checkClauseDashes(content, ctx);
         }
+    }
+
+    // The ledger and the audit are documents I write that git never sees, so no
+    // path list named them and nothing read them for counts or long dashes.
+    fn withAuthoredDocs(g: *Gate, paths: [][]const u8) ![][]const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        try out.appendSlice(g.arena, paths);
+        for (authored_docs) |path| {
+            _ = Io.Dir.cwd().statFile(g.io, path, .{}) catch continue;
+            try out.append(g.arena, path);
+        }
+        return out.items;
     }
 
     fn stagedPaths(g: *Gate) ![][]const u8 {
@@ -741,6 +840,326 @@ const Gate = struct {
         }
     }
 
+    // Shape three of the deferral list: a verb the scope declares and no op checks
+    // is a permission that gates nothing, the same lie as a tool with no engine
+    // behind it. Four of seven were like that when the audit started.
+    fn checkVerbCoverage(g: *Gate) !void {
+        const scope_src = Io.Dir.cwd().readFileAlloc(g.io, "core/perception/scope.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
+        const abi_src = Io.Dir.cwd().readFileAlloc(g.io, "core/abi/abi.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
+
+        const start = std.mem.indexOf(u8, scope_src, "pub const Verb = enum(u5) {") orelse return;
+        const end = std.mem.indexOfPos(u8, scope_src, start, "\n};") orelse return;
+        var lines = std.mem.splitScalar(u8, scope_src[start..end], '\n');
+        _ = lines.next();
+        while (lines.next()) |raw| {
+            const line = std.mem.trim(u8, raw, " \t");
+            if (line.len == 0 or std.mem.startsWith(u8, line, "//") or std.mem.startsWith(u8, line, "///")) continue;
+            if (!std.mem.endsWith(u8, line, ",")) continue;
+            const name = line[0 .. line.len - 1];
+            if (name.len == 0 or std.mem.indexOfScalar(u8, name, ' ') != null) continue;
+            var needle_buf: [128]u8 = undefined;
+            const needle = std.fmt.bufPrint(&needle_buf, "allowsVerb(.{s})", .{name}) catch continue;
+            if (std.mem.indexOf(u8, abi_src, needle) != null) continue;
+            try g.flag("verb-gates-nothing: scope declares '{s}' and no op checks it; check it where it belongs or drop it, because a permission nothing enforces protects nothing", .{name});
+        }
+    }
+
+    // Shape four, mechanical: a refusal that hides a path somebody could have
+    // built. Every unsupported answer names its limit, either by sitting behind a
+    // platform or capability condition or by saying so on the line, which is the
+    // same shape the ignored-result and swallowed-failure rules already use.
+    fn checkUnexplainedRefusals(g: *Gate, paths: []const []const u8) !void {
+        for (paths) |path| {
+            if (!std.mem.endsWith(u8, path, ".zig")) continue;
+            if (std.mem.startsWith(u8, path, ".vendor/")) continue;
+            if (std.mem.startsWith(u8, path, "tools/")) continue;
+            if (std.mem.endsWith(u8, path, "_stub.zig")) continue;
+            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch continue;
+            var lines = std.mem.splitScalar(u8, content, '\n');
+            var number: usize = 0;
+            var prior: [4][]const u8 = @splat("");
+            while (lines.next()) |line| {
+                number += 1;
+                defer {
+                    prior[3] = prior[2];
+                    prior[2] = prior[1];
+                    prior[1] = prior[0];
+                    prior[0] = line;
+                }
+                if (std.mem.indexOf(u8, line, "return .unsupported") == null) continue;
+                if (std.mem.indexOf(u8, line, "unsupported:") != null) continue;
+                var explained = false;
+                for (prior) |earlier| {
+                    for ([_][]const u8{ "comptime", "supported", "is_web", "builtin.os", "builtin.target", "builtin.abi", "have_", "null)", "orelse" }) |token| {
+                        if (std.mem.indexOf(u8, earlier, token) != null) explained = true;
+                    }
+                }
+                for ([_][]const u8{ "comptime", "supported", "is_web", "builtin.os" }) |token| {
+                    if (std.mem.indexOf(u8, line, token) != null) explained = true;
+                }
+                if (explained) continue;
+                try g.flag("unexplained-refusal: '{s}':{d} answers unsupported with no limit named; put it behind the capability check that makes it true, or say `// unsupported: <reason>` on the line", .{ path, number });
+            }
+        }
+    }
+
+    // Shape five, mechanical: a sentence that explains an absence. The loophole
+    // vocabulary is allowed only where the paragraph names one of the four things
+    // that may ever wait on the owner, which is a closed list.
+    fn checkDeferralProse(g: *Gate, paths: []const []const u8) !void {
+        // Postponement only. An absence with a real reason is legitimate prose, and
+        // a reason that is merely false (the MCP paragraph that started this) is a
+        // premise no check can test: that one is the reader's job at the sweep.
+        const phrases = [_][]const u8{
+            "will be built",       "in a later wave",  "in a future wave",
+            "the next piece",      "left to the next", "not yet wired",
+            "not yet implemented", "not yet supported", "once the next",
+            "when the next wave",  "deferred to",
+        };
+        const allowed = [_][]const u8{
+            "physical device", "physical hardware", "physical iPhone", "physical Android",
+            "billing",         "credential",        "signing identity", "owner",
+            "device lab",      "hardware the lab",
+        };
+        for (paths) |path| {
+            if (!isMarkdownDoc(path)) continue;
+            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch continue;
+            var paragraphs = std.mem.splitSequence(u8, content, "\n\n");
+            while (paragraphs.next()) |paragraph| {
+                for (phrases) |phrase| {
+                    if (std.mem.indexOf(u8, paragraph, phrase) == null) continue;
+                    var excused = false;
+                    for (allowed) |word| {
+                        if (std.mem.indexOf(u8, paragraph, word) != null) excused = true;
+                    }
+                    if (excused) continue;
+                    try g.flag("deferral-prose: '{s}' says \"{s}\" without naming anything that may wait on the owner; build it, or name the money, credential, hardware or preference it waits on", .{ path, phrase });
+                }
+            }
+        }
+    }
+
+    // A capability the engine reports and the header does not name is a bit a
+    // consumer reads and cannot interpret; one the header names and the engine never
+    // sets is a promise nothing keeps. Seven of the former shipped, reported by a
+    // call whose own comment said half the engine had been invisible to it.
+    fn checkCapabilityCoverage(g: *Gate) !void {
+        const header = Io.Dir.cwd().readFileAlloc(g.io, "include/gosslens.h", g.arena, .limited(max_file_scan_bytes)) catch return;
+        const abi_src = Io.Dir.cwd().readFileAlloc(g.io, "core/abi/abi.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
+
+        var declared: [64]bool = @splat(false);
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, header, at, "#define GOSS_CAP_")) |found| {
+            at = found + 1;
+            const shift = std.mem.indexOfPos(u8, header, found, "<< ") orelse continue;
+            const bit = readNumber(header, shift + 3) orelse continue;
+            if (bit < declared.len) declared[bit] = true;
+        }
+
+        var set: [64]bool = @splat(false);
+        at = 0;
+        while (std.mem.indexOfPos(u8, abi_src, at, "caps |= 1 << ")) |found| {
+            at = found + 1;
+            const bit = readNumber(abi_src, found + "caps |= 1 << ".len) orelse continue;
+            if (bit < set.len) set[bit] = true;
+        }
+
+        for (0..declared.len) |bit| {
+            if (set[bit] and !declared[bit]) {
+                try g.flag("capability-coverage: the engine reports bit {d} and the header names no GOSS_CAP_ for it; a consumer reads a bit it cannot interpret", .{bit});
+            }
+            if (declared[bit] and !set[bit]) {
+                try g.flag("capability-coverage: the header names a GOSS_CAP_ at bit {d} and the engine never sets it; a consumer waits on a capability nothing reports", .{bit});
+            }
+        }
+    }
+
+    // An event kind the header declares and nothing emits is a subscription that
+    // never fires: a host waits for plane_added after submitting a room and learns
+    // nothing. Declared and silent is the same defect as a permission that gates
+    // nothing, and it was the largest one in this repository.
+    fn checkEventCoverage(g: *Gate) !void {
+        const header = Io.Dir.cwd().readFileAlloc(g.io, "include/gosslens.h", g.arena, .limited(max_file_scan_bytes)) catch return;
+        const open = std.mem.indexOf(u8, header, "typedef enum goss_event_kind {") orelse return;
+        const close = std.mem.indexOfPos(u8, header, open, "} goss_event_kind;") orelse return;
+        const body = try stripLineComments(g.arena, header[open..close]);
+
+        var sources: std.ArrayList([]const u8) = .empty;
+        for (try g.trackedPaths()) |path| {
+            if (!std.mem.endsWith(u8, path, ".zig")) continue;
+            if (!std.mem.startsWith(u8, path, "core/") and !std.mem.startsWith(u8, path, "adapters/")) continue;
+            const text = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch continue;
+            // Test bodies removed rather than everything after the first test: a file
+            // this size interleaves them with shipped code, and truncating at the first
+            // one hid every emission below it. A kind only a test publishes is still a
+            // kind the engine never sends.
+            try sources.append(g.arena, try withoutTestBodies(g.arena, text));
+        }
+
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, body, at, "GOSS_EVENT_")) |found| {
+            const start = found + "GOSS_EVENT_".len;
+            var end = start;
+            while (end < body.len and isWordByte(body[end])) end += 1;
+            at = end;
+            const upper = body[start..end];
+            const lower = try std.ascii.allocLowerString(g.arena, upper);
+            var needle: [128]u8 = undefined;
+            const dotted = std.fmt.bufPrint(&needle, ".{s}", .{lower}) catch continue;
+            var emitted = false;
+            for (sources.items) |text| {
+                if (indexOfWord(text, dotted, 0) != null) emitted = true;
+            }
+            if (!emitted) try g.flag("event-coverage: the header declares GOSS_EVENT_{s} and nothing in core or adapters names it; a host subscribing to it waits for something that never happens", .{upper});
+        }
+    }
+
+    // A record section the engine writes and the schema does not declare has no
+    // layout, so the projection reports its byte count instead of its fields and the
+    // baseline pins nothing. The lens section sat that way with a document describing
+    // a third thing. Both directions are checked: declared and unwritten is as bad.
+    fn checkRecordSections(g: *Gate) !void {
+        const schema_src = Io.Dir.cwd().readFileAlloc(g.io, "core/perception/schema.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
+        const abi_src = Io.Dir.cwd().readFileAlloc(g.io, "core/abi/abi.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
+
+        var declared: std.ArrayList([]const u8) = .empty;
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, schema_src, at, ".tag = .")) |found| {
+            const start = found + ".tag = .".len;
+            var end = start;
+            while (end < schema_src.len and isWordByte(schema_src[end])) end += 1;
+            at = end;
+            try declared.append(g.arena, schema_src[start..end]);
+        }
+
+        var written: std.ArrayList([]const u8) = .empty;
+        at = 0;
+        while (std.mem.indexOfPos(u8, abi_src, at, "beginSection(.")) |found| {
+            const start = found + "beginSection(.".len;
+            var end = start;
+            while (end < abi_src.len and isWordByte(abi_src[end])) end += 1;
+            at = end;
+            try written.append(g.arena, abi_src[start..end]);
+        }
+
+        for (written.items) |name| {
+            var found_it = false;
+            for (declared.items) |other| {
+                if (std.mem.eql(u8, name, other)) found_it = true;
+            }
+            if (!found_it) try g.flag("record-section: the engine writes '{s}' and core/perception/schema.zig declares no layout for it; a reader gets a byte count instead of fields", .{name});
+        }
+        for (declared.items) |name| {
+            var found_it = false;
+            for (written.items) |other| {
+                if (std.mem.eql(u8, name, other)) found_it = true;
+            }
+            if (!found_it) try g.flag("record-section: schema.zig declares '{s}' and nothing writes it; a reader cannot tell an empty answer from one this build never produced", .{name});
+        }
+    }
+
+    // A count in published prose is a second source of truth with nothing holding it
+    // to the first: wrong the moment the set changes, and no test notices.
+    fn checkCountProse(g: *Gate, paths: []const []const u8) !void {
+        const numbers = counted_numbers;
+        const countable = countable_nouns;
+        for (paths) |path| {
+            // Only documents that describe the surface as it stands: a count inside a
+            // dated ledger entry records what was true that day and is never rewritten,
+            // so it cannot go stale, which is the whole reason for this rule.
+            if (!isMarkdownDoc(path)) continue;
+            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch continue;
+            for (numbers) |number| {
+                var at: usize = 0;
+                while (indexOfWord(content, number, at)) |found| {
+                    at = found + number.len;
+                    if (nearbyCountable(content, at, &countable)) |noun| {
+                        try g.flag("count-prose: '{s}' says \"{s} {s}\"; name the thing, not how many, so the set can grow without a document going stale", .{ path, number, noun });
+                    }
+                }
+            }
+        }
+    }
+
+    // A core module nothing imports is one nobody can use, whatever its tests say:
+    // the spatial rail sat that way with a passing suite. Scoped to `core/`, since a
+    // program root and a seam substitute are reached by something other than an
+    // import and neither is a mistake.
+    fn checkOrphanModules(g: *Gate) !void {
+        const build_zig = Io.Dir.cwd().readFileAlloc(g.io, "build.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
+
+        var roots: std.ArrayList([]const u8) = .empty;
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, build_zig, at, "b.path(\"")) |found| {
+            at = found + 8;
+            const close = std.mem.indexOfScalarPos(u8, build_zig, at, '"') orelse break;
+            const root = build_zig[at..close];
+            at = close;
+            if (!std.mem.startsWith(u8, root, "core/")) continue;
+            if (!std.mem.endsWith(u8, root, ".zig")) continue;
+            if (!isModuleRoot(build_zig, found)) continue;
+            var already = false;
+            for (roots.items) |have| {
+                if (std.mem.eql(u8, have, root)) already = true;
+            }
+            if (!already) try roots.append(g.arena, root);
+        }
+        if (roots.items.len == 0) return;
+
+        const reached = try g.arena.alloc(bool, roots.items.len);
+        @memset(reached, false);
+
+        // Every tracked file read once, against every root: the other way round is
+        // one read per root per file, which is thousands of reads of the same bytes.
+        const paths = try g.trackedPaths();
+        for (paths) |path| {
+            if (!std.mem.endsWith(u8, path, ".zig")) continue;
+            if (std.mem.startsWith(u8, path, ".vendor/")) continue;
+            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch continue;
+            for (roots.items, 0..) |root, i| {
+                if (reached[i]) continue;
+                if (std.mem.eql(u8, path, root)) continue;
+                if (importsRoot(content, path, root)) reached[i] = true;
+            }
+        }
+
+        for (roots.items, 0..) |root, i| {
+            if (reached[i]) continue;
+            try g.flag("orphan-module: nothing imports '{s}'; a core module only a test can reach is one nobody can use, so import it where it belongs or delete it", .{root});
+        }
+    }
+
+    // A module swapped per target is only a seam if every substitute answers what
+    // the tree asks of it: the wasm build broke on four names the real adapter
+    // exported and its synchronous twin did not. The asking side decides.
+    fn checkSeamParity(g: *Gate) !void {
+        const paths = try g.trackedPaths();
+        for (seam_families) |seam| {
+            var used: std.ArrayList([]const u8) = .empty;
+            for (paths) |path| {
+                if (!std.mem.endsWith(u8, path, ".zig")) continue;
+                if (std.mem.eql(u8, path, seam.real)) continue;
+                if (std.mem.startsWith(u8, path, ".vendor/")) continue;
+                var is_substitute = false;
+                for (seam.substitutes) |sub| {
+                    if (std.mem.eql(u8, path, sub)) is_substitute = true;
+                }
+                if (is_substitute) continue;
+                const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch continue;
+                const binding = importBinding(content, seam.module) orelse continue;
+                try collectMemberUses(g, content, binding, &used);
+            }
+            if (used.items.len == 0) continue;
+            for (seam.substitutes) |sub| {
+                const content = Io.Dir.cwd().readFileAlloc(g.io, sub, g.arena, .limited(max_file_scan_bytes)) catch continue;
+                for (used.items) |name| {
+                    if (declaresPublic(content, name)) continue;
+                    try g.flag("seam-parity: '{s}' has no pub '{s}', and the tree reaches for '{s}.{s}'; a substituted module answers every name the real one does", .{ sub, name, seam.module, name });
+                }
+            }
+        }
+    }
+
     // W9 mechanical check: a vendor call whose return encodes failure, ignored
     // with no reason. Discarding one is allowed when the line says why.
     fn checkIgnoredVendorResults(g: *Gate, paths: []const []const u8) !void {
@@ -1002,6 +1421,129 @@ fn indexOfIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
     return null;
 }
 
+/// The local name a file binds a module to, so `ml.Bounds` is found whether the
+/// file wrote `const ml_infer = @import("ml_infer")` or shortened it.
+fn importBinding(content: []const u8, module: []const u8) ?[]const u8 {
+    var needle_buf: [128]u8 = undefined;
+    const needle = std.fmt.bufPrint(&needle_buf, "@import(\"{s}\")", .{module}) catch return null;
+    var search: usize = 0;
+    while (std.mem.indexOfPos(u8, content, search, needle)) |at| {
+        search = at + needle.len;
+        var line_start = at;
+        while (line_start > 0 and content[line_start - 1] != '\n') line_start -= 1;
+        const line = content[line_start..at];
+        const eq = std.mem.lastIndexOfScalar(u8, line, '=') orelse continue;
+        var name_end = eq;
+        while (name_end > 0 and (line[name_end - 1] == ' ' or line[name_end - 1] == '\t')) name_end -= 1;
+        var name_start = name_end;
+        while (name_start > 0 and isIdentChar(line[name_start - 1])) name_start -= 1;
+        if (name_start == name_end) continue;
+        return line[name_start..name_end];
+    }
+    return null;
+}
+
+/// Every `<binding>.<name>` the file's code reaches for, deduplicated. Comments
+/// and string literals are cut first: a doc comment naming a node type and an
+/// import path both read as uses otherwise, and neither is one.
+fn collectMemberUses(g: *Gate, content: []const u8, binding: []const u8, out: *std.ArrayList([]const u8)) !void {
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |raw| {
+        const line = try codeOf(g.arena, raw);
+        var search: usize = 0;
+        while (std.mem.indexOfPos(u8, line, search, binding)) |at| {
+            search = at + binding.len;
+            if (at > 0 and isIdentChar(line[at - 1])) continue;
+            const after = at + binding.len;
+            if (after >= line.len or line[after] != '.') continue;
+            var end = after + 1;
+            while (end < line.len and isIdentChar(line[end])) end += 1;
+            if (end == after + 1) continue;
+            const name = line[after + 1 .. end];
+            var seen = false;
+            for (out.items) |have| {
+                if (std.mem.eql(u8, have, name)) seen = true;
+            }
+            if (!seen) try out.append(g.arena, name);
+        }
+    }
+}
+
+/// A line with its comment dropped and its string literals blanked, so only code
+/// is read: a doc comment naming a node type and an import path both look like
+/// uses otherwise, and neither is one.
+fn codeOf(arena: Allocator, line: []const u8) ![]const u8 {
+    const out = try arena.alloc(u8, line.len);
+    var i: usize = 0;
+    var in_string = false;
+    while (i < line.len) : (i += 1) {
+        if (in_string) {
+            out[i] = ' ';
+            if (line[i] == '\\' and i + 1 < line.len) {
+                i += 1;
+                out[i] = ' ';
+                continue;
+            }
+            if (line[i] == '"') in_string = false;
+            continue;
+        }
+        if (line[i] == '"') {
+            in_string = true;
+            out[i] = ' ';
+            continue;
+        }
+        if (line[i] == '/' and i + 1 < line.len and line[i + 1] == '/') return out[0..i];
+        out[i] = line[i];
+    }
+    return out;
+}
+
+/// Whether a file declares a name publicly at file scope. The substitutes are
+/// flat by design, so a top-level `pub const`, `pub fn` or `pub var` is the
+/// whole question.
+fn declaresPublic(content: []const u8, name: []const u8) bool {
+    for ([_][]const u8{ "pub const ", "pub fn ", "pub var ", "pub threadlocal var " }) |prefix| {
+        var search: usize = 0;
+        while (std.mem.indexOfPos(u8, content, search, prefix)) |at| {
+            search = at + prefix.len;
+            if (at != 0 and content[at - 1] != '\n') continue;
+            const rest = content[at + prefix.len ..];
+            if (!std.mem.startsWith(u8, rest, name)) continue;
+            if (rest.len > name.len and isIdentChar(rest[name.len])) continue;
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Whether this file reaches that module root: by module name from anywhere, or by
+/// file name from inside the root's own package, which is how a package root
+/// gathers what it exports. Either way something can call it.
+fn importsRoot(content: []const u8, path: []const u8, root: []const u8) bool {
+    const slash = std.mem.lastIndexOfScalar(u8, root, '/') orelse return true;
+    const dir = root[0..slash];
+    const file = root[slash + 1 ..];
+    const stem = file[0 .. file.len - 4];
+
+    var buf: [512]u8 = undefined;
+    if (std.mem.startsWith(u8, path, dir)) {
+        const by_file = std.fmt.bufPrint(&buf, "@import(\"{s}\")", .{file}) catch return true;
+        if (std.mem.indexOf(u8, content, by_file) != null) return true;
+    }
+    const by_module = std.fmt.bufPrint(&buf, "@import(\"{s}\")", .{stem}) catch return true;
+    return std.mem.indexOf(u8, content, by_module) != null;
+}
+
+/// Whether a `b.path("...")` sits in a module construction rather than in a C
+/// compile or an asset step. The marker is the field it fills.
+fn isModuleRoot(build_zig: []const u8, at: usize) bool {
+    var line_start = at;
+    while (line_start > 0 and build_zig[line_start - 1] != '\n') line_start -= 1;
+    var line_end = at;
+    while (line_end < build_zig.len and build_zig[line_end] != '\n') line_end += 1;
+    return std.mem.indexOf(u8, build_zig[line_start..line_end], "root_source_file") != null;
+}
+
 fn isIdentChar(ch: u8) bool {
     return std.ascii.isAlphanumeric(ch) or ch == '_';
 }
@@ -1013,17 +1555,18 @@ pub fn main(init: std.process.Init) !u8 {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, arena);
     _ = args.next(); // program path
     const mode = args.next() orelse {
-        std.debug.print("gate: usage: gate --staged | --tree | --commit-msg <file> | --log <range> | --diff <range> | --pr-body <file>\n", .{});
+        std.debug.print("gate: usage: gate --staged | --tree | --commit-msg <file> | --log <range> | --diff <range> | --pr-title <file> | --pr-body <file>\n", .{});
         return 2;
     };
 
     if (std.mem.eql(u8, mode, "--staged")) {
         const paths = try g.stagedPaths();
+        const prose_paths = try g.withAuthoredDocs(paths);
         try g.checkIgnoreIntegrity();
         try g.checkInbound(paths);
         try g.checkFileProvenance(paths);
         try g.checkCommentHygiene(&.{"--cached"});
-        try g.checkProseDashes(paths);
+        try g.checkProseDashes(prose_paths);
         try g.checkBoundaryStance();
         try g.checkFloatCap();
         try g.checkExportErrdefer(paths);
@@ -1031,12 +1574,22 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkOwnershipTransfers(paths);
         try g.checkSwallowedFailures(paths);
         try g.checkIgnoredVendorResults(paths);
+        try g.checkSeamParity();
+        try g.checkOrphanModules();
+        try g.checkVerbCoverage();
+        try g.checkUnexplainedRefusals(paths);
+        try g.checkDeferralProse(paths);
+        try g.checkCountProse(paths);
+        try g.checkRecordSections();
+        try g.checkEventCoverage();
+        try g.checkCapabilityCoverage();
     } else if (std.mem.eql(u8, mode, "--tree")) {
         const paths = try g.trackedPaths();
+        const prose_paths = try g.withAuthoredDocs(paths);
         try g.checkIgnoreIntegrity();
         try g.checkInbound(paths);
         try g.checkFileProvenance(paths);
-        try g.checkProseDashes(paths);
+        try g.checkProseDashes(prose_paths);
         try g.checkBoundaryStance();
         try g.checkFloatCap();
         try g.checkExportErrdefer(paths);
@@ -1044,6 +1597,15 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkOwnershipTransfers(paths);
         try g.checkSwallowedFailures(paths);
         try g.checkIgnoredVendorResults(paths);
+        try g.checkSeamParity();
+        try g.checkOrphanModules();
+        try g.checkVerbCoverage();
+        try g.checkUnexplainedRefusals(paths);
+        try g.checkDeferralProse(paths);
+        try g.checkCountProse(paths);
+        try g.checkRecordSections();
+        try g.checkEventCoverage();
+        try g.checkCapabilityCoverage();
     } else if (std.mem.eql(u8, mode, "--commit-msg")) {
         const file = args.next() orelse {
             std.debug.print("gate: --commit-msg needs a file argument\n", .{});
@@ -1064,6 +1626,17 @@ pub fn main(init: std.process.Init) !u8 {
             return 2;
         };
         try g.checkCommentHygiene(&.{range});
+        try g.checkChangelog(range);
+    } else if (std.mem.eql(u8, mode, "--pr-title")) {
+        const file = args.next() orelse {
+            std.debug.print("gate: --pr-title needs a file argument\n", .{});
+            return 2;
+        };
+        const raw = try Io.Dir.cwd().readFileAlloc(g.io, file, arena, .limited(max_file_scan_bytes));
+        const title = std.mem.trim(u8, raw, " \t\r\n");
+        try g.checkMessage(title, "PR title");
+        try g.checkClauseDashes(title, "PR title");
+        try g.checkTitleShape(title);
     } else if (std.mem.eql(u8, mode, "--pr-body")) {
         const file = args.next() orelse {
             std.debug.print("gate: --pr-body needs a file argument\n", .{});
@@ -1125,6 +1698,34 @@ fn dropsFailureSilently(line: []const u8) bool {
 
 /// W9: the line discards a vendor call's result with no reason, and that result
 /// is one that can encode failure.
+const changelog_path = "CHANGELOG.md";
+const authored_docs = [_][]const u8{ "docs/private/ledger.md", "docs/private/REAL-AUDIT.md" };
+
+/// Which paths reach a user of the engine. The harness, the tools and the private
+/// documents do not: a gate that asked for a changelog line on its own source
+/// would ask on every change to itself.
+const shipped_roots = [_][]const u8{ "core/", "adapters/", "include/", "sdk/", "third_party/models.lock" };
+
+fn shipsToUsers(path: []const u8) bool {
+    for (shipped_roots) |root| {
+        if (std.mem.startsWith(u8, path, root)) return true;
+    }
+    return false;
+}
+
+test "only the paths that reach a user ask for a changelog line" {
+    try std.testing.expect(shipsToUsers("core/perception/snapshot.zig"));
+    try std.testing.expect(shipsToUsers("adapters/screen/screen_capture.zig"));
+    try std.testing.expect(shipsToUsers("include/gosslens.h"));
+    try std.testing.expect(shipsToUsers("sdk/ts/src/index.ts"));
+    try std.testing.expect(shipsToUsers("third_party/models.lock"));
+    // The harness, the tools and the documents change without shipping anything.
+    try std.testing.expect(!shipsToUsers("harness/conformance.zig"));
+    try std.testing.expect(!shipsToUsers("tools/gate.zig"));
+    try std.testing.expect(!shipsToUsers("docs/API.md"));
+    try std.testing.expect(!shipsToUsers("build.zig"));
+}
+
 fn ignoresVendorResult(line: []const u8) bool {
     if (isCommentLine(line)) return false;
     const trimmed = std.mem.trimStart(u8, line, " \t");
@@ -1376,10 +1977,117 @@ fn clauseSnippet(text: []const u8, dash_index: usize) []const u8 {
 // Authored markdown prose, the only files scanned for clause dashes. The
 // private docs tree is gitignored and never scanned; source keeps its
 // own spaced hyphens and is out of scope.
+/// The number a position holds, for reading a bit out of a shift expression.
+fn readNumber(text: []const u8, from: usize) ?usize {
+    var i = from;
+    while (i < text.len and (text[i] == ' ' or text[i] == '(')) i += 1;
+    var value: usize = 0;
+    var saw = false;
+    while (i < text.len and std.ascii.isDigit(text[i])) : (i += 1) {
+        value = value * 10 + (text[i] - '0');
+        saw = true;
+    }
+    return if (saw) value else null;
+}
+
+/// A copy with every top-level test body blanked. A test is a declaration at column
+/// zero, so it ends at the first closing brace in that column.
+fn withoutTestBodies(arena: std.mem.Allocator, text: []const u8) ![]u8 {
+    const copy = try arena.dupe(u8, text);
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, copy, at, "\ntest \"")) |found| {
+        const end = std.mem.indexOfPos(u8, copy, found + 1, "\n}") orelse copy.len;
+        const stop = @min(end + 2, copy.len);
+        @memset(copy[found + 1 .. stop], ' ');
+        at = stop;
+    }
+    return copy;
+}
+
+/// Blanks the comments in a C enum body so a word inside one is never read as a name.
+fn stripLineComments(arena: std.mem.Allocator, text: []const u8) ![]u8 {
+    const copy = try arena.dupe(u8, text);
+    var i: usize = 0;
+    while (i + 1 < copy.len) {
+        if (copy[i] == '/' and copy[i + 1] == '*') {
+            while (i + 1 < copy.len and !(copy[i] == '*' and copy[i + 1] == '/')) : (i += 1) copy[i] = ' ';
+            copy[i] = ' ';
+            copy[i + 1] = ' ';
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    return copy;
+}
+
+/// A word boundary search, so "ten" does not match inside "often".
+/// Case-insensitive on purpose: a count opening a sentence is capitalised, and matching
+/// only the lower-case spelling is how "Eighteen tools answer" survived every sweep for
+/// exactly that phrase.
+fn indexOfWord(text: []const u8, word: []const u8, from: usize) ?usize {
+    var at = from;
+    while (indexOfIgnoreCasePos(text, word, at)) |found| {
+        at = found + 1;
+        const before_ok = found == 0 or !isWordByte(text[found - 1]);
+        const after = found + word.len;
+        const after_ok = after >= text.len or !isWordByte(text[after]);
+        if (before_ok and after_ok) return found;
+    }
+    return null;
+}
+
+/// The first index at or after `from` where `needle` appears, ignoring case.
+fn indexOfIgnoreCasePos(text: []const u8, needle: []const u8, from: usize) ?usize {
+    if (needle.len == 0 or text.len < needle.len) return null;
+    var i = from;
+    while (i + needle.len <= text.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(text[i .. i + needle.len], needle)) return i;
+    }
+    return null;
+}
+
+fn isWordByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_' or c == '-';
+}
+
+/// One of the countable nouns within the next few words, which is what turns a
+/// number into a tally rather than a turn of phrase.
+fn nearbyCountable(text: []const u8, from: usize, countable: []const []const u8) ?[]const u8 {
+    var at = from;
+    var words: usize = 0;
+    while (words < 2 and at < text.len) : (words += 1) {
+        // Punctuation ends the phrase: "two words: the sections" counts words, not
+        // sections, and reading across the colon is how a check cries wolf.
+        while (at < text.len and !isWordByte(text[at])) : (at += 1) {
+            if (text[at] == '\n' and at + 1 < text.len and text[at + 1] == '\n') return null;
+            if (text[at] != ' ' and text[at] != '\n' and text[at] != '`' and text[at] != '*') return null;
+        }
+        const start = at;
+        while (at < text.len and isWordByte(text[at])) at += 1;
+        const word = text[start..at];
+        for (countable) |noun| {
+            if (std.mem.eql(u8, word, noun)) return noun;
+        }
+    }
+    return null;
+}
+
 fn isMarkdownDoc(path: []const u8) bool {
     if (!std.mem.endsWith(u8, path, ".md")) return false;
     if (std.mem.startsWith(u8, path, "docs/private/")) return false;
     return true;
+}
+
+// The folder these sit in holds the owner's papers too, which isMarkdownDoc excludes
+// so this gate never rewrites them. These two are mine, so they are named one by one
+// rather than matched by where they live.
+fn isScannedProse(path: []const u8) bool {
+    if (isMarkdownDoc(path)) return true;
+    for (authored_docs) |doc| {
+        if (std.mem.eql(u8, doc, path)) return true;
+    }
+    return false;
 }
 
 const FnScope = struct {

@@ -1620,7 +1620,7 @@ fn proveMultiBodyFanOut(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     }
     var base: abi.PoseResult = undefined;
     var polls: usize = 0;
-    while (abi.goss_session_pose_result(session, &base) == .again or base.landmark_count_out == 0) {
+    while (abi.goss_session_pose_result(session, &base) == .again or base.landmark_count == 0) {
         std.Thread.yield() catch {};
         if (g_watch) c.glfwPollEvents();
         polls += 1;
@@ -1721,7 +1721,7 @@ fn proveSkeletonRig(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     }
     var base: abi.PoseResult = undefined;
     var polls: usize = 0;
-    while (abi.goss_session_pose_result(session, &base) == .again or base.landmark_count_out == 0) {
+    while (abi.goss_session_pose_result(session, &base) == .again or base.landmark_count == 0) {
         std.Thread.yield() catch {};
         if (g_watch) c.glfwPollEvents();
         polls += 1;
@@ -1834,7 +1834,7 @@ fn proveSkinnedBodyMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     }
     var base: abi.PoseResult = undefined;
     var polls: usize = 0;
-    while (abi.goss_session_pose_result(session, &base) == .again or base.landmark_count_out == 0) {
+    while (abi.goss_session_pose_result(session, &base) == .again or base.landmark_count == 0) {
         std.Thread.yield() catch {};
         if (g_watch) c.glfwPollEvents();
         polls += 1;
@@ -2355,7 +2355,7 @@ fn proveBodyJoints(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     }
     var result: abi.PoseResult = undefined;
     var polls: usize = 0;
-    while (abi.goss_session_pose_result(session, &result) == .again or result.landmark_count_out == 0) {
+    while (abi.goss_session_pose_result(session, &result) == .again or result.landmark_count == 0) {
         std.Thread.yield() catch {};
         if (g_watch) c.glfwPollEvents();
         polls += 1;
@@ -2800,7 +2800,7 @@ fn proveTurnedTiledCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 
 /// Proves a supersampled capture streams: the same still at 2x, tiled and streamed band by band,
 /// matches the whole-buffer render byte for byte. Streaming used to demand supersample 1, so a
-/// supersampled still held the entire enlarged render in memory — the very buffer tiling exists
+/// supersampled still held the entire enlarged render in memory, the very buffer tiling exists
 /// to avoid, and at full-sensor sizes the reason it could not be taken at all.
 fn proveStreamedSupersample(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
@@ -3198,7 +3198,7 @@ fn proveStickerInteraction(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 
 /// Proves an authored turn on a sticker and on a text label: the manifest's angle draws, a bound
 /// parameter turns it further, and the host reads back what is actually on screen. Rotation used
-/// to exist only as a live gesture — a lens could not ship a tilted sticker, and nothing could
+/// to exist only as a live gesture, so a lens could not ship a tilted sticker and nothing could
 /// read where one had been left.
 fn proveAuthoredRotation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const straight = (try captureFountainAtFrame(gpa, engine, ".lens-packages/text-flat", 10)) orelse return false;
@@ -3370,7 +3370,7 @@ fn proveStagedImageAssets(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 
 /// Proves the screen-space face effects tile. Their geometry is a flat mesh already in screen
 /// space, so a tile used to draw the whole face across its own small target instead of its slice
-/// of the picture — which is why a face lens could not be captured above the tile cap at all.
+/// of the picture, which is why a face lens could not be captured above the tile cap at all.
 /// Each lens is captured whole and tiled and the two must be the same file.
 fn proveTiledFaceMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const lenses = [_][]const u8{
@@ -3938,6 +3938,929 @@ fn proveColorManagedCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+
+/// The models the ONNX rail is held to, fetched by digest and never committed, so a host
+/// without them says so and the suite runs on. Each names the output standing for "this
+/// model answered": a classifier its first logit, a detector its score tensor, since a
+/// box corner reads zero on every frame that holds no detection.
+const zoo_models = [_]struct {
+    kind: []const u8,
+    path: []const u8,
+    side: u32,
+    tensor: u32 = 0,
+    index: u32 = 0,
+    /// The range the export wants, named the way a lens names it.
+    range: []const u8 = "unit",
+}{
+    .{ .kind = "classifier", .path = ".models/mobilenetv2.onnx", .side = 224 },
+    .{ .kind = "classifier, quantized", .path = ".models/mobilenetv2-int8.onnx", .side = 224 },
+    .{ .kind = "detector, quantized", .path = ".models/ssd_mobilenet-int8.onnx", .side = 300, .tensor = 2, .range = "byte" },
+    .{ .kind = "depth, quantized", .path = ".models/depth_anything_v2_small-int8.onnx", .side = zoo_depth_side },
+};
+
+/// The models past the lens bundle's asset cap. A hundred-megabyte net is not a
+/// shape a lens ships, so these are held to loading, planning and naming no
+/// missing operator rather than to a frame through the graph.
+const zoo_load_only = [_]struct {
+    kind: []const u8,
+    path: []const u8,
+}{
+    .{ .kind = "detector", .path = ".models/ssd_mobilenet.onnx" },
+    .{ .kind = "embedding, quantized", .path = ".models/arcface-int8.onnx" },
+    .{ .kind = "depth", .path = ".models/depth_anything_v2_small.onnx" },
+    .{ .kind = "segmentation", .path = ".models/fcn_resnet50.onnx" },
+    .{ .kind = "segmentation, quantized", .path = ".models/fcn_resnet50-int8.onnx" },
+};
+
+/// Depth Anything works in 14-pixel patches, so its side must be a multiple of
+/// 14; 126 is nine patches a side, which walks every attention path at a cost a
+/// proof can afford on a naive interpreter.
+const zoo_depth_side: u32 = 126;
+const zoo_segmentation_side: u32 = 128;
+
+/// Every model class the rail claims to run, through the real ABI on a real
+/// frame, float and quantized. Each must load, name no missing operator, produce a
+/// finite value twice over, and respond to the pixels. The budget is printed
+/// rather than asserted: an interpreter's cost is a fact about the host.
+fn proveModelZoo(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+    const gray_rgba = try gpa.alloc(u8, @as(usize, corpus.frame.width) * corpus.frame.height * 4);
+    defer gpa.free(gray_rgba);
+    @memset(gray_rgba, 128);
+    const gray = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = gray_rgba }, .width = corpus.frame.width, .height = corpus.frame.height });
+    defer gray.deinit(gpa);
+
+    var ran: usize = 0;
+    for (zoo_models) |model_spec| {
+        const model = std.Io.Dir.cwd().readFileAlloc(harness_io, model_spec.path, gpa, .limited(512 << 20)) catch {
+            std.debug.print("conformance: {s} skipped - {s} is not fetched on this host\n", .{ model_spec.kind, model_spec.path });
+            continue;
+        };
+        defer gpa.free(model);
+
+        // What the model needs and this build lacks, through the public op
+        // support surface rather than an internal list.
+        var missing: [1024]u8 = undefined;
+        var needed: usize = 0;
+        _ = abi.goss_ml_op_support(model.ptr, model.len, &missing, missing.len, &needed);
+        if (needed != 0) {
+            std.debug.print("conformance: FAIL {s} needs operators this build lacks:\n{s}\n", .{ model_spec.kind, missing[0..@min(needed, missing.len)] });
+            return false;
+        }
+
+        try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/onnx-zoo-lens/assets");
+        try writeOnnxLens("zig-out/onnx-zoo-lens", model, model_spec.side, model_spec.tensor, model_spec.index, model_spec.range);
+
+        const started = std.Io.Timestamp.now(harness_io, .awake);
+        const person_a = runMlInferOnce(engine, "zig-out/onnx-zoo-lens", "score", -999.0, person, true) catch |err| {
+            std.debug.print("conformance: FAIL {s} would not run: {t}\n", .{ model_spec.kind, err });
+            return false;
+        };
+        const elapsed_us: u64 = @intCast(@divTrunc(started.durationTo(std.Io.Timestamp.now(harness_io, .awake)).nanoseconds, 1000));
+        // Named on failure like the first call is: a bare MlInferTimedOut told me
+        // nothing about which of four models stalled, and two of the three calls
+        // could produce it.
+        const person_b = runMlInferOnce(engine, "zig-out/onnx-zoo-lens", "score", -999.0, person, true) catch |err| {
+            std.debug.print("conformance: FAIL {s} stalled on its second run: {t}\n", .{ model_spec.kind, err });
+            return false;
+        };
+        const gray_score = runMlInferOnce(engine, "zig-out/onnx-zoo-lens", "score", -999.0, gray, true) catch |err| {
+            std.debug.print("conformance: FAIL {s} stalled on a flat frame: {t}\n", .{ model_spec.kind, err });
+            return false;
+        };
+
+        if (!std.math.isFinite(person_a)) {
+            std.debug.print("conformance: FAIL {s} published a non-finite value\n", .{model_spec.kind});
+            return false;
+        }
+        if (person_a != person_b) {
+            std.debug.print("conformance: FAIL {s} is not bit-stable across runs ({d} vs {d})\n", .{ model_spec.kind, person_a, person_b });
+            return false;
+        }
+        if (person_a == gray_score) {
+            std.debug.print("conformance: FAIL {s} read {d} from tensor {d} index {d} for both a portrait and a flat frame\n", .{ model_spec.kind, person_a, model_spec.tensor, model_spec.index });
+            return false;
+        }
+        std.debug.print(
+            "conformance: PROOF a real {s} model runs through the ml.infer node on a camera frame at {d}x{d}, bit-stable across runs and responsive to the pixels ({d}us to first value)\n",
+            .{ model_spec.kind, model_spec.side, model_spec.side, elapsed_us },
+        );
+        ran += 1;
+    }
+    // The models past the bundle cap: every operator they need is implemented,
+    // which is the claim the op-support surface makes and the one a caller acts
+    // on before shipping a model.
+    for (zoo_load_only) |model_spec| {
+        const model = std.Io.Dir.cwd().readFileAlloc(harness_io, model_spec.path, gpa, .limited(512 << 20)) catch {
+            std.debug.print("conformance: {s} skipped - {s} is not fetched on this host\n", .{ model_spec.kind, model_spec.path });
+            continue;
+        };
+        defer gpa.free(model);
+        var missing: [1024]u8 = undefined;
+        var needed: usize = 0;
+        _ = abi.goss_ml_op_support(model.ptr, model.len, &missing, missing.len, &needed);
+        if (needed != 0) {
+            std.debug.print("conformance: FAIL {s} needs operators this build lacks:\n{s}\n", .{ model_spec.kind, missing[0..@min(needed, missing.len)] });
+            return false;
+        }
+        std.debug.print(
+            "conformance: PROOF a real {s} model ({d} MB) needs no operator this engine lacks\n",
+            .{ model_spec.kind, model.len / (1 << 20) },
+        );
+        ran += 1;
+    }
+
+    if (ran == 0) {
+        std.debug.print("conformance: no zoo model is fetched on this host - run `zig build fetch-models` to prove the model rail\n", .{});
+    }
+    return true;
+}
+
+
+/// The text rail's models, fetched by digest like every other and never
+/// committed. The detector alone is enough to prove where text is; the
+/// recogniser and its dictionary turn that into a string.
+const text_detector_path = ".models/text_det.onnx";
+const text_recognizer_path = ".models/text_rec.onnx";
+const text_dictionary_path = ".models/text_keys.txt";
+
+/// A scene with known text in it, drawn rather than photographed so the ground
+/// truth is exact and the proof needs no corpus image to ship.
+fn drawTextScene(gpa: std.mem.Allocator, phrase: []const u8, scene_w: u32, scene_h: u32) ![]u8 {
+    const rgba = try gpa.alloc(u8, @as(usize, scene_w) * scene_h * 4);
+    errdefer gpa.free(rgba);
+    // A light ground, because a detector trained on documents and signs expects
+    // dark ink on a light surface and this proof is about the rail, not about
+    // how far a model generalizes.
+    var i: usize = 0;
+    while (i < rgba.len) : (i += 4) {
+        rgba[i] = 235;
+        rgba[i + 1] = 235;
+        rgba[i + 2] = 235;
+        rgba[i + 3] = 255;
+    }
+
+    const raster = try abi.font.rasterize(gpa, phrase, 6, .{ 20, 20, 20, 255 });
+    defer gpa.free(raster.rgba);
+    const x0 = (scene_w -| raster.width) / 2;
+    const y0 = (scene_h -| raster.height) / 2;
+    for (0..raster.height) |y| {
+        if (y0 + y >= scene_h) break;
+        for (0..raster.width) |x| {
+            if (x0 + x >= scene_w) break;
+            const src = (y * raster.width + x) * 4;
+            if (raster.rgba[src + 3] == 0) continue;
+            const dst = ((y0 + y) * scene_w + (x0 + x)) * 4;
+            rgba[dst] = raster.rgba[src];
+            rgba[dst + 1] = raster.rgba[src + 1];
+            rgba[dst + 2] = raster.rgba[src + 2];
+        }
+    }
+    return rgba;
+}
+
+/// The text rail through the real ABI on a real detector: a scene with text in
+/// it produces regions where the text is, a scene without produces none, and a
+/// region that has not changed keeps its track id across frames. The reading
+/// itself is asserted only where the recogniser is fetched too.
+fn proveTextRail(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const detector = std.Io.Dir.cwd().readFileAlloc(harness_io, text_detector_path, gpa, .limited(64 << 20)) catch {
+        std.debug.print("conformance: text rail skipped - {s} is not fetched on this host\n", .{text_detector_path});
+        return true;
+    };
+    defer gpa.free(detector);
+    const recognizer = std.Io.Dir.cwd().readFileAlloc(harness_io, text_recognizer_path, gpa, .limited(64 << 20)) catch null;
+    defer if (recognizer) |r| gpa.free(r);
+    const dictionary = std.Io.Dir.cwd().readFileAlloc(harness_io, text_dictionary_path, gpa, .limited(4 << 20)) catch null;
+    defer if (dictionary) |d| gpa.free(d);
+
+    const scene_w: u32 = 320;
+    const scene_h: u32 = 160;
+    const phrase = "EXIT";
+    const with_text = try drawTextScene(gpa, phrase, scene_w, scene_h);
+    defer gpa.free(with_text);
+    const blank = try gpa.alloc(u8, @as(usize, scene_w) * scene_h * 4);
+    defer gpa.free(blank);
+    @memset(blank, 235);
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const status = abi.goss_session_enable_text(
+        session,
+        detector.ptr,
+        detector.len,
+        if (recognizer) |r| r.ptr else null,
+        if (recognizer) |r| r.len else 0,
+        if (dictionary) |d| d.ptr else null,
+        if (dictionary) |d| d.len else 0,
+        320,
+    );
+    if (status == .unsupported) {
+        std.debug.print("conformance: text rail skipped - no model rail on this target\n", .{});
+        return true;
+    }
+    if (status != .ok) {
+        std.debug.print("conformance: FAIL the text rail would not enable ({t})\n", .{status});
+        return false;
+    }
+
+    var desc: abi.FrameDesc = .{
+        .width = scene_w,
+        .height = scene_h,
+        .pixel_format = 4,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    if (abi.goss_session_submit_frame_rgba_copy(session, &desc, with_text.ptr, scene_w * 4) != .ok) {
+        std.debug.print("conformance: FAIL the text scene would not submit\n", .{});
+        return false;
+    }
+
+    var found: u32 = 0;
+    var refused: u64 = 0;
+    _ = abi.goss_session_text_count(session, &found, &refused);
+    if (found == 0) {
+        std.debug.print("conformance: FAIL the detector found no text in a scene that has some\n", .{});
+        return false;
+    }
+
+    // Every region must sit inside the frame and carry a track id, because a
+    // region without one cannot be followed and an overlay pinned to it flickers.
+    var first_track: u32 = 0;
+    var read_back: [256]u8 = undefined;
+    var read_len: usize = 0;
+    for (0..found) |i| {
+        var entry: abi.TextEntry = undefined;
+        if (abi.goss_session_text_at(session, @intCast(i), &entry) != .ok) {
+            std.debug.print("conformance: FAIL reading {d} could not be read back\n", .{i});
+            return false;
+        }
+        for (entry.quad) |v| {
+            if (!(v >= -0.5 and v <= 1.5)) {
+                std.debug.print("conformance: FAIL a region landed outside the frame ({d})\n", .{v});
+                return false;
+            }
+        }
+        if (entry.track_id == 0) {
+            std.debug.print("conformance: FAIL a region carries no track id\n", .{});
+            return false;
+        }
+        if (i == 0) first_track = entry.track_id;
+        if (entry.text_len != 0 and read_len == 0) {
+            _ = abi.goss_session_text_string(session, @intCast(i), &read_back, read_back.len, &read_len);
+        }
+    }
+
+    // The same frame again: the regions have not moved, so the ids carry.
+    desc.timestamp_us = 34000;
+    _ = abi.goss_session_submit_frame_rgba_copy(session, &desc, with_text.ptr, scene_w * 4);
+    var second: abi.TextEntry = undefined;
+    if (abi.goss_session_text_at(session, 0, &second) != .ok or second.track_id != first_track) {
+        std.debug.print("conformance: FAIL a region that did not move lost its track id\n", .{});
+        return false;
+    }
+
+    // A blank frame says nothing, which is the case a detector that hallucinates
+    // would fail and the one an overlay depends on.
+    desc.timestamp_us = 68000;
+    _ = abi.goss_session_submit_frame_rgba_copy(session, &desc, blank.ptr, scene_w * 4);
+    var blank_count: u32 = 0;
+    _ = abi.goss_session_text_count(session, &blank_count, &refused);
+    if (blank_count != 0) {
+        std.debug.print("conformance: FAIL the detector found {d} regions in a blank frame\n", .{blank_count});
+        return false;
+    }
+
+    if (read_len != 0) {
+        std.debug.print(
+            "conformance: PROOF a real text detector and recogniser run through the ABI on a drawn scene: {d} regions, tracked across frames, none in a blank frame, read as \"{s}\"\n",
+            .{ found, read_back[0..@min(read_len, read_back.len)] },
+        );
+    } else {
+        std.debug.print(
+            "conformance: PROOF a real text detector runs through the ABI on a drawn scene: {d} regions, tracked across frames, none in a blank frame\n",
+            .{found},
+        );
+    }
+    return true;
+}
+
+
+/// The memory plane through the real ABI: remember, search, replace, forget,
+/// save, load. Recall is asserted against the exact answer on the same corpus,
+/// because an approximate index nobody measured is a guess, and the saved file
+/// must answer the same query after a round trip or persistence is decoration.
+fn proveMemoryPlane(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const dim: u32 = 16;
+    const total: usize = 400;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_memory_open(session, dim, 1024) != .ok) {
+        std.debug.print("conformance: FAIL the memory plane would not open\n", .{});
+        return false;
+    }
+
+    // A fixed corpus, so the recall number is the same on every run and on every
+    // target rather than a different number each time nobody can compare.
+    var prng = std.Random.DefaultPrng.init(0x13E5717);
+    const random = prng.random();
+    const corpus = try gpa.alloc(f32, total * dim);
+    defer gpa.free(corpus);
+    for (0..total) |i| {
+        const v = corpus[i * dim ..][0..dim];
+        for (v) |*x| x.* = random.float(f32) * 2 - 1;
+        normalizeVector(v);
+        if (abi.goss_session_memory_remember(session, @intCast(i + 1), v.ptr, dim) != .ok) {
+            std.debug.print("conformance: FAIL the memory plane refused entry {d}\n", .{i});
+            return false;
+        }
+    }
+
+    var live: u32 = 0;
+    var bytes: u64 = 0;
+    _ = abi.goss_session_memory_stats(session, &live, &bytes);
+    if (live != total or bytes == 0) {
+        std.debug.print("conformance: FAIL the memory holds {d} of {d} in {d} bytes\n", .{ live, total, bytes });
+        return false;
+    }
+
+    // Recall at one against the exact answer, computed here rather than taken
+    // from the index that is being tested.
+    const queries: usize = 40;
+    var hits: usize = 0;
+    for (0..queries) |_| {
+        var query: [16]f32 = undefined;
+        for (&query) |*x| x.* = random.float(f32) * 2 - 1;
+        normalizeVector(&query);
+
+        var best_id: u64 = 0;
+        var best_score: f32 = -std.math.floatMax(f32);
+        for (0..total) |i| {
+            var dot: f32 = 0;
+            for (corpus[i * dim ..][0..dim], query) |a, b| dot += a * b;
+            if (dot > best_score) {
+                best_score = dot;
+                best_id = @intCast(i + 1);
+            }
+        }
+
+        var ids: [1]u64 = undefined;
+        var scores: [1]f32 = undefined;
+        var count: u32 = 0;
+        if (abi.goss_session_memory_search(session, &query, dim, 1, &ids, &scores, &count) != .ok or count != 1) {
+            std.debug.print("conformance: FAIL the memory plane would not answer a query\n", .{});
+            return false;
+        }
+        if (ids[0] == best_id) hits += 1;
+    }
+    const recall = hits * 100 / queries;
+    if (recall < 85) {
+        std.debug.print("conformance: FAIL the memory plane recalls {d} percent, under the bar of 85\n", .{recall});
+        return false;
+    }
+
+    // Replacing by id does not duplicate, and forgetting removes.
+    var again: [16]f32 = @splat(0);
+    again[0] = 1;
+    _ = abi.goss_session_memory_remember(session, 1, &again, dim);
+    _ = abi.goss_session_memory_stats(session, &live, &bytes);
+    if (live != total) {
+        std.debug.print("conformance: FAIL replacing an id changed the count to {d}\n", .{live});
+        return false;
+    }
+    _ = abi.goss_session_memory_forget(session, 1);
+    _ = abi.goss_session_memory_stats(session, &live, &bytes);
+    if (live != total - 1) {
+        std.debug.print("conformance: FAIL forgetting left {d} of {d}\n", .{ live, total - 1 });
+        return false;
+    }
+
+    // A saved memory answers the same query after a round trip, which is the
+    // only thing persistence is for.
+    var needed: usize = 0;
+    _ = abi.goss_session_memory_save(session, null, 0, &needed);
+    const saved = try gpa.alloc(u8, needed);
+    defer gpa.free(saved);
+    if (abi.goss_session_memory_save(session, saved.ptr, saved.len, &needed) != .ok) {
+        std.debug.print("conformance: FAIL the memory would not save\n", .{});
+        return false;
+    }
+
+    var query: [16]f32 = undefined;
+    for (&query) |*x| x.* = random.float(f32) * 2 - 1;
+    normalizeVector(&query);
+    var before: [4]u64 = undefined;
+    var before_count: u32 = 0;
+    _ = abi.goss_session_memory_search(session, &query, dim, 4, &before, null, &before_count);
+
+    if (abi.goss_session_memory_load(session, saved.ptr, saved.len) != .ok) {
+        std.debug.print("conformance: FAIL the memory would not load what it saved\n", .{});
+        return false;
+    }
+    var after: [4]u64 = undefined;
+    var after_count: u32 = 0;
+    _ = abi.goss_session_memory_search(session, &query, dim, 4, &after, null, &after_count);
+    if (before_count != after_count) {
+        std.debug.print("conformance: FAIL the round trip answered {d} where it answered {d}\n", .{ after_count, before_count });
+        return false;
+    }
+    for (0..before_count) |i| {
+        if (before[i] != after[i]) {
+            std.debug.print("conformance: FAIL the round trip ranked {d} where it ranked {d}\n", .{ after[i], before[i] });
+            return false;
+        }
+    }
+    // The forgotten id stays forgotten across the trip.
+    for (after[0..after_count]) |id| {
+        if (id == 1) {
+            std.debug.print("conformance: FAIL a forgotten entry came back from the file\n", .{});
+            return false;
+        }
+    }
+
+    // A file that is not one is refused rather than loaded as something.
+    var broken = try gpa.dupe(u8, saved);
+    defer gpa.free(broken);
+    broken[0] = 'X';
+    if (abi.goss_session_memory_load(session, broken.ptr, broken.len) == .ok) {
+        std.debug.print("conformance: FAIL a tampered memory file loaded\n", .{});
+        return false;
+    }
+
+    // Scope governs it: with the verbs withheld, the same calls are refused.
+    _ = abi.goss_session_set_scope(session, 0xFFFFFFFF, 0);
+    if (abi.goss_session_memory_search(session, &query, dim, 1, &after, null, &after_count) == .ok) {
+        std.debug.print("conformance: FAIL a search ran with the verb out of scope\n", .{});
+        return false;
+    }
+    if (abi.goss_session_memory_remember(session, 9999, &again, dim) == .ok) {
+        std.debug.print("conformance: FAIL a write ran with the verb out of scope\n", .{});
+        return false;
+    }
+    _ = abi.goss_session_set_scope(session, 0xFFFFFFFF, 0xFFFFFFFF);
+
+    std.debug.print(
+        "conformance: PROOF the memory plane through the real ABI: {d} entries in {d} bytes, {d} percent recall against the exact answer, a round trip that ranks identically, a tampered file refused, and both verbs refused out of scope\n",
+        .{ total, bytes, recall },
+    );
+    return true;
+}
+
+fn normalizeVector(v: []f32) void {
+    var acc: f32 = 0;
+    for (v) |x| acc += x * x;
+    if (acc <= 0) return;
+    const inv = 1.0 / @sqrt(acc);
+    for (v) |*x| x.* *= inv;
+}
+
+
+/// Scope through the real ABI: every verb gates the ops it names, a refusal says
+/// it is a permission rather than an absence, and a narrowed session cannot widen
+/// itself, which is what makes the whole mechanism more than advice.
+fn proveScope(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const identity16: [16]f32 = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    // Every verb this build knows can be named. A bitmask nobody can read is not a
+    // permission an agent can ask for.
+    const verb_count = abi.goss_scope_verb_count();
+    if (verb_count != 16) {
+        std.debug.print("conformance: FAIL the build knows {d} verbs\n", .{verb_count});
+        return false;
+    }
+    for (0..verb_count) |i| {
+        var name: [64]u8 = undefined;
+        var len: usize = 0;
+        if (abi.goss_scope_verb_name(@intCast(i), &name, name.len, &len) != .ok or len == 0) {
+            std.debug.print("conformance: FAIL verb {d} has no name\n", .{i});
+            return false;
+        }
+    }
+    if (abi.goss_scope_verb_name(verb_count, null, 0, null) == .ok) {
+        std.debug.print("conformance: FAIL a verb past the end was named anyway\n", .{});
+        return false;
+    }
+
+    // Each verb withheld, and the op it gates refused for the right reason.
+    const cases = [_]struct { verb: u32, name: []const u8 }{
+        .{ .verb = 2, .name = "record" },
+        .{ .verb = 7, .name = "submit_frame" },
+        .{ .verb = 8, .name = "submit_world" },
+        .{ .verb = 9, .name = "submit_audio" },
+        .{ .verb = 3, .name = "remember" },
+        .{ .verb = 0, .name = "annotate" },
+        .{ .verb = 12, .name = "activate_lens" },
+        .{ .verb = 14, .name = "enable_tracking" },
+    };
+    for (cases) |case| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        // Everything except the one verb under test.
+        const mask: u32 = ~(@as(u32, 1) << @intCast(case.verb));
+        if (abi.goss_session_set_scope(session, std.math.maxInt(u32), mask) != .ok) {
+            std.debug.print("conformance: FAIL narrowing away {s} was refused\n", .{case.name});
+            return false;
+        }
+        const status = switch (case.verb) {
+            2 => abi.goss_engine_recording_start(engine, session, "zig-out/scope-record.mp4", "zig-out/scope-record.mp4".len, null),
+            7 => blk: {
+                const desc: abi.FrameDesc = .{ .width = 2, .height = 2, .pixel_format = 4, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1 };
+                const rgba = [_]u8{255} ** 16;
+                break :blk abi.goss_session_submit_frame_rgba_copy(session, &desc, &rgba, 8);
+            },
+            8 => blk: {
+                const state: abi.WorldState = .{ .tracking_state = 2, .world_from_camera = identity16, .projection = identity16, .timestamp_us = 1 };
+                break :blk abi.goss_session_submit_world(session, &state, null, 0, null, 0, null);
+            },
+            9 => blk: {
+                const samples = [_]f32{ 0, 0, 0, 0 };
+                break :blk abi.goss_session_submit_audio(session, &samples, 4, 48000, 1, 1);
+            },
+            3 => abi.goss_session_memory_open(session, 4, 16),
+            0 => blk: {
+                var desc = std.mem.zeroes(abi.AnnotationDesc);
+                desc.id = 1;
+                break :blk abi.goss_session_annotate(session, &desc, null, 0);
+            },
+            12 => abi.goss_session_activate_lens_from_directory(session, "zig-out/onnx-zoo-lens", "zig-out/onnx-zoo-lens".len),
+            14 => abi.goss_session_enable_face_tracking(session, null, 0, 0),
+            else => unreachable,
+        };
+        if (status != .out_of_scope) {
+            std.debug.print("conformance: FAIL {s} withheld and the op answered {t} rather than out of scope\n", .{ case.name, status });
+            return false;
+        }
+    }
+
+    // Granted, the same op is not refused for a permission. A frame with the verb
+    // in scope lands.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        const desc: abi.FrameDesc = .{ .width = 2, .height = 2, .pixel_format = 4, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1 };
+        const rgba = [_]u8{255} ** 16;
+        const status = abi.goss_session_submit_frame_rgba_copy(session, &desc, &rgba, 8);
+        if (status == .out_of_scope) {
+            std.debug.print("conformance: FAIL a permissive session refused a frame as out of scope\n", .{});
+            return false;
+        }
+    }
+
+    // The one that makes it real: a narrowed session cannot grant itself anything
+    // back. Anything running inside it can call set_scope, so a scope that widened
+    // would be advice rather than a boundary.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        _ = abi.goss_session_set_scope(session, 0, 0);
+        _ = abi.goss_session_set_scope(session, std.math.maxInt(u32), std.math.maxInt(u32));
+        var sections: u32 = 0;
+        var verbs: u32 = 0;
+        if (abi.goss_session_scope(session, &sections, &verbs) != .ok) {
+            std.debug.print("conformance: FAIL the scope would not read back\n", .{});
+            return false;
+        }
+        if (sections != 0 or verbs != 0) {
+            std.debug.print("conformance: FAIL a narrowed session widened itself back to {x}/{x}\n", .{ sections, verbs });
+            return false;
+        }
+        var desc = std.mem.zeroes(abi.AnnotationDesc);
+        desc.id = 1;
+        if (abi.goss_session_annotate(session, &desc, null, 0) != .out_of_scope) {
+            std.debug.print("conformance: FAIL a session that tried to widen itself could draw\n", .{});
+            return false;
+        }
+    }
+
+    std.debug.print("conformance: PROOF scope through the real ABI: {d} verbs each named, eight of them withheld one at a time and every gated op answering out of scope rather than unsupported, and a narrowed session that cannot widen itself back\n", .{verb_count});
+    return true;
+}
+
+/// The spatial rail through the real ABI: a room submitted as planes answers which
+/// surface is the floor, where a thing fits and how much of that surface it leaves,
+/// what a measurement's uncertainty is, and what two devices agree on.
+fn proveSpatialRail(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    // A floor, a table half a metre above it, and a wall: the room a placement
+    // question is actually asked about.
+    const flat: [16]f32 = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    const floor_pose = flat;
+    var table_pose = flat;
+    table_pose[13] = 0.75;
+    var wall_pose = flat;
+    wall_pose[13] = 1.2;
+    const planes = [_]abi.WorldPlane{
+        .{ .id = 10, .pose = floor_pose, .extent_x = 4, .extent_z = 4, .classification = 1 },
+        .{ .id = 20, .pose = table_pose, .extent_x = 1.2, .extent_z = 0.8, .classification = 4 },
+        .{ .id = 30, .pose = wall_pose, .extent_x = 3, .extent_z = 2.4, .classification = 2 },
+    };
+    const anchors = [_]abi.WorldAnchor{
+        .{ .id = 1, .pose = flat },
+        .{ .id = 2, .pose = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1 } },
+        .{ .id = 3, .pose = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1 } },
+        .{ .id = 4, .pose = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1 } },
+    };
+    const state: abi.WorldState = .{ .tracking_state = 2, .world_from_camera = flat, .projection = flat, .timestamp_us = 1000 };
+    if (abi.goss_session_submit_world(session, &state, &planes, planes.len, &anchors, anchors.len, null) != .ok) {
+        std.debug.print("conformance: FAIL the spatial rail would not take a room\n", .{});
+        return false;
+    }
+
+    // A named kind, not the platform's number, and the bearing answer that decides
+    // whether a thing can rest there.
+    var kind: u32 = 0;
+    var bearing: u32 = 0;
+    if (abi.goss_session_plane_kind(session, 20, &kind, &bearing) != .ok or kind != 4 or bearing != 1) {
+        std.debug.print("conformance: FAIL the table read back as kind {d}, bearing {d}\n", .{ kind, bearing });
+        return false;
+    }
+    if (abi.goss_session_plane_kind(session, 30, &kind, &bearing) != .ok or bearing != 0) {
+        std.debug.print("conformance: FAIL a wall reads as something a thing can rest on\n", .{});
+        return false;
+    }
+    if (abi.goss_session_plane_kind(session, 99, &kind, &bearing) == .ok) {
+        std.debug.print("conformance: FAIL a plane this session never saw answered anyway\n", .{});
+        return false;
+    }
+
+    var floor_id: u64 = 0;
+    if (abi.goss_session_floor_plane(session, &floor_id) != .ok or floor_id != 10) {
+        std.debug.print("conformance: FAIL the floor read back as {d}\n", .{floor_id});
+        return false;
+    }
+
+    // Where a cup goes. The table and the floor both hold it; the answer that
+    // leaves the most of its surface free comes first, and the wall never does.
+    const cup: abi.Footprint = .{ .width = 0.1, .depth = 0.1, .height = 0.12 };
+    var placements: [8]abi.Placement = undefined;
+    var found: usize = 0;
+    if (abi.goss_session_place_on(session, &cup, null, 0, &placements, placements.len, &found) != .ok) {
+        std.debug.print("conformance: FAIL the placement query refused\n", .{});
+        return false;
+    }
+    if (found < 2) {
+        std.debug.print("conformance: FAIL only {d} surfaces hold a cup in a room with a floor and a table\n", .{found});
+        return false;
+    }
+    for (placements[0..found]) |p| {
+        if (p.plane_id == 30) {
+            std.debug.print("conformance: FAIL a cup was placed on a wall\n", .{});
+            return false;
+        }
+        if (p.free_fraction <= 0 or p.free_fraction > 1) {
+            std.debug.print("conformance: FAIL a placement reports {d} of the surface free\n", .{p.free_fraction});
+            return false;
+        }
+    }
+    if (placements[0].free_fraction < placements[found - 1].free_fraction) {
+        std.debug.print("conformance: FAIL the placements are not ordered by the room they leave\n", .{});
+        return false;
+    }
+
+    // An occupant changes the answer: a table with something already on it has
+    // less of itself free than an empty one.
+    const occupant = [_]abi.Occupant{.{ .plane_id = 20, .x = 0, .z = 0, .width = 0.9, .depth = 0.6 }};
+    var crowded: [8]abi.Placement = undefined;
+    var crowded_count: usize = 0;
+    _ = abi.goss_session_place_on(session, &cup, &occupant, occupant.len, &crowded, crowded.len, &crowded_count);
+    var table_free_before: f32 = 0;
+    var table_free_after: f32 = 0;
+    for (placements[0..found]) |p| {
+        if (p.plane_id == 20) table_free_before = p.free_fraction;
+    }
+    for (crowded[0..crowded_count]) |p| {
+        if (p.plane_id == 20) table_free_after = p.free_fraction;
+    }
+    if (!(table_free_after < table_free_before)) {
+        std.debug.print("conformance: FAIL a table with something on it reports {d} free against {d} empty\n", .{ table_free_after, table_free_before });
+        return false;
+    }
+
+    // A measurement carries its doubt, and a caller who vouched for nothing is
+    // told the number is unvouched rather than handed a sigma of zero.
+    const from = [_]f32{ 0, 0, 0 };
+    const to = [_]f32{ 3, 4, 0 };
+    var metres: f32 = 0;
+    var sigma: f32 = 0;
+    var known: u32 = 0;
+    if (abi.goss_session_measure_between(session, &from, 0.01, &to, 0.02, &metres, &sigma, &known) != .ok) {
+        std.debug.print("conformance: FAIL the measurement refused\n", .{});
+        return false;
+    }
+    if (@abs(metres - 5) > 1e-4 or known != 1 or sigma <= 0) {
+        std.debug.print("conformance: FAIL measured {d} metres, sigma {d}, known {d}\n", .{ metres, sigma, known });
+        return false;
+    }
+    _ = abi.goss_session_measure_between(session, &from, 0, &to, 0.02, &metres, &sigma, &known);
+    if (known != 0) {
+        std.debug.print("conformance: FAIL a measurement nobody vouched for reports itself as known\n", .{});
+        return false;
+    }
+
+    // What crosses to the other device, and the transform back. The second device
+    // stands two metres along x and faces a quarter turn away, so a translation
+    // alone could not fit it.
+    var landmarks: [8]abi.SharedLandmark = undefined;
+    var landmark_count: usize = 0;
+    if (abi.goss_session_shared_landmarks(session, &landmarks, landmarks.len, &landmark_count) != .ok or landmark_count != anchors.len) {
+        std.debug.print("conformance: FAIL {d} landmarks crossed for {d} anchors\n", .{ landmark_count, anchors.len });
+        return false;
+    }
+    var theirs: [8]abi.SharedLandmark = undefined;
+    for (0..landmark_count) |i| {
+        const mine = landmarks[i];
+        theirs[i] = .{ .id = mine.id, .x = mine.z + 2, .y = mine.y, .z = -mine.x, .confidence = 1 };
+    }
+    var transform: [16]f32 = undefined;
+    var rms: f32 = 0;
+    var matched: u32 = 0;
+    if (abi.goss_session_align_shared(session, &theirs, landmark_count, &transform, &rms, &matched) != .ok) {
+        std.debug.print("conformance: FAIL the alignment refused a room both devices saw\n", .{});
+        return false;
+    }
+    if (matched != landmark_count or rms > 1e-3) {
+        std.debug.print("conformance: FAIL aligned {d} of {d} landmarks at {d} metres of residual\n", .{ matched, landmark_count, rms });
+        return false;
+    }
+    // The rotation is in there: a translation-only answer leaves these at identity.
+    if (@abs(transform[0]) > 1e-3 or @abs(transform[8] - 1) > 1e-3 or @abs(transform[12] - 2) > 1e-3) {
+        std.debug.print("conformance: FAIL the transform carries no rotation: {d}, {d}, {d}\n", .{ transform[0], transform[8], transform[12] });
+        return false;
+    }
+
+    // Kept before the next call, which writes both of these again when it refuses.
+    const aligned_over = matched;
+    const aligned_rms = rms;
+    var few: [2]abi.SharedLandmark = .{ theirs[0], theirs[1] };
+    if (abi.goss_session_align_shared(session, &few, few.len, &transform, &rms, &matched) == .ok) {
+        std.debug.print("conformance: FAIL two landmarks were taken as fixing a rigid transform\n", .{});
+        return false;
+    }
+
+    // A route across scanned ground. Two triangles sharing an edge make a strip an
+    // agent can walk, and a point off the mesh is not on it, which is an answer.
+    const mesh_vertices = [_]f32{
+        0, 0, 0,
+        2, 0, 0,
+        0, 0, 2,
+        2, 0, 2,
+    };
+    const mesh_indices = [_]u32{ 0, 1, 2, 1, 3, 2 };
+    if (abi.goss_session_submit_world_mesh(session, &mesh_vertices, mesh_vertices.len / 3, &mesh_indices, mesh_indices.len) != .ok) {
+        std.debug.print("conformance: FAIL the session would not take a world mesh\n", .{});
+        return false;
+    }
+    var route: [64 * 3]f32 = undefined;
+    var route_points: usize = 0;
+    const from_corner = [_]f32{ 0.2, 0, 0.2 };
+    const to_corner = [_]f32{ 1.8, 0, 1.8 };
+    if (abi.goss_session_path_across_world(session, &from_corner, &to_corner, &route, 64, &route_points) != .ok or route_points == 0) {
+        std.debug.print("conformance: FAIL no route across two triangles that share an edge\n", .{});
+        return false;
+    }
+    // Kept before the next call, which leaves the count alone when it refuses.
+    const routed = route_points;
+    const off_mesh = [_]f32{ 50, 0, 50 };
+    if (abi.goss_session_path_across_world(session, &from_corner, &off_mesh, &route, 64, &route_points) == .ok) {
+        std.debug.print("conformance: FAIL a goal off the mesh was routed to anyway\n", .{});
+        return false;
+    }
+
+    // A session narrowed away from the world answers nothing about it, which is
+    // the same rule the record follows for a section out of scope.
+    if (abi.goss_session_set_scope(session, 0, 0) != .ok) {
+        std.debug.print("conformance: FAIL the session would not narrow its scope\n", .{});
+        return false;
+    }
+    if (abi.goss_session_floor_plane(session, &floor_id) != .out_of_scope) {
+        std.debug.print("conformance: FAIL a session with no world in scope named the floor anyway\n", .{});
+        return false;
+    }
+    if (abi.goss_session_align_shared(session, &theirs, landmark_count, &transform, &rms, &matched) != .out_of_scope) {
+        std.debug.print("conformance: FAIL a session with no world in scope aligned anyway\n", .{});
+        return false;
+    }
+
+    std.debug.print(
+        "conformance: PROOF the spatial rail through the real ABI: the floor named, a cup on {d} surfaces ordered by the room each leaves ({d:.3} of the table free, {d:.3} with something on it), 5m measured at {d:.3} sigma and refused as unvouched, two devices a quarter turn apart aligned over {d} landmarks at {d:.5}m, a {d}-point route across scanned ground, and every answer refused once the world left the session's scope\n",
+        .{ found, table_free_before, table_free_after, sigma, aligned_over, aligned_rms, routed },
+    );
+    return true;
+}
+
+/// Screens through the real ABI. Where permission is granted this captures for
+/// real; where it is not, zero surfaces is the answer and the proof says so,
+/// because permission is the host's to give. The coordinate arithmetic is
+/// asserted either way: a point in the wrong place is wrong on every host.
+fn proveScreenSource(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    var count: u32 = 0;
+    const status = abi.goss_engine_screen_count(engine, &count);
+    if (status == .unsupported) {
+        std.debug.print("conformance: screens skipped - no screen capture on this target\n", .{});
+        return true;
+    }
+    if (status != .ok) {
+        std.debug.print("conformance: FAIL enumerating screens answered {t}\n", .{status});
+        return false;
+    }
+
+    // Every surface must carry a usable geometry, whatever it is. A zero scale or
+    // a zero extent is a surface nothing can map a coordinate onto.
+    for (0..count) |i| {
+        var surface: abi.ScreenSurface = undefined;
+        if (abi.goss_engine_screen_at(engine, @intCast(i), &surface) != .ok) {
+            std.debug.print("conformance: FAIL surface {d} would not read back\n", .{i});
+            return false;
+        }
+        if (surface.scale <= 0 or surface.logical_width <= 0 or surface.logical_height <= 0) {
+            std.debug.print("conformance: FAIL surface {d} reports scale {d} and {d}x{d}\n", .{ i, surface.scale, surface.logical_width, surface.logical_height });
+            return false;
+        }
+        var needed: usize = 0;
+        if (abi.goss_engine_screen_title(engine, @intCast(i), null, 0, &needed) != .ok and needed == 0) {
+            std.debug.print("conformance: FAIL surface {d} would not size its title\n", .{i});
+            return false;
+        }
+    }
+
+    if (count == 0) {
+        std.debug.print("conformance: PROOF screen enumeration answers zero surfaces where permission has not been granted, rather than an error a caller cannot act on\n", .{});
+        return true;
+    }
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    var first: abi.ScreenSurface = undefined;
+    _ = abi.goss_engine_screen_at(engine, 0, &first);
+    var screen: u32 = 0;
+    if (abi.goss_session_open_screen(session, first.id, 0, &screen) != .ok) {
+        std.debug.print("conformance: PROOF screen enumeration answers {d} surfaces, each with a usable geometry; opening one is the host's to permit\n", .{count});
+        return true;
+    }
+    defer _ = abi.goss_session_close_screen(session, screen);
+
+    // The centre of the frame must land at the centre of the surface, in logical
+    // points, in backing pixels, and on the desktop. The scale factor is the
+    // difference between pressing a button and pressing what is at half its place.
+    var logical: [2]f32 = undefined;
+    var pixel: [2]f32 = undefined;
+    var desktop: [2]f32 = undefined;
+    if (abi.goss_session_screen_point(session, screen, 0.5, 0.5, &logical, &pixel, &desktop) != .ok) {
+        std.debug.print("conformance: FAIL a screen point would not resolve\n", .{});
+        return false;
+    }
+    const want_logical_x = first.logical_width * 0.5;
+    if (@abs(logical[0] - want_logical_x) > 0.5) {
+        std.debug.print("conformance: FAIL the centre landed at {d} logical where the surface is {d} wide\n", .{ logical[0], first.logical_width });
+        return false;
+    }
+    if (@abs(pixel[0] - want_logical_x * first.scale) > 1.0) {
+        std.debug.print("conformance: FAIL the centre landed at {d} pixels at scale {d}\n", .{ pixel[0], first.scale });
+        return false;
+    }
+    if (@abs(desktop[0] - (first.origin_x + want_logical_x)) > 0.5) {
+        std.debug.print("conformance: FAIL the centre landed at {d} on the desktop where the surface starts at {d}\n", .{ desktop[0], first.origin_x });
+        return false;
+    }
+
+    // A step either submits a frame or says nothing changed; both are answers, and
+    // a failure is neither.
+    var frames: usize = 0;
+    var unchanged: usize = 0;
+    for (0..30) |_| {
+        switch (abi.goss_session_step_screen(session, screen, null, 0)) {
+            .ok => frames += 1,
+            .again => unchanged += 1,
+            else => |bad| {
+                std.debug.print("conformance: FAIL stepping a screen answered {t}\n", .{bad});
+                return false;
+            },
+        }
+    }
+
+    std.debug.print(
+        "conformance: PROOF a screen is a source through the real ABI: {d} surfaces, the frame centre landing at {d} logical, {d} pixels at scale {d} and {d} on the desktop, and {d} frames with {d} steps reporting no change\n",
+        .{ count, logical[0], pixel[0], first.scale, desktop[0], frames, unchanged },
+    );
+    return true;
+}
+
 /// Writes a lens bundle whose ml.infer node runs a bundled author model, the
 /// way an author ships one. It binds the segmenter mask center (256x256, so
 /// 128*256+128 - foreground on a centered portrait, background on a blank frame)
@@ -3958,11 +4881,20 @@ fn writeMlInferLens(dir: []const u8, model: []const u8) !void {
     try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
 }
 
+/// How long a worker may take to publish its first value before the proof calls it
+/// stalled: a bound to catch one that never publishes, not a speed claim. It depends on
+/// the build mode because this suite runs at Debug, where folding and planning a large
+/// graph costs minutes, and one bound for both modes failed honest work.
+const ml_infer_timeout_ns: u64 = if (@import("builtin").mode == .Debug)
+    600 * std.time.ns_per_s
+else
+    120 * std.time.ns_per_s;
+
 /// Activates the byo-ml bundle on a fresh session, feeds it one frame, and
 /// returns the parameter the model drove. Waits on the async worker's first
 /// publish by watching the sentinel default flip to a real value, which is
 /// magnitude-independent so it never races the inference result.
-fn runMlInferOnce(engine: *abi.Engine, bundle_path: []const u8, param: []const u8, sentinel: f32, planes: Nv12Copy) !f32 {
+fn runMlInferOnce(engine: *abi.Engine, bundle_path: []const u8, param: []const u8, sentinel: f32, planes: Nv12Copy, expect_plan: bool) !f32 {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
     defer settle(engine);
@@ -3975,16 +4907,35 @@ fn runMlInferOnce(engine: *abi.Engine, bundle_path: []const u8, param: []const u
     const signals = std.mem.zeroes(abi.LensSignals);
     var value: f32 = sentinel;
     var polls: usize = 0;
+    const started = std.Io.Timestamp.now(harness_io, .awake);
     while (value == sentinel) {
         if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
             return error.MlTrackFrameFailed;
         }
-        std.Thread.yield() catch {};
+        // A real sleep, not a yield: the model loads and infers on its own thread, and
+        // a loop spinning at frame rate starves it. A yield said "after everyone", which
+        // made these figures measure the host's load rather than the engine.
+        std.Io.sleep(harness_io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
         _ = abi.goss_session_tick_lens(session, 16000, &signals);
         _ = abi.goss_session_parameter_value(session, param.ptr, param.len, &value);
         polls += 1;
-        if (polls > 100_000_000) return error.MlInferTimedOut;
+        // A wall clock rather than a poll count: a worker that never publishes spins
+        // uncountably long otherwise, which is not a timeout anybody sees. Checked every
+        // poll because a poll is a millisecond now: checking every five hundred and
+        // twelfth let a timeout overshoot its bound by seconds and still pass.
+        const waited = started.durationTo(std.Io.Timestamp.now(harness_io, .awake)).nanoseconds;
+        if (waited > ml_infer_timeout_ns) return error.MlInferTimedOut;
     }
+    // The rail that just published has to be able to say what it costs, while
+    // the session is still up: a plan a host cannot read is one nobody can meter.
+    var report: abi.SessionReport = undefined;
+    if (abi.goss_session_read_report(session, &report) != .ok) return error.MlReportFailed;
+    if (expect_plan and report.ml_plan_bytes == 0) return error.MlPlanUnreported;
+    // One correction is the design: the measuring walk sees how many bytes are
+    // live at once, not how the pool will fragment serving them, so the first
+    // real frame may spill once and size the plan for every frame after. A rail
+    // that grows twice is not settling, and that is what this refuses.
+    if (report.ml_plan_growths > 1) return error.MlPlanKeepsGrowing;
     return value;
 }
 
@@ -4011,9 +4962,9 @@ fn proveMlInfer(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const gray = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = gray_rgba }, .width = corpus.frame.width, .height = corpus.frame.height });
     defer gray.deinit(gpa);
 
-    const person_a = try runMlInferOnce(engine, "zig-out/ml-infer-lens", "score", -999.0, person);
-    const person_b = try runMlInferOnce(engine, "zig-out/ml-infer-lens", "score", -999.0, person);
-    const gray_score = try runMlInferOnce(engine, "zig-out/ml-infer-lens", "score", -999.0, gray);
+    const person_a = try runMlInferOnce(engine, "zig-out/ml-infer-lens", "score", -999.0, person, false);
+    const person_b = try runMlInferOnce(engine, "zig-out/ml-infer-lens", "score", -999.0, person, false);
+    const gray_score = try runMlInferOnce(engine, "zig-out/ml-infer-lens", "score", -999.0, gray, false);
 
     if (!std.math.isFinite(person_a) or !std.math.isFinite(gray_score)) {
         std.debug.print("conformance: FAIL the byo model published a non-finite value\n", .{});
@@ -4660,14 +5611,18 @@ fn onnxLerpModel(a: std.mem.Allocator, side: i64) []const u8 {
     return model.buf.items;
 }
 
-fn writeOnnxLens(dir: []const u8, model: []const u8) !void {
-    const manifest_json =
-        \\{"glf":"1.0","id":"goss.reference.ml-infer-onnx","version":"1.0.0","display_name":"BYO ONNX","engine_compat":">=0.5","capabilities":[],
-        \\ "parameters":[{"name":"score","type":"float","default":-999.0,"min":-1000000.0,"max":1000000.0}],
-        \\ "nodes":[{"id":"byo","type":"ml.infer","params":{},
-        \\   "ml":{"model":"model.onnx","outputs":[{"tensor":0,"index":0,"param":"score"}]}}],
-        \\ "triggers":[]}
-    ;
+/// A lens whose ml.infer node runs a bundled ONNX net. The declared side is
+/// what a model with symbolic spatial dims needs, and the manifest field for it
+/// was parsed and ignored until this wave; zero leaves the model's own shape.
+fn writeOnnxLens(dir: []const u8, model: []const u8, side: u32, tensor: u32, index: u32, range: []const u8) !void {
+    const manifest_json = try std.fmt.allocPrint(std.heap.page_allocator,
+        \\{{"glf":"1.0","id":"goss.reference.ml-infer-onnx","version":"1.0.0","display_name":"BYO ONNX","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{{"name":"score","type":"float","default":-999.0,"min":-1000000.0,"max":1000000.0}}],
+        \\ "nodes":[{{"id":"byo","type":"ml.infer","params":{{}},
+        \\   "ml":{{"model":"model.onnx","input_width":{d},"input_height":{d},"input_range":"{s}","outputs":[{{"tensor":{d},"index":{d},"param":"score"}}]}}}}],
+        \\ "triggers":[]}}
+    , .{ side, side, range, tensor, index });
+    defer std.heap.page_allocator.free(manifest_json);
     const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
     defer std.heap.page_allocator.free(manifest_path);
     try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
@@ -4685,7 +5640,7 @@ fn proveMlInferOnnx(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     defer arena.deinit();
     const model = buildOnnxProbe(arena.allocator());
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-infer-onnx/assets");
-    try writeOnnxLens("zig-out/ml-infer-onnx", model);
+    try writeOnnxLens("zig-out/ml-infer-onnx", model, 0, 0, 0, "unit");
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -4698,9 +5653,9 @@ fn proveMlInferOnnx(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const gray = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = gray_rgba }, .width = corpus.frame.width, .height = corpus.frame.height });
     defer gray.deinit(gpa);
 
-    const person_a = try runMlInferOnce(engine, "zig-out/ml-infer-onnx", "score", -999.0, person);
-    const person_b = try runMlInferOnce(engine, "zig-out/ml-infer-onnx", "score", -999.0, person);
-    const gray_score = try runMlInferOnce(engine, "zig-out/ml-infer-onnx", "score", -999.0, gray);
+    const person_a = try runMlInferOnce(engine, "zig-out/ml-infer-onnx", "score", -999.0, person, true);
+    const person_b = try runMlInferOnce(engine, "zig-out/ml-infer-onnx", "score", -999.0, person, true);
+    const gray_score = try runMlInferOnce(engine, "zig-out/ml-infer-onnx", "score", -999.0, gray, true);
 
     if (!std.math.isFinite(person_a) or !std.math.isFinite(gray_score)) {
         std.debug.print("conformance: FAIL the onnx model published a non-finite value\n", .{});
@@ -4757,9 +5712,9 @@ fn proveMlInputContract(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const person = try rgbaToNv12(gpa, corpus.frame);
     defer person.deinit(gpa);
 
-    const unit = try runMlInferOnce(engine, "zig-out/ml-contract-unit", "score", -999.0, person);
-    const sym = try runMlInferOnce(engine, "zig-out/ml-contract-sym", "score", -999.0, person);
-    const scaled = try runMlInferOnce(engine, "zig-out/ml-contract-std", "score", -999.0, person);
+    const unit = try runMlInferOnce(engine, "zig-out/ml-contract-unit", "score", -999.0, person, true);
+    const sym = try runMlInferOnce(engine, "zig-out/ml-contract-sym", "score", -999.0, person, true);
+    const scaled = try runMlInferOnce(engine, "zig-out/ml-contract-std", "score", -999.0, person, true);
     if (!std.math.isFinite(unit) or !std.math.isFinite(sym) or !std.math.isFinite(scaled)) {
         std.debug.print("conformance: FAIL an input contract produced a non-finite score\n", .{});
         return false;
@@ -4825,8 +5780,10 @@ fn proveMlHostRail(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
             polls += 1;
             if (polls > 100_000_000) return error.MlInferTimedOut;
         }
-        // The sizing call reports the tensor's element count, then the full
-        // read hands back the same number the parameter binding published.
+        // The sizing call reports the tensor's element count and refuses the short
+        // buffer, which is what every sizing op on this surface does. This proof was
+        // right and the op had drifted to `again`; nothing noticed because the proof
+        // before it failed first.
         var out_len: usize = 0;
         if (abi.goss_session_ml_output(session, "byo", "byo".len, 0, null, 0, &out_len) != .invalid_argument or out_len != 1) {
             std.debug.print("conformance: FAIL the ml output sizing call ({d})\n", .{out_len});
@@ -5135,6 +6092,102 @@ fn writeOnnxClsLens(dir: []const u8, model: []const u8) !void {
     try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
 }
 
+/// The detector lens: the same ml.infer node, with the detect block naming which of
+/// the four tensors holds what, at the range this export wants.
+fn writeOnnxDetectLens(dir: []const u8, model: []const u8) !void {
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-detect","version":"1.0.0","display_name":"BYO Detector","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"score","type":"float","default":-1.0,"min":-1.0,"max":1.0}],
+        \\ "nodes":[{"id":"det","type":"ml.infer","params":{},
+        \\   "ml":{"model":"model.onnx","input_width":300,"input_height":300,"input_range":"byte",
+        \\         "detect":{"boxes":0,"scores":2,"classes":1,"count":3,"threshold":0.5},
+        \\         "outputs":[{"tensor":2,"index":0,"param":"score"}]}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/model.onnx", .{dir});
+    defer std.heap.page_allocator.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Proves what an agent actually asks the engine: a published detector finds the
+/// person in a photograph, and the answer reaches the record as a box with a label
+/// and a score rather than as one number bound to one parameter. The input range is
+/// the whole point: the same model fed zero to one finds nothing at all.
+fn proveDetectionRail(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const model = std.Io.Dir.cwd().readFileAlloc(harness_io, ".models/ssd_mobilenet-int8.onnx", gpa, .limited(512 << 20)) catch {
+        std.debug.print("conformance: detection rail skipped - the detector is not fetched on this host\n", .{});
+        return true;
+    };
+    defer gpa.free(model);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-detect/assets");
+    try writeOnnxDetectLens("zig-out/ml-detect", model);
+
+    const corpus = try loadCorpusFrame(gpa, body_corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, "zig-out/ml-detect", "zig-out/ml-detect".len) != .ok) {
+        std.debug.print("conformance: FAIL the detector lens would not activate\n", .{});
+        return false;
+    }
+
+    const desc: abi.FrameDesc = .{ .width = person.width, .height = person.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (person.width + 1) / 2;
+    const signals = std.mem.zeroes(abi.LensSignals);
+    var score: f32 = -1.0;
+    var polls: usize = 0;
+    const started = std.Io.Timestamp.now(harness_io, .awake);
+    while (score <= 0) {
+        if (abi.goss_session_track_frame(session, &desc, person.y.ptr, person.width, person.uv.ptr, half_w * 2) != .ok) return error.MlTrackFrameFailed;
+        std.Io.sleep(harness_io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+        _ = abi.goss_session_parameter_value(session, "score", "score".len, &score);
+        polls += 1;
+        // Every poll, because a poll is a millisecond now: checking every five
+        // hundred and twelve meant a timeout could overshoot its bound by seconds,
+        // and one of these figures came in above the bound and still passed.
+        const waited = started.durationTo(std.Io.Timestamp.now(harness_io, .awake)).nanoseconds;
+        if (waited > ml_infer_timeout_ns) return error.MlInferTimedOut;
+    }
+
+    // The record, which is where an agent reads it. A box inside the frame with a
+    // label and a score it can act on, not a byte count.
+    var needed: usize = 0;
+    const select = abi.goss_perception_select_all();
+    _ = abi.goss_session_perception_json(session, select, null, 0, &needed);
+    const buffer = try gpa.alloc(u8, needed);
+    defer gpa.free(buffer);
+    if (abi.goss_session_perception_json(session, select, buffer.ptr, buffer.len, &needed) != .ok) {
+        std.debug.print("conformance: FAIL the record would not project\n", .{});
+        return false;
+    }
+    const text = buffer[0..@min(needed, buffer.len)];
+    if (std.mem.indexOf(u8, text, "\"detections\"") == null) {
+        std.debug.print("conformance: FAIL the record carries no detections section\n", .{});
+        return false;
+    }
+    if (std.mem.indexOf(u8, text, "\"count\":0") != null and std.mem.indexOf(u8, text, "\"label\"") == null) {
+        std.debug.print("conformance: FAIL the detector found nothing in a photograph of a person\n", .{});
+        return false;
+    }
+    if (std.mem.indexOf(u8, text, "\"label\"") == null) {
+        std.debug.print("conformance: FAIL the record names no detection\n", .{});
+        return false;
+    }
+    std.debug.print(
+        "conformance: PROOF a published detector finds the person in a photograph and the record carries the box, its label and its score, at the input range the export wants ({d:.2} top score)\n",
+        .{score},
+    );
+    return true;
+}
+
 /// Proves the classification slot: an argmax reduce reads a classifier's
 /// predicted class into a parameter. Two models built to favour different
 /// classes each drive the parameter to their own class, so the label tracks the
@@ -5152,7 +6205,7 @@ fn proveMlInferCls(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-cls/assets");
         try writeOnnxClsLens("zig-out/ml-cls", model);
 
-        const label = try runMlInferOnce(engine, "zig-out/ml-cls", "label", -1.0, person);
+        const label = try runMlInferOnce(engine, "zig-out/ml-cls", "label", -1.0, person, true);
         if (@as(usize, @intFromFloat(label)) != winner) {
             std.debug.print("conformance: FAIL argmax reduce read class {d}, wanted {d}\n", .{ label, winner });
             return false;
@@ -7040,7 +8093,7 @@ fn gazeFace() abi.FaceResult {
     var synthetic = std.mem.zeroes(abi.FaceResult);
     synthetic.presence = 1.0;
     const lm_count = synthetic.landmarks.len / 3;
-    synthetic.landmark_count_out = @intCast(lm_count);
+    synthetic.landmark_count = @intCast(lm_count);
     const cxp: f32 = @as(f32, @floatFromInt(width)) / 2.0;
     const cyp: f32 = @as(f32, @floatFromInt(height)) / 2.0;
     for (0..lm_count) |lm| {
@@ -7189,7 +8242,7 @@ fn proveAutoFrame(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     var synthetic = std.mem.zeroes(abi.FaceResult);
     synthetic.presence = 1.0;
     const lm_count = synthetic.landmarks.len / 3;
-    synthetic.landmark_count_out = @intCast(lm_count);
+    synthetic.landmark_count = @intCast(lm_count);
     for (0..lm_count) |lm| {
         const ang = @as(f32, @floatFromInt(lm)) / @as(f32, @floatFromInt(lm_count)) * std.math.tau;
         synthetic.landmarks[lm * 3 + 0] = @as(f32, @floatCast(dot_x)) + 38.0 * @cos(ang);
@@ -8162,6 +9215,9 @@ fn writeDiffusionLens(spec: DiffusionLensSpec) !void {
     const target_node = if (spec.target_mesh)
         "{\"id\":\"canvas\",\"type\":\"mesh.face\",\"inputs\":{\"frame\":\"camera\"},\"params\":{}}"
     else if (spec.target_material)
+        // Optional on purpose: this fixture writes its manifest by hand and ships
+        // no compiled shader for the pass, which a packaged lens would carry. The
+        // generative node drives the material, so the lens draws without it.
         "{\"id\":\"canvas\",\"type\":\"shader.pass\",\"optional\":true,\"inputs\":{\"frame\":\"camera\"},\"params\":{},\"material\":{\"output\":3,\"nodes\":[{\"kind\":\"uv\"},{\"kind\":\"texture\",\"name\":\"generated\"},{\"kind\":\"sample\",\"inputs\":[1,0]},{\"kind\":\"output\",\"inputs\":[2]}]}}"
     else
         try std.fmt.allocPrint(page, "{{\"id\":\"canvas\",\"type\":\"sprite.2d\",\"optional\":true,\"inputs\":{{\"frame\":\"camera\"}},\"params\":{{}}, \"sprite\":{{\"x\":0.0,\"y\":0.0,\"w\":1.0,\"h\":1.0{s}}}}}", .{mask_field});
@@ -12542,6 +13598,296 @@ fn paintSweepFrame(rgba: []u8, w: u32, h: u32, i: u32, n: u32) void {
     }
 }
 
+/// The CPU reference conversion and the GPU's agree within a stated tolerance, for
+/// every standard and range pair the camera path accepts. This checks the uniform
+/// plumbing, not the arithmetic: a matrix transposed on its way into the shader
+/// converts every frame wrong and a test of the matrix alone would not notice.
+fn proveColorMatchesOnBothPaths(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const w: u32 = 64;
+    const h: u32 = 64;
+    const cases = [_]struct { name: []const u8, standard: u32, range: u32, info: abi.media.ColorInfo }{
+        .{ .name = "bt709 video", .standard = 1, .range = 0, .info = .{ .matrix = .bt709, .range = .video } },
+        .{ .name = "bt709 full", .standard = 1, .range = 1, .info = .{ .matrix = .bt709, .range = .full } },
+        .{ .name = "bt601 video", .standard = 0, .range = 0, .info = .{ .matrix = .bt601, .range = .video } },
+        .{ .name = "bt601 full", .standard = 0, .range = 1, .info = .{ .matrix = .bt601, .range = .full } },
+    };
+    // Eight bits of chroma tolerance: the GPU filters a half-resolution plane
+    // where the reference reads the exact sample, so a flat field is comparable
+    // and a gradient is not. The fields below are flat per tile for that reason,
+    // and the number is stated rather than tuned until it passed.
+    const tolerance: u8 = 8;
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const y_plane = try gpa.alloc(u8, @as(usize, w) * h);
+    defer gpa.free(y_plane);
+    const uv_plane = try gpa.alloc(u8, @as(usize, w) * h / 2);
+    defer gpa.free(uv_plane);
+    // The composited frame is the renderer's size, not this 64 by 64 submission, so the
+    // buffer is grown to whatever the engine says it will write. Sized from w and h it
+    // was refused for being short, and the proof read that as a frame it could not read.
+    var read_back = try gpa.alloc(u8, @as(usize, w) * h * 4);
+    defer gpa.free(read_back);
+
+    for (cases) |case| {
+        // One flat field per case, off-neutral so the chroma terms actually
+        // contribute: a grey field would pass under a wrong matrix.
+        const y: u8 = 140;
+        const cb: u8 = 90;
+        const cr: u8 = 180;
+        @memset(y_plane, y);
+        var i: usize = 0;
+        while (i < uv_plane.len) : (i += 2) {
+            uv_plane[i] = cb;
+            uv_plane[i + 1] = cr;
+        }
+
+        const desc: abi.FrameDesc = .{
+            .width = w,
+            .height = h,
+            .pixel_format = 0,
+            .color_standard = case.standard,
+            .color_range = case.range,
+            .flags = 0,
+            .timestamp_us = 33_333,
+        };
+        if (abi.goss_session_submit_frame_copy(session, &desc, y_plane.ptr, w, uv_plane.ptr, w) != .ok) {
+            std.debug.print("conformance: FAIL the colour proof could not submit {s}\n", .{case.name});
+            return false;
+        }
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+
+        var out_w: u32 = 0;
+        var out_h: u32 = 0;
+        // The op reports the size it will write before it checks the capacity, so one
+        // short call is how a caller learns what to allocate.
+        _ = abi.goss_engine_capture_live_frame(engine, session, 4, read_back.ptr, 0, &out_w, &out_h);
+        const needed = @as(usize, out_w) * out_h * 4;
+        if (needed > read_back.len) read_back = try gpa.realloc(read_back, needed);
+        const read_status = abi.goss_engine_capture_live_frame(engine, session, 4, read_back.ptr, read_back.len, &out_w, &out_h);
+        if (read_status != .ok) {
+            std.debug.print("conformance: FAIL the colour proof could not read the composited {d}x{d} frame for {s}: {t}\n", .{ out_w, out_h, case.name, read_status });
+            return false;
+        }
+
+        const want = abi.media.yuvToRgb8(case.info, y, cb, cr);
+        // Sample the middle, away from any edge the sampler clamps differently.
+        const at = ((@as(usize, out_h) / 2) * out_w + out_w / 2) * 4;
+        if (at + 3 >= read_back.len) return false;
+        const got = [3]u8{ read_back[at], read_back[at + 1], read_back[at + 2] };
+        var worst: u8 = 0;
+        for (0..3) |ch| {
+            const d = if (got[ch] > want[ch]) got[ch] - want[ch] else want[ch] - got[ch];
+            if (d > worst) worst = d;
+        }
+        if (worst > tolerance) {
+            std.debug.print("conformance: FAIL {s} differs by {d}: gpu {d},{d},{d} against cpu {d},{d},{d}\n", .{ case.name, worst, got[0], got[1], got[2], want[0], want[1], want[2] });
+            return false;
+        }
+    }
+
+    std.debug.print("conformance: PROOF the cpu and gpu colour paths agree within {d} of each other across bt601 and bt709 in both ranges\n", .{tolerance});
+    return true;
+}
+
+/// A clip drives the graph with no camera. This is what "video" in the North Star
+/// meant and did not do: before the clip source existed the engine opened the file
+/// itself, drew it as a sprite at an authored rect, and clocked it off a camera
+/// frame, so nothing rendered without a camera at all.
+fn proveClipDrivesTheGraph(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const path = "/tmp/goss-clip-source.mp4";
+    defer std.Io.Dir.cwd().deleteFile(harness_io, path) catch {}; // failure ignored: a leftover fixture the next run overwrites
+    if (!try encodeVideoFixture(gpa, engine, path)) {
+        std.debug.print("conformance: FAIL the clip proof could not encode its fixture\n", .{});
+        return false;
+    }
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    const activated = abi.goss_session_activate_lens_from_directory(session, ".lens-packages/shader-tint", ".lens-packages/shader-tint".len);
+    if (activated != .ok) {
+        std.debug.print("conformance: FAIL the clip proof could not activate shader-tint: {t}\n", .{activated});
+        return false;
+    }
+
+    var clip: u32 = 0;
+    const opened = abi.goss_session_open_clip(session, path.ptr, path.len, &clip);
+    if (opened != .ok) {
+        std.debug.print("conformance: FAIL a clip did not open as a source: {t}\n", .{opened});
+        return false;
+    }
+    defer _ = abi.goss_session_close_clip(session, clip);
+
+    var info: abi.ClipInfo = undefined;
+    if (abi.goss_session_clip_info(session, clip, &info) != .ok) return false;
+    if (info.width == 0 or info.height == 0 or info.duration_us <= 0) {
+        std.debug.print("conformance: FAIL a clip reported {d}x{d} over {d}us\n", .{ info.width, info.height, info.duration_us });
+        return false;
+    }
+
+    // No camera frame is ever submitted: every frame the graph draws comes from
+    // the clip, which is the whole claim.
+    var drawn: u32 = 0;
+    var last_position: i64 = -1;
+    var advanced = false;
+    while (drawn < 12) : (drawn += 1) {
+        const submitted = abi.goss_session_clip_submit_frame(session, clip, 0);
+        if (submitted == .again) break;
+        if (submitted != .ok) {
+            std.debug.print("conformance: FAIL a clip frame did not submit: {t}\n", .{submitted});
+            return false;
+        }
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (abi.goss_session_clip_info(session, clip, &info) != .ok) return false;
+        if (info.position_us > last_position) advanced = true;
+        last_position = info.position_us;
+    }
+    if (drawn < 8) {
+        std.debug.print("conformance: FAIL only {d} clip frames drove the graph\n", .{drawn});
+        return false;
+    }
+    if (!advanced) {
+        std.debug.print("conformance: FAIL the clip position never moved, so the frames carried no time\n", .{});
+        return false;
+    }
+
+    // A seek moves the position and reopens an ended stream, and a seek past the
+    // end is refused rather than clamped, which is what lets a scrubber trust it.
+    const midpoint = @divTrunc(info.duration_us, 2);
+    if (abi.goss_session_clip_seek(session, clip, midpoint) != .ok) {
+        std.debug.print("conformance: FAIL a clip would not seek to its own midpoint\n", .{});
+        return false;
+    }
+    if (abi.goss_session_clip_seek(session, clip, info.duration_us * 4) == .ok) {
+        std.debug.print("conformance: FAIL a seek past the end was accepted, so it was clamped\n", .{});
+        return false;
+    }
+    if (abi.goss_session_clip_submit_frame(session, clip, 0) != .ok) {
+        std.debug.print("conformance: FAIL no frame came out after a seek\n", .{});
+        return false;
+    }
+    _ = abi.goss_engine_render_frame(engine, session);
+    c.glfwPollEvents();
+
+    std.debug.print("conformance: PROOF a clip drives the graph with no camera: {d} frames at {d}x{d} over {d}us, the position advances, a seek lands and a seek past the end is refused rather than clamped\n", .{ drawn, info.width, info.height, info.duration_us });
+    return true;
+}
+
+/// A recording that pauses and resumes is one continuous file, not one with a hole
+/// the length of the pause. The report is what lets a host see it: the duration
+/// excludes the paused span, the clip count follows the pause, and a declared
+/// interruption is not counted as drift the engine caused.
+fn provePauseLeavesNoGap(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const path = "/tmp/goss-pause-proof.mp4";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    defer std.Io.Dir.cwd().deleteFile(harness_io, path) catch {}; // failure ignored: a leftover fixture the next run overwrites
+    const activated = abi.goss_session_activate_lens_from_directory(session, ".lens-packages/shader-tint", ".lens-packages/shader-tint".len);
+    if (activated != .ok) {
+        std.debug.print("conformance: FAIL the pause proof could not activate shader-tint: {t}\n", .{activated});
+        return false;
+    }
+    const started = abi.goss_engine_recording_start(engine, session, path.ptr, path.len, null);
+    if (started != .ok) {
+        std.debug.print("conformance: FAIL the pause proof could not start recording: {t}\n", .{started});
+        return false;
+    }
+
+    const w: u32 = 400;
+    const h: u32 = 300;
+    const rgba = try gpa.alloc(u8, @as(usize, w) * h * 4);
+    defer gpa.free(rgba);
+    const before: u32 = 20;
+    const after: u32 = 20;
+    // Ten seconds of wall clock pass while paused, which is the gap a file without
+    // a held clock would carry for the rest of its length.
+    const pause_us: i64 = 10_000_000;
+
+    var i: u32 = 0;
+    while (i < before) : (i += 1) {
+        if (!try submitSweep(gpa, engine, session, rgba, w, h, i, before + after, @as(i64, i + 1) * 33_333)) return false;
+    }
+    const pause_status = abi.goss_engine_recording_pause(engine);
+    if (pause_status != .ok) {
+        std.debug.print("conformance: FAIL the pause proof could not pause: {t}\n", .{pause_status});
+        return false;
+    }
+    var paused_report: abi.RecordingReport = undefined;
+    if (abi.goss_engine_recording_read_report(engine, &paused_report) != .ok) {
+        std.debug.print("conformance: FAIL the pause proof could not read the paused report\n", .{});
+        return false;
+    }
+    if (paused_report.paused == 0 or paused_report.clips != 2) {
+        std.debug.print("conformance: FAIL a paused recording reports paused {d} clips {d}, wanted 1 and 2\n", .{ paused_report.paused, paused_report.clips });
+        return false;
+    }
+    const duration_at_pause = paused_report.duration_us;
+
+    const resume_status = abi.goss_engine_recording_resume(engine);
+    if (resume_status != .ok) {
+        std.debug.print("conformance: FAIL the pause proof could not resume: {t}\n", .{resume_status});
+        return false;
+    }
+    i = 0;
+    while (i < after) : (i += 1) {
+        const stamp = pause_us + @as(i64, before + i + 1) * 33_333;
+        if (!try submitSweep(gpa, engine, session, rgba, w, h, before + i, before + after, stamp)) return false;
+    }
+    const report_status = abi.goss_session_report_interruption(session, 1);
+    if (report_status != .ok) {
+        std.debug.print("conformance: FAIL the pause proof could not report an interruption: {t}\n", .{report_status});
+        return false;
+    }
+
+    var report: abi.RecordingReport = undefined;
+    if (abi.goss_engine_recording_read_report(engine, &report) != .ok) {
+        std.debug.print("conformance: FAIL the pause proof could not read the final report\n", .{});
+        return false;
+    }
+    const stop_status = abi.goss_engine_recording_stop(engine);
+    if (stop_status != .ok) {
+        std.debug.print("conformance: FAIL the pause proof could not stop the recording: {t}\n", .{stop_status});
+        return false;
+    }
+
+    // The output grew by the frames after the pause, not by the pause itself.
+    const grew = report.duration_us - duration_at_pause;
+    if (grew >= pause_us) {
+        std.debug.print("conformance: FAIL the output grew {d}us across a {d}us pause, so the clock was not held\n", .{ grew, pause_us });
+        return false;
+    }
+    if (report.drift_us >= pause_us) {
+        std.debug.print("conformance: FAIL the pause was counted as {d}us of drift\n", .{report.drift_us});
+        return false;
+    }
+    if (report.interruptions != 2 or report.paused != 0) {
+        std.debug.print("conformance: FAIL the report says {d} interruptions and paused {d}, wanted 2 and 0\n", .{ report.interruptions, report.paused });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a pause and resume leaves no gap: {d}us of output across a {d}us pause, {d} clips, {d}us of measured drift, and a declared break is not counted as drift\n", .{ report.duration_us, pause_us, report.clips, report.drift_us });
+    return true;
+}
+
+/// One sweeping frame into the recording rail, the submit the fixture encoder and
+/// the pause proof share.
+fn submitSweep(gpa: std.mem.Allocator, engine: *abi.Engine, session: *abi.Session, rgba: []u8, w: u32, h: u32, index: u32, total: u32, stamp_us: i64) !bool {
+    paintSweepFrame(rgba, w, h, index, total);
+    const planes = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = rgba }, .width = w, .height = h });
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = stamp_us };
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return false;
+    _ = abi.goss_engine_render_frame(engine, session);
+    c.glfwPollEvents();
+    return true;
+}
+
 /// Encodes a short deterministic clip through the recording rail so the
 /// video-texture proof has a real MP4 to decode back. The sweeping band
 /// makes each frame distinct, so playback advancing is observable.
@@ -15140,7 +16486,7 @@ fn proveReshapeBody(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 
     var body = std.mem.zeroes(abi.PoseResult);
     body.presence = 1.0;
-    body.landmark_count_out = 33;
+    body.landmark_count = 33;
     body.timestamp_us = 1000;
     setPoseLm(&body, 11, 0.40, 0.30);
     setPoseLm(&body, 12, 0.60, 0.30);
@@ -15558,7 +16904,7 @@ fn proveFaceTransform(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     var synthetic = std.mem.zeroes(abi.FaceResult);
     synthetic.presence = 1.0;
     const lm_count = synthetic.landmarks.len / 3;
-    synthetic.landmark_count_out = @intCast(lm_count);
+    synthetic.landmark_count = @intCast(lm_count);
     const cxp: f32 = @as(f32, @floatFromInt(width)) / 2.0;
     const cyp: f32 = @as(f32, @floatFromInt(height)) / 2.0;
     const face_r: f32 = 110.0;
@@ -20723,7 +22069,7 @@ fn proveHeadReenact(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const jaw_open = 25;
     var closed = std.mem.zeroes(abi.FaceResult);
     closed.presence = 1.0;
-    closed.landmark_count_out = @intCast(closed.landmarks.len / 3);
+    closed.landmark_count = @intCast(closed.landmarks.len / 3);
     closed.blendshapes[jaw_open] = 0.05;
     var open = closed;
     open.blendshapes[jaw_open] = 0.9;
@@ -20771,7 +22117,7 @@ fn proveStylizedAvatar(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const jaw_open = 25;
     var closed = std.mem.zeroes(abi.FaceResult);
     closed.presence = 1.0;
-    closed.landmark_count_out = @intCast(closed.landmarks.len / 3);
+    closed.landmark_count = @intCast(closed.landmarks.len / 3);
     closed.blendshapes[jaw_open] = 0.05;
     var open = closed;
     open.blendshapes[jaw_open] = 0.9;
@@ -22102,6 +23448,12 @@ fn goldenBlocks(pixels: []const u8, w: u32, h: u32, out: *[golden_blocks * golde
     }
 }
 
+/// Failed proofs are counted, not returned on, so one run says everything wrong rather
+/// than the first thing. A false return failed an assertion and the next proof can still
+/// be asked; an error broke the run and still stops it. Stopping at the first failure hid
+/// a stale expectation behind a slow model.
+var conformance_failures: usize = 0;
+
 pub fn main(init_args: std.process.Init) !u8 {
     const gpa = init_args.gpa;
     harness_io = init_args.io;
@@ -22117,6 +23469,11 @@ pub fn main(init_args: std.process.Init) !u8 {
     const golden_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--golden") else false;
     const lifecycle_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--lifecycle") else false;
     g_watch = if (first_arg) |arg| std.mem.eql(u8, arg, "--watch") else false;
+    // The text rail alone, so a change to it is proven in a minute rather than
+    // behind the whole suite, the same way the lifecycle proof owns the process.
+    const text_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--text") else false;
+    const memory_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--memory") else false;
+    const screen_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--screen") else false;
 
     if (c.glfwInit() == c.GLFW_FALSE) return error.GlfwInit;
     defer c.glfwTerminate();
@@ -22129,6 +23486,33 @@ pub fn main(init_args: std.process.Init) !u8 {
     // bringing renderers up and down has to own the process to say anything.
     if (lifecycle_mode) {
         return if (try proveRendererLifecycle(gpa, window)) 0 else 1;
+    }
+
+    if (screen_mode) {
+        var counter = CountingAllocator{ .backing = gpa };
+        const engine = try abi.createEngine(counter.allocator(), .{ .texture_pool_capacity = 4, .staging_pool_capacity = 4 });
+        defer abi.destroyEngine(engine);
+        return if (try proveScreenSource(gpa, engine)) 0 else 1;
+    }
+
+    if (memory_mode) {
+        var counter = CountingAllocator{ .backing = gpa };
+        const engine = try abi.createEngine(counter.allocator(), .{ .texture_pool_capacity = 4, .staging_pool_capacity = 4 });
+        defer abi.destroyEngine(engine);
+        return if (try proveMemoryPlane(gpa, engine)) 0 else 1;
+    }
+
+    if (text_mode) {
+        var counter = CountingAllocator{ .backing = gpa };
+        const engine = try abi.createEngine(counter.allocator(), .{ .texture_pool_capacity = 8, .staging_pool_capacity = 8 });
+        defer abi.destroyEngine(engine);
+        const desc: abi.RendererDesc = .{
+            .native_window_handle = glfwGetCocoaWindow(window),
+            .width = width,
+            .height = height,
+        };
+        if (abi.goss_engine_init_renderer(engine, &desc) != .ok) return error.RendererInit;
+        return if (try proveTextRail(gpa, engine)) 0 else 1;
     }
 
     // The engine runs under a counting allocator so the per-frame budget
@@ -22214,664 +23598,709 @@ pub fn main(init_args: std.process.Init) !u8 {
         defer gpa.free(raw);
         const only = std.mem.trim(u8, raw, " \n\r\t");
         if (std.mem.eql(u8, only, "ml-host-rail")) {
-            if (!try proveMlInputContract(gpa, engine)) return 1;
-            if (!try proveMlHostRail(gpa, engine)) return 1;
-            if (!try proveMlMaskEgress(gpa, engine)) return 1;
+            if (!try proveMlInputContract(gpa, engine)) conformance_failures += 1;
+            if (!try proveMlHostRail(gpa, engine)) conformance_failures += 1;
+            if (!try proveMlMaskEgress(gpa, engine)) conformance_failures += 1;
+        } else if (std.mem.eql(u8, only, "recording-rail")) {
+            // The recording area in one run: the clip that drives the graph, the colour
+            // on both paths, and the pause that must leave no gap. A fault in any of them
+            // cost a whole suite to see.
+            if (!try proveClipDrivesTheGraph(gpa, engine)) conformance_failures += 1;
+            if (!try proveColorMatchesOnBothPaths(gpa, engine)) conformance_failures += 1;
+            if (!try provePauseLeavesNoGap(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "gpu-forces")) {
-            if (!try proveGpuParticles(gpa, engine)) return 1;
-            if (!try proveGpuForces(gpa, engine)) return 1;
+            if (!try proveGpuParticles(gpa, engine)) conformance_failures += 1;
+            if (!try proveGpuForces(gpa, engine)) conformance_failures += 1;
+        } else if (std.mem.eql(u8, only, "model-rail")) {
+            // The model area in one focused run: what a detector finds, the published
+            // zoo, the onnx slot and the sizing reads. This wave changed all of them and
+            // every answer cost a full suite, which is most of the cost of finding a
+            // fault at all.
+            if (!try proveDetectionRail(gpa, engine)) conformance_failures += 1;
+            if (!try proveModelZoo(gpa, engine)) conformance_failures += 1;
+            if (!try proveMlInferOnnx(gpa, engine)) conformance_failures += 1;
+            if (!try proveMlMaskEgress(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "2d-world")) {
-            if (!try provePhysics2dWorld(gpa, engine)) return 1;
+            if (!try provePhysics2dWorld(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "world-mesh")) {
-            if (!try provePhysicsWorldMesh(gpa, engine)) return 1;
+            if (!try provePhysicsWorldMesh(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "glb-collider")) {
-            if (!try provePhysicsGlbCollider(gpa, engine)) return 1;
+            if (!try provePhysicsGlbCollider(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "grab-throw")) {
-            if (!try proveGrabThrow(gpa, engine)) return 1;
+            if (!try proveGrabThrow(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "sph-fluid")) {
-            if (!try proveSphFluid(gpa, engine)) return 1;
+            if (!try proveSphFluid(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "dof")) {
-            if (!try proveDofPass(gpa, engine)) return 1;
+            if (!try proveDofPass(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "head-collider")) {
-            if (!try proveHeadCollider(gpa, engine)) return 1;
+            if (!try proveHeadCollider(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "live-collider")) {
-            if (!try proveLiveCollider(gpa, engine)) return 1;
+            if (!try proveLiveCollider(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "mesh-instancing")) {
-            if (!try proveMeshInstancing(gpa, engine)) return 1;
+            if (!try proveMeshInstancing(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "rich-text")) {
-            if (!try proveRichText(gpa, engine)) return 1;
+            if (!try proveRichText(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "extruded-text")) {
-            if (!try proveExtrudedText(gpa, engine)) return 1;
+            if (!try proveExtrudedText(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "video-texture")) {
-            if (!try proveVideoTexture(gpa, engine)) return 1;
+            if (!try proveVideoTexture(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "class-outline")) {
-            if (!try proveClassOutline(gpa, engine)) return 1;
+            if (!try proveClassOutline(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "head-matte")) {
-            if (!try proveHeadMatte(gpa, engine)) return 1;
+            if (!try proveHeadMatte(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "head-occluder")) {
-            if (!try proveHeadOccluder(gpa, engine)) return 1;
+            if (!try proveHeadOccluder(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "hand-matte")) {
-            if (!try proveHandMatte(gpa, engine)) return 1;
+            if (!try proveHandMatte(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "lips-matte")) {
-            if (!try proveLipsMatte(gpa, engine)) return 1;
+            if (!try proveLipsMatte(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "eyes-matte")) {
-            if (!try proveEyesMatte(gpa, engine)) return 1;
+            if (!try proveEyesMatte(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "brows-matte")) {
-            if (!try proveBrowsMatte(gpa, engine)) return 1;
+            if (!try proveBrowsMatte(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "tint")) {
-            if (!try proveTint(gpa, engine)) return 1;
+            if (!try proveTint(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "makeup")) {
-            if (!try proveMakeup(gpa, engine)) return 1;
+            if (!try proveMakeup(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "iris")) {
-            if (!try proveIris(gpa, engine)) return 1;
+            if (!try proveIris(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "foundation")) {
-            if (!try proveFoundation(gpa, engine)) return 1;
+            if (!try proveFoundation(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "paint-face")) {
-            if (!try proveFaceMaterial(gpa, engine)) return 1;
+            if (!try proveFaceMaterial(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "face-swap")) {
-            if (!try proveFaceSwap(gpa, engine)) return 1;
+            if (!try proveFaceSwap(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "glam")) {
-            if (!try proveGlam(gpa, engine)) return 1;
+            if (!try proveGlam(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "contour-highlight")) {
-            if (!try proveContourHighlight(gpa, engine)) return 1;
+            if (!try proveContourHighlight(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "eye-makeup")) {
-            if (!try proveEyeMakeup(gpa, engine)) return 1;
+            if (!try proveEyeMakeup(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "lash-mesh")) {
-            if (!try proveLashMesh(gpa, engine)) return 1;
+            if (!try proveLashMesh(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "makeup-finish")) {
-            if (!try proveMakeupFinish(gpa, engine)) return 1;
+            if (!try proveMakeupFinish(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "depth-matting")) {
-            if (!try proveDepthMatting(gpa, engine)) return 1;
+            if (!try proveDepthMatting(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "smooth")) {
-            if (!try proveSmooth(gpa, engine)) return 1;
+            if (!try proveSmooth(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "retouch-breadth")) {
-            if (!try proveRetouchBreadth(gpa, engine)) return 1;
+            if (!try proveRetouchBreadth(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "matte-refine")) {
-            if (!try proveMatteRefine(gpa, engine)) return 1;
+            if (!try proveMatteRefine(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "hair-matte")) {
-            if (!try proveHairMatte(gpa, engine)) return 1;
+            if (!try proveHairMatte(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "scene-classes")) {
-            if (!try proveSceneClasses(gpa, engine)) return 1;
+            if (!try proveSceneClasses(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "teeth")) {
-            if (!try proveTeeth(gpa, engine)) return 1;
+            if (!try proveTeeth(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "sharpen")) {
-            if (!try proveSharpen(gpa, engine)) return 1;
+            if (!try proveSharpen(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "user-media-seg")) {
-            if (!try proveUserMediaSeg(gpa, engine)) return 1;
+            if (!try proveUserMediaSeg(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "makeup-transfer")) {
-            if (!try proveMakeupTransfer(gpa, engine)) return 1;
+            if (!try proveMakeupTransfer(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "foundation-shade-match")) {
-            if (!try proveFoundationShadeMatch(gpa, engine)) return 1;
+            if (!try proveFoundationShadeMatch(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "color-adjust")) {
-            if (!try proveColorAdjust(gpa, engine)) return 1;
+            if (!try proveColorAdjust(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "stylize")) {
-            if (!try proveStylize(gpa, engine)) return 1;
+            if (!try proveStylize(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "edge")) {
-            if (!try proveEdge(gpa, engine)) return 1;
+            if (!try proveEdge(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "warp")) {
-            if (!try proveWarp(gpa, engine)) return 1;
+            if (!try proveWarp(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "liquify-symmetry")) {
-            if (!try proveLiquifySymmetry(gpa, engine)) return 1;
+            if (!try proveLiquifySymmetry(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "body-reshape")) {
-            if (!try proveBodyReshapeMasked(gpa, engine)) return 1;
-            if (!try proveReshapeBody(gpa, engine)) return 1;
+            if (!try proveBodyReshapeMasked(gpa, engine)) conformance_failures += 1;
+            if (!try proveReshapeBody(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "reshape")) {
-            if (!try proveReshapeBank(gpa, engine)) return 1;
+            if (!try proveReshapeBank(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "face-transform")) {
-            if (!try proveFaceTransform(gpa, engine)) return 1;
+            if (!try proveFaceTransform(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "material-ops")) {
-            if (!try proveMaterialOps(gpa, engine)) return 1;
+            if (!try proveMaterialOps(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "second-lifecycle")) {
-            if (!try proveSecondLifecycle(gpa, engine, &frame_counter)) return 1;
+            if (!try proveSecondLifecycle(gpa, engine, &frame_counter)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "per-frame-alloc")) {
-            if (!try provePerFrameAllocCalls(gpa, engine, &frame_counter)) return 1;
+            if (!try provePerFrameAllocCalls(gpa, engine, &frame_counter)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "face-sticker")) {
-            if (!try proveFaceSticker(gpa, engine)) return 1;
+            if (!try proveFaceSticker(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "face-text")) {
-            if (!try proveFaceText(gpa, engine)) return 1;
+            if (!try proveFaceText(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "info-sticker")) {
-            if (!try proveInfoSticker(gpa, engine)) return 1;
+            if (!try proveInfoSticker(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "cutout-sticker")) {
-            if (!try proveCutoutSticker(gpa, engine)) return 1;
+            if (!try proveCutoutSticker(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "object-move")) {
-            if (!try proveObjectMove(gpa, engine)) return 1;
+            if (!try proveObjectMove(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "inpaint-coherence")) {
-            if (!try proveInpaintCoherence(gpa, engine)) return 1;
+            if (!try proveInpaintCoherence(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "outpaint")) {
-            if (!try proveOutpaint(gpa, engine)) return 1;
+            if (!try proveOutpaint(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "generate-song")) {
-            if (!try proveGenerateSong(gpa, engine)) return 1;
+            if (!try proveGenerateSong(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "scan-barcode")) {
-            if (!try proveScanBarcode(gpa, engine)) return 1;
+            if (!try proveScanBarcode(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "scan-qr")) {
-            if (!try proveScanQr(gpa, engine)) return 1;
+            if (!try proveScanQr(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "provenance")) {
-            if (!try proveProvenance(gpa, engine)) return 1;
+            if (!try proveProvenance(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "media-library")) {
-            if (!try proveMediaLibrary(gpa, engine)) return 1;
+            if (!try proveMediaLibrary(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "world-mesh-anchor")) {
-            if (!try proveWorldMeshAnchor(gpa, engine)) return 1;
+            if (!try proveWorldMeshAnchor(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "hostile-manifest")) {
-            if (!try proveHostileManifest(gpa, engine)) return 1;
+            if (!try proveHostileManifest(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "manifest-fuzz")) {
-            if (!try proveManifestFuzz(gpa, engine)) return 1;
+            if (!try proveManifestFuzz(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "live-frame-egress")) {
-            if (!try proveLiveFrameEgress(gpa, engine)) return 1;
+            if (!try proveLiveFrameEgress(gpa, engine)) conformance_failures += 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
+            return 1;
+        }
+        // A focused run answers on the same count: it runs proofs, so it can fail.
+        if (conformance_failures != 0) {
+            std.debug.print("conformance: focused run {s} had {d} failure(s)\n", .{ only, conformance_failures });
             return 1;
         }
         std.debug.print("conformance: focused run {s} complete\n", .{only});
         return 0;
     }
 
-    if (!try proveTriggerAnimFires(gpa, engine)) return 1;
+    if (!try proveTriggerAnimFires(gpa, engine)) conformance_failures += 1;
     watchHold("trigger anim fires");
-    if (!try proveMixerBlend(gpa, engine)) return 1;
+    if (!try proveMixerBlend(gpa, engine)) conformance_failures += 1;
     watchHold("anim mixer blend");
-    if (!try proveMorphBlend(gpa, engine)) return 1;
+    if (!try proveMorphBlend(gpa, engine)) conformance_failures += 1;
     watchHold("morph blend");
-    if (!try proveHeadReenact(gpa, engine)) return 1;
+    if (!try proveHeadReenact(gpa, engine)) conformance_failures += 1;
     watchHold("head reenact");
-    if (!try proveStylizedAvatar(gpa, engine)) return 1;
+    if (!try proveStylizedAvatar(gpa, engine)) conformance_failures += 1;
     watchHold("stylized avatar");
-    if (!try proveSpriteDraw(gpa, engine)) return 1;
+    if (!try proveSpriteDraw(gpa, engine)) conformance_failures += 1;
     watchHold("sprite overlay");
-    if (!try proveTextDraw(gpa, engine)) return 1;
+    if (!try proveTextDraw(gpa, engine)) conformance_failures += 1;
     watchHold("text overlay");
-    if (!try proveMaterialClip(gpa, engine)) return 1;
+    if (!try proveMaterialClip(gpa, engine)) conformance_failures += 1;
     watchHold("material clip");
-    if (!try proveSpriteFade(gpa, engine)) return 1;
+    if (!try proveSpriteFade(gpa, engine)) conformance_failures += 1;
     watchHold("sprite fade");
-    if (!try proveSpriteAnim(gpa, engine)) return 1;
+    if (!try proveSpriteAnim(gpa, engine)) conformance_failures += 1;
     watchHold("sprite anim");
-    if (!try proveDofPass(gpa, engine)) return 1;
+    if (!try proveDofPass(gpa, engine)) conformance_failures += 1;
     watchHold("dof pass");
-    if (!try proveFogPass(gpa, engine)) return 1;
+    if (!try proveFogPass(gpa, engine)) conformance_failures += 1;
     watchHold("fog pass");
-    if (!try proveOutlinePass(gpa, engine)) return 1;
+    if (!try proveOutlinePass(gpa, engine)) conformance_failures += 1;
     watchHold("outline pass");
-    if (!try proveTrailPass(gpa, engine)) return 1;
+    if (!try proveTrailPass(gpa, engine)) conformance_failures += 1;
     watchHold("trail pass");
-    if (!try proveSsrPass(gpa, engine)) return 1;
+    if (!try proveSsrPass(gpa, engine)) conformance_failures += 1;
     watchHold("ssr pass");
-    if (!try proveEnvPass(gpa, engine)) return 1;
+    if (!try proveEnvPass(gpa, engine)) conformance_failures += 1;
     watchHold("env pass");
-    if (!try proveEnvmapPass(gpa, engine)) return 1;
+    if (!try proveEnvmapPass(gpa, engine)) conformance_failures += 1;
     watchHold("env map");
-    if (!try proveGifSprite(gpa, engine)) return 1;
+    if (!try proveGifSprite(gpa, engine)) conformance_failures += 1;
     watchHold("gif sprite");
-    if (!try provePhotoCapture(gpa, engine)) return 1;
+    if (!try provePhotoCapture(gpa, engine)) conformance_failures += 1;
     watchHold("photo capture");
-    if (!try proveMaskDegradation(gpa, engine)) return 1;
+    if (!try proveMaskDegradation(gpa, engine)) conformance_failures += 1;
     watchHold("mask degradation");
-    if (!try proveMaterialGraph(gpa, engine)) return 1;
+    if (!try proveMaterialGraph(gpa, engine)) conformance_failures += 1;
     watchHold("material graph");
-    if (!try proveMaterialOps(gpa, engine)) return 1;
+    if (!try proveMaterialOps(gpa, engine)) conformance_failures += 1;
     watchHold("material ops");
-    if (!try proveSceneSegmentation(gpa, engine)) return 1;
+    if (!try proveSceneSegmentation(gpa, engine)) conformance_failures += 1;
     watchHold("scene segmentation");
-    if (!try proveClassOutline(gpa, engine)) return 1;
+    if (!try proveClassOutline(gpa, engine)) conformance_failures += 1;
     watchHold("class outline");
-    if (!try proveHeadMatte(gpa, engine)) return 1;
+    if (!try proveHeadMatte(gpa, engine)) conformance_failures += 1;
     watchHold("head matte");
-    if (!try proveHeadOccluder(gpa, engine)) return 1;
+    if (!try proveHeadOccluder(gpa, engine)) conformance_failures += 1;
     watchHold("head occluder");
-    if (!try proveHandMatte(gpa, engine)) return 1;
+    if (!try proveHandMatte(gpa, engine)) conformance_failures += 1;
     watchHold("hand matte");
-    if (!try proveLipsMatte(gpa, engine)) return 1;
+    if (!try proveLipsMatte(gpa, engine)) conformance_failures += 1;
     watchHold("lips matte");
-    if (!try proveEyesMatte(gpa, engine)) return 1;
+    if (!try proveEyesMatte(gpa, engine)) conformance_failures += 1;
     watchHold("eyes matte");
-    if (!try proveBrowsMatte(gpa, engine)) return 1;
+    if (!try proveBrowsMatte(gpa, engine)) conformance_failures += 1;
     watchHold("brows matte");
-    if (!try proveTint(gpa, engine)) return 1;
+    if (!try proveTint(gpa, engine)) conformance_failures += 1;
     watchHold("tint pass");
-    if (!try proveMakeup(gpa, engine)) return 1;
+    if (!try proveMakeup(gpa, engine)) conformance_failures += 1;
     watchHold("makeup lenses");
-    if (!try proveIris(gpa, engine)) return 1;
+    if (!try proveIris(gpa, engine)) conformance_failures += 1;
     watchHold("iris tint");
-    if (!try proveFoundation(gpa, engine)) return 1;
+    if (!try proveFoundation(gpa, engine)) conformance_failures += 1;
     watchHold("foundation");
-    if (!try proveFaceMaterial(gpa, engine)) return 1;
+    if (!try proveFaceMaterial(gpa, engine)) conformance_failures += 1;
     watchHold("paint.face");
-    if (!try proveFaceSwap(gpa, engine)) return 1;
+    if (!try proveFaceSwap(gpa, engine)) conformance_failures += 1;
     watchHold("face.swap");
-    if (!try proveGlam(gpa, engine)) return 1;
+    if (!try proveGlam(gpa, engine)) conformance_failures += 1;
     watchHold("glam look");
-    if (!try proveContourHighlight(gpa, engine)) return 1;
+    if (!try proveContourHighlight(gpa, engine)) conformance_failures += 1;
     watchHold("contour highlight");
-    if (!try proveEarMatte(gpa, engine)) return 1;
+    if (!try proveEarMatte(gpa, engine)) conformance_failures += 1;
     watchHold("ear matte");
-    if (!try proveEyeshadowZones(gpa, engine)) return 1;
+    if (!try proveEyeshadowZones(gpa, engine)) conformance_failures += 1;
     watchHold("eyeshadow zones");
-    if (!try proveEyeMakeup(gpa, engine)) return 1;
+    if (!try proveEyeMakeup(gpa, engine)) conformance_failures += 1;
     watchHold("eye makeup");
-    if (!try proveLashMesh(gpa, engine)) return 1;
+    if (!try proveLashMesh(gpa, engine)) conformance_failures += 1;
     watchHold("lash mesh");
-    if (!try proveMakeupFinish(gpa, engine)) return 1;
+    if (!try proveMakeupFinish(gpa, engine)) conformance_failures += 1;
     watchHold("makeup finish");
-    if (!try proveDepthMatting(gpa, engine)) return 1;
+    if (!try proveDepthMatting(gpa, engine)) conformance_failures += 1;
     watchHold("depth matting");
-    if (!try proveSmooth(gpa, engine)) return 1;
+    if (!try proveSmooth(gpa, engine)) conformance_failures += 1;
     watchHold("face smooth");
-    if (!try proveRetouchBreadth(gpa, engine)) return 1;
+    if (!try proveRetouchBreadth(gpa, engine)) conformance_failures += 1;
     watchHold("retouch breadth");
-    if (!try proveMatteRefine(gpa, engine)) return 1;
+    if (!try proveMatteRefine(gpa, engine)) conformance_failures += 1;
     watchHold("matte refine");
-    if (!try proveHairMatte(gpa, engine)) return 1;
+    if (!try proveHairMatte(gpa, engine)) conformance_failures += 1;
     watchHold("hair matte");
-    if (!try proveSceneClasses(gpa, engine)) return 1;
+    if (!try proveSceneClasses(gpa, engine)) conformance_failures += 1;
     watchHold("scene classes");
-    if (!try proveTeeth(gpa, engine)) return 1;
+    if (!try proveTeeth(gpa, engine)) conformance_failures += 1;
     watchHold("teeth whiten");
-    if (!try proveSharpen(gpa, engine)) return 1;
+    if (!try proveSharpen(gpa, engine)) conformance_failures += 1;
     watchHold("detail sharpen");
-    if (!try proveUserMediaSeg(gpa, engine)) return 1;
+    if (!try proveUserMediaSeg(gpa, engine)) conformance_failures += 1;
     watchHold("user-media segmentation");
-    if (!try proveMakeupTransfer(gpa, engine)) return 1;
+    if (!try proveMakeupTransfer(gpa, engine)) conformance_failures += 1;
     watchHold("makeup transfer");
-    if (!try proveFoundationShadeMatch(gpa, engine)) return 1;
+    if (!try proveFoundationShadeMatch(gpa, engine)) conformance_failures += 1;
     watchHold("foundation shade match");
-    if (!try proveVideoRecording(gpa, engine)) return 1;
+    if (!try proveVideoRecording(gpa, engine)) conformance_failures += 1;
     watchHold("video recording");
-    if (!try provePlatformPhotos(gpa, engine)) return 1;
+    if (!try provePlatformPhotos(gpa, engine)) conformance_failures += 1;
     watchHold("platform photos");
-    if (!try proveWorldAnchor(gpa, engine)) return 1;
+    if (!try proveWorldAnchor(gpa, engine)) conformance_failures += 1;
     watchHold("world anchor");
-    if (!try proveMultiFaceFanOut(gpa, engine)) return 1;
+    if (!try proveMultiFaceFanOut(gpa, engine)) conformance_failures += 1;
     watchHold("multi face fan out");
-    if (!try provePerFaceBinding(gpa, engine)) return 1;
+    if (!try provePerFaceBinding(gpa, engine)) conformance_failures += 1;
     watchHold("per face binding");
-    if (!try proveFaceSticker(gpa, engine)) return 1;
+    if (!try proveFaceSticker(gpa, engine)) conformance_failures += 1;
     watchHold("face sticker");
-    if (!try proveFaceText(gpa, engine)) return 1;
+    if (!try proveFaceText(gpa, engine)) conformance_failures += 1;
     watchHold("face text");
-    if (!try proveInfoSticker(gpa, engine)) return 1;
+    if (!try proveInfoSticker(gpa, engine)) conformance_failures += 1;
     watchHold("info sticker");
-    if (!try proveCutoutSticker(gpa, engine)) return 1;
+    if (!try proveCutoutSticker(gpa, engine)) conformance_failures += 1;
     watchHold("cutout sticker");
-    if (!try proveObjectMove(gpa, engine)) return 1;
+    if (!try proveObjectMove(gpa, engine)) conformance_failures += 1;
     watchHold("object move");
-    if (!try proveInpaintCoherence(gpa, engine)) return 1;
+    if (!try proveInpaintCoherence(gpa, engine)) conformance_failures += 1;
     watchHold("inpaint coherence");
-    if (!try proveOutpaint(gpa, engine)) return 1;
+    if (!try proveOutpaint(gpa, engine)) conformance_failures += 1;
     watchHold("outpaint");
-    if (!try proveMultiBodyFanOut(gpa, engine)) return 1;
+    if (!try proveMultiBodyFanOut(gpa, engine)) conformance_failures += 1;
     watchHold("multi body fan out");
-    if (!try proveSkeletonRig(gpa, engine)) return 1;
+    if (!try proveSkeletonRig(gpa, engine)) conformance_failures += 1;
     watchHold("skeleton rig");
-    if (!try proveSkinnedBodyMesh(gpa, engine)) return 1;
+    if (!try proveSkinnedBodyMesh(gpa, engine)) conformance_failures += 1;
     watchHold("skinned body mesh");
-    if (!try proveDepthOcclusion(gpa, engine)) return 1;
+    if (!try proveDepthOcclusion(gpa, engine)) conformance_failures += 1;
     watchHold("depth occlusion");
-    if (!try proveParallax(gpa, engine)) return 1;
+    if (!try proveParallax(gpa, engine)) conformance_failures += 1;
     watchHold("parallax pass");
-    if (!try proveMonoDepth(gpa, engine)) return 1;
+    if (!try proveMonoDepth(gpa, engine)) conformance_failures += 1;
     watchHold("mono depth");
-    if (!try proveFaceRegions(gpa, engine)) return 1;
+    if (!try proveFaceRegions(gpa, engine)) conformance_failures += 1;
     watchHold("face regions");
-    if (!try proveBodyJoints(gpa, engine)) return 1;
+    if (!try proveBodyJoints(gpa, engine)) conformance_failures += 1;
     watchHold("body joints");
-    if (!try proveHandJoints(gpa, engine)) return 1;
+    if (!try proveHandJoints(gpa, engine)) conformance_failures += 1;
     watchHold("hand joints");
-    if (!try provePhysicsDrop(gpa, engine)) return 1;
+    if (!try provePhysicsDrop(gpa, engine)) conformance_failures += 1;
     watchHold("physics drop");
-    if (!try provePhysicsChain(gpa, engine)) return 1;
+    if (!try provePhysicsChain(gpa, engine)) conformance_failures += 1;
     watchHold("physics chain");
-    if (!try provePhysicsPivot(gpa, engine)) return 1;
+    if (!try provePhysicsPivot(gpa, engine)) conformance_failures += 1;
     watchHold("physics pivot");
-    if (!try provePhysicsFixed(gpa, engine)) return 1;
+    if (!try provePhysicsFixed(gpa, engine)) conformance_failures += 1;
     watchHold("physics fixed");
-    if (!try provePhysicsHinge(gpa, engine)) return 1;
+    if (!try provePhysicsHinge(gpa, engine)) conformance_failures += 1;
     watchHold("physics hinge");
-    if (!try provePhysicsSpring(gpa, engine)) return 1;
+    if (!try provePhysicsSpring(gpa, engine)) conformance_failures += 1;
     watchHold("physics spring");
-    if (!try provePhysicsShapeCylinder(gpa, engine)) return 1;
+    if (!try provePhysicsShapeCylinder(gpa, engine)) conformance_failures += 1;
     watchHold("physics shape cylinder");
-    if (!try provePhysicsShapeCapsule(gpa, engine)) return 1;
+    if (!try provePhysicsShapeCapsule(gpa, engine)) conformance_failures += 1;
     watchHold("physics shape capsule");
-    if (!try provePhysicsJiggle(gpa, engine)) return 1;
+    if (!try provePhysicsJiggle(gpa, engine)) conformance_failures += 1;
     watchHold("physics jiggle");
-    if (!try provePhysicsFriction(gpa, engine)) return 1;
+    if (!try provePhysicsFriction(gpa, engine)) conformance_failures += 1;
     watchHold("physics friction");
-    if (!try provePhysicsHull(gpa, engine)) return 1;
+    if (!try provePhysicsHull(gpa, engine)) conformance_failures += 1;
     watchHold("physics hull");
-    if (!try provePhysicsRestitution(gpa, engine)) return 1;
+    if (!try provePhysicsRestitution(gpa, engine)) conformance_failures += 1;
     watchHold("physics restitution");
-    if (!try provePhysicsMesh(gpa, engine)) return 1;
+    if (!try provePhysicsMesh(gpa, engine)) conformance_failures += 1;
     watchHold("physics mesh");
-    if (!try provePhysicsBalloon(gpa, engine)) return 1;
+    if (!try provePhysicsBalloon(gpa, engine)) conformance_failures += 1;
     watchHold("physics balloon");
-    if (!try provePhysicsSoftBody(gpa, engine)) return 1;
+    if (!try provePhysicsSoftBody(gpa, engine)) conformance_failures += 1;
     watchHold("physics soft body");
-    if (!try provePhysicsPlanar(gpa, engine)) return 1;
+    if (!try provePhysicsPlanar(gpa, engine)) conformance_failures += 1;
     watchHold("physics planar");
-    if (!try provePhysics2dWorld(gpa, engine)) return 1;
+    if (!try provePhysics2dWorld(gpa, engine)) conformance_failures += 1;
     watchHold("physics 2d world");
-    if (!try provePhysicsWorldMesh(gpa, engine)) return 1;
+    if (!try provePhysicsWorldMesh(gpa, engine)) conformance_failures += 1;
     watchHold("physics world mesh");
-    if (!try provePhysicsGlbCollider(gpa, engine)) return 1;
+    if (!try provePhysicsGlbCollider(gpa, engine)) conformance_failures += 1;
     watchHold("physics glb collider");
-    if (!try proveGrabThrow(gpa, engine)) return 1;
+    if (!try proveGrabThrow(gpa, engine)) conformance_failures += 1;
     watchHold("grab throw");
-    if (!try proveSphFluid(gpa, engine)) return 1;
+    if (!try proveSphFluid(gpa, engine)) conformance_failures += 1;
     watchHold("sph fluid");
-    if (!try proveHeadCollider(gpa, engine)) return 1;
+    if (!try proveHeadCollider(gpa, engine)) conformance_failures += 1;
     watchHold("head collider");
-    if (!try proveLiveCollider(gpa, engine)) return 1;
+    if (!try proveLiveCollider(gpa, engine)) conformance_failures += 1;
     watchHold("live collider");
-    if (!try proveMeshInstancing(gpa, engine)) return 1;
+    if (!try proveMeshInstancing(gpa, engine)) conformance_failures += 1;
     watchHold("mesh instancing");
-    if (!try proveRichText(gpa, engine)) return 1;
+    if (!try proveRichText(gpa, engine)) conformance_failures += 1;
     watchHold("rich text");
-    if (!try proveExtrudedText(gpa, engine)) return 1;
+    if (!try proveExtrudedText(gpa, engine)) conformance_failures += 1;
     watchHold("extruded text");
-    if (!try proveVideoTexture(gpa, engine)) return 1;
+    if (!try proveVideoTexture(gpa, engine)) conformance_failures += 1;
     watchHold("video texture");
-    if (!try proveClothFlag(gpa, engine)) return 1;
+    if (!try proveClothFlag(gpa, engine)) conformance_failures += 1;
     watchHold("cloth flag");
-    if (!try proveParticles(gpa, engine)) return 1;
+    if (!try proveParticles(gpa, engine)) conformance_failures += 1;
     watchHold("particles");
-    if (!try proveHairSim(gpa, engine)) return 1;
+    if (!try proveHairSim(gpa, engine)) conformance_failures += 1;
     watchHold("hair sim");
-    if (!try proveHighResCapture(gpa, engine)) return 1;
+    if (!try proveHighResCapture(gpa, engine)) conformance_failures += 1;
     watchHold("high res capture");
-    if (!try proveTiledCapture(gpa, engine)) return 1;
-    if (!try proveTurnedTiledCapture(gpa, engine)) return 1;
-    if (!try proveStreamedSupersample(gpa, engine)) return 1;
-    if (!try proveStreamedJpeg(gpa, engine)) return 1;
-    if (!try proveTiledFaceMesh(gpa, engine)) return 1;
-    if (!try proveStagedImageAssets(gpa, engine)) return 1;
-    if (!try proveAuthoredRotation(gpa, engine)) return 1;
-    if (!try proveStickerInteraction(gpa, engine)) return 1;
-    if (!try proveArBrushRedo(gpa, engine)) return 1;
-    if (!try proveEnhanceReferences(gpa, engine)) return 1;
-    if (!try proveMicResampler(gpa, engine)) return 1;
+    if (!try proveTiledCapture(gpa, engine)) conformance_failures += 1;
+    if (!try proveTurnedTiledCapture(gpa, engine)) conformance_failures += 1;
+    if (!try proveStreamedSupersample(gpa, engine)) conformance_failures += 1;
+    if (!try proveStreamedJpeg(gpa, engine)) conformance_failures += 1;
+    if (!try proveTiledFaceMesh(gpa, engine)) conformance_failures += 1;
+    if (!try proveStagedImageAssets(gpa, engine)) conformance_failures += 1;
+    if (!try proveAuthoredRotation(gpa, engine)) conformance_failures += 1;
+    if (!try proveStickerInteraction(gpa, engine)) conformance_failures += 1;
+    if (!try proveArBrushRedo(gpa, engine)) conformance_failures += 1;
+    if (!try proveEnhanceReferences(gpa, engine)) conformance_failures += 1;
+    if (!try proveMicResampler(gpa, engine)) conformance_failures += 1;
     watchHold("tiled capture");
-    if (!try proveLiveFrameEgress(gpa, engine)) return 1;
+    if (!try proveLiveFrameEgress(gpa, engine)) conformance_failures += 1;
     watchHold("live frame egress");
-    if (!try prove3DTiledCapture(gpa, engine)) return 1;
+    if (!try prove3DTiledCapture(gpa, engine)) conformance_failures += 1;
     watchHold("d tiled capture");
-    if (!try proveColorManagedCapture(gpa, engine)) return 1;
+    if (!try proveColorManagedCapture(gpa, engine)) conformance_failures += 1;
     watchHold("color managed capture");
-    if (!try proveMlInfer(gpa, engine)) return 1;
+    if (!try proveMlInfer(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer");
-    if (!try proveAudioInfer(gpa, engine)) return 1;
+    if (!try proveScreenSource(gpa, engine)) conformance_failures += 1;
+    watchHold("screen source");
+    if (!try proveDetectionRail(gpa, engine)) conformance_failures += 1;
+    watchHold("detection rail");
+    if (!try proveSpatialRail(gpa, engine)) conformance_failures += 1;
+    watchHold("spatial rail");
+    if (!try proveScope(gpa, engine)) conformance_failures += 1;
+    watchHold("scope");
+    if (!try proveMemoryPlane(gpa, engine)) conformance_failures += 1;
+    watchHold("memory plane");
+    if (!try proveModelZoo(gpa, engine)) conformance_failures += 1;
+    watchHold("model zoo");
+    if (!try proveTextRail(gpa, engine)) conformance_failures += 1;
+    watchHold("text rail");
+    if (!try proveAudioInfer(gpa, engine)) conformance_failures += 1;
     watchHold("audio infer");
-    if (!try proveCaption(gpa, engine)) return 1;
+    if (!try proveCaption(gpa, engine)) conformance_failures += 1;
     watchHold("audio caption");
-    if (!try proveDiarize(gpa, engine)) return 1;
+    if (!try proveDiarize(gpa, engine)) conformance_failures += 1;
     watchHold("audio diarize");
-    if (!try proveTranslate(gpa, engine)) return 1;
+    if (!try proveTranslate(gpa, engine)) conformance_failures += 1;
     watchHold("audio translate");
-    if (!try proveDub(gpa, engine)) return 1;
+    if (!try proveDub(gpa, engine)) conformance_failures += 1;
     watchHold("audio dub");
-    if (!try proveMlInferOnnx(gpa, engine)) return 1;
+    if (!try proveMlInferOnnx(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer onnx");
-    if (!try proveMlInputContract(gpa, engine)) return 1;
+    if (!try proveMlInputContract(gpa, engine)) conformance_failures += 1;
     watchHold("ml input contract");
-    if (!try proveMlHostRail(gpa, engine)) return 1;
+    if (!try proveMlHostRail(gpa, engine)) conformance_failures += 1;
     watchHold("ml host rail");
-    if (!try proveMlMaskEgress(gpa, engine)) return 1;
+    if (!try proveMlMaskEgress(gpa, engine)) conformance_failures += 1;
     watchHold("ml mask egress");
-    if (!try proveMlInferSegMask(gpa, engine)) return 1;
+    if (!try proveMlInferSegMask(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer seg mask");
-    if (!try proveMlInferSaliency(gpa, engine)) return 1;
+    if (!try proveMlInferSaliency(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer saliency");
-    if (!try proveMlInferCls(gpa, engine)) return 1;
+    if (!try proveMlInferCls(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer cls");
-    if (!try proveMlInferPlacement(gpa, engine)) return 1;
+    if (!try proveMlInferPlacement(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer placement");
-    if (!try proveMlInferStyle(gpa, engine)) return 1;
+    if (!try proveMlInferStyle(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer style");
-    if (!try proveMlInferSuperRes(gpa, engine)) return 1;
+    if (!try proveMlInferSuperRes(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer super-res");
-    if (!try proveMlInferAux(gpa, engine)) return 1;
+    if (!try proveMlInferAux(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer aux reference");
-    if (!try proveMlInferTemporal(gpa, engine)) return 1;
+    if (!try proveMlInferTemporal(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer temporal");
-    if (!try proveMlInferDiffusion(gpa, engine)) return 1;
+    if (!try proveMlInferDiffusion(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer diffusion");
-    if (!try proveMlInferText2Img(gpa, engine)) return 1;
+    if (!try proveMlInferText2Img(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer text2img");
-    if (!try proveMlInferGreenscreen(gpa, engine)) return 1;
+    if (!try proveMlInferGreenscreen(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer greenscreen");
-    if (!try proveMlInferCoherence(gpa, engine)) return 1;
+    if (!try proveMlInferCoherence(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer coherence");
-    if (!try proveMlInferFaceRestyle(gpa, engine)) return 1;
+    if (!try proveMlInferFaceRestyle(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer face restyle");
-    if (!try proveMaskStrength(gpa, engine)) return 1;
+    if (!try proveMaskStrength(gpa, engine)) conformance_failures += 1;
     watchHold("mask strength");
-    if (!try proveMaskedGrade(gpa, engine)) return 1;
+    if (!try proveMaskedGrade(gpa, engine)) conformance_failures += 1;
     watchHold("masked grade");
-    if (!try proveDehaze(gpa, engine)) return 1;
+    if (!try proveDehaze(gpa, engine)) conformance_failures += 1;
     watchHold("dehaze pass");
-    if (!try proveRelight(gpa, engine)) return 1;
+    if (!try proveRelight(gpa, engine)) conformance_failures += 1;
     watchHold("relight pass");
-    if (!try proveGlare(gpa, engine)) return 1;
+    if (!try proveGlare(gpa, engine)) conformance_failures += 1;
     watchHold("glare pass");
-    if (!try proveVignette(gpa, engine)) return 1;
+    if (!try proveVignette(gpa, engine)) conformance_failures += 1;
     watchHold("vignette pass");
-    if (!try proveLowLight(gpa, engine)) return 1;
+    if (!try proveLowLight(gpa, engine)) conformance_failures += 1;
     watchHold("lowlight pass");
-    if (!try proveUndistort(gpa, engine)) return 1;
+    if (!try proveUndistort(gpa, engine)) conformance_failures += 1;
     watchHold("undistort pass");
-    if (!try proveAwb(gpa, engine)) return 1;
+    if (!try proveAwb(gpa, engine)) conformance_failures += 1;
     watchHold("awb pass");
-    if (!try proveInferenceBudget(gpa, engine)) return 1;
+    if (!try proveInferenceBudget(gpa, engine)) conformance_failures += 1;
     watchHold("inference budget");
-    if (!try proveStabilize(gpa, engine)) return 1;
+    if (!try proveStabilize(gpa, engine)) conformance_failures += 1;
     watchHold("stabilize pass");
-    if (!try proveZoom(gpa, engine)) return 1;
+    if (!try proveZoom(gpa, engine)) conformance_failures += 1;
     watchHold("zoom pass");
-    if (!try proveDereflect(gpa, engine)) return 1;
+    if (!try proveDereflect(gpa, engine)) conformance_failures += 1;
     watchHold("dereflect pass");
-    if (!try proveHarmonize(gpa, engine)) return 1;
+    if (!try proveHarmonize(gpa, engine)) conformance_failures += 1;
     watchHold("harmonize pass");
-    if (!try proveInpaint(gpa, engine)) return 1;
+    if (!try proveInpaint(gpa, engine)) conformance_failures += 1;
     watchHold("inpaint pass");
-    if (!try proveRolling(gpa, engine)) return 1;
+    if (!try proveRolling(gpa, engine)) conformance_failures += 1;
     watchHold("rolling pass");
-    if (!try proveRollLock(gpa, engine)) return 1;
+    if (!try proveRollLock(gpa, engine)) conformance_failures += 1;
     watchHold("roll_lock warp");
-    if (!try proveGazeCorrect(gpa, engine)) return 1;
+    if (!try proveGazeCorrect(gpa, engine)) conformance_failures += 1;
     watchHold("gaze_correct warp");
-    if (!try proveAutoFrame(gpa, engine)) return 1;
+    if (!try proveAutoFrame(gpa, engine)) conformance_failures += 1;
     watchHold("auto_frame warp");
-    if (!try proveTemporalFuse(gpa, engine)) return 1;
+    if (!try proveTemporalFuse(gpa, engine)) conformance_failures += 1;
     watchHold("temporal.fuse");
-    if (!try proveTemporalInterpolate(gpa, engine)) return 1;
+    if (!try proveTemporalInterpolate(gpa, engine)) conformance_failures += 1;
     watchHold("temporal interpolate");
-    if (!try proveTemporalHdr(gpa, engine)) return 1;
+    if (!try proveTemporalHdr(gpa, engine)) conformance_failures += 1;
     watchHold("temporal hdr");
-    if (!try proveAudioDenoise(gpa, engine)) return 1;
+    if (!try proveAudioDenoise(gpa, engine)) conformance_failures += 1;
     watchHold("audio enhance");
-    if (!try proveEchoCancel(gpa, engine)) return 1;
+    if (!try proveEchoCancel(gpa, engine)) conformance_failures += 1;
     watchHold("echo cancel");
-    if (!try proveDereverb(gpa, engine)) return 1;
+    if (!try proveDereverb(gpa, engine)) conformance_failures += 1;
     watchHold("dereverb");
-    if (!try proveVoiceTransform(gpa, engine)) return 1;
+    if (!try proveVoiceTransform(gpa, engine)) conformance_failures += 1;
     watchHold("voice transform");
-    if (!try proveMusicIdentify(gpa, engine)) return 1;
+    if (!try proveMusicIdentify(gpa, engine)) conformance_failures += 1;
     watchHold("music identify");
-    if (!try proveVoiceCommand(gpa, engine)) return 1;
+    if (!try proveVoiceCommand(gpa, engine)) conformance_failures += 1;
     watchHold("voice command");
-    if (!try proveVoiceRobot(gpa, engine)) return 1;
+    if (!try proveVoiceRobot(gpa, engine)) conformance_failures += 1;
     watchHold("voice robot");
-    if (!try proveCaptionSegment(gpa, engine)) return 1;
+    if (!try proveCaptionSegment(gpa, engine)) conformance_failures += 1;
     watchHold("caption segment");
-    if (!try proveMlInferMaterial(gpa, engine)) return 1;
+    if (!try proveMlInferMaterial(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer material");
-    if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;
+    if (!try proveMlInferMaterialGraph(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer material graph");
-    if (!try proveMlInferSplat(gpa, engine)) return 1;
+    if (!try proveMlInferSplat(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer splat");
-    if (!try proveMlInferSplatMesh(gpa, engine)) return 1;
+    if (!try proveMlInferSplatMesh(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer splat mesh");
-    if (!try proveMlInferSplatColored(gpa, engine)) return 1;
+    if (!try proveMlInferSplatColored(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer splat colored");
-    if (!try proveSplatGaussian(gpa, engine)) return 1;
+    if (!try proveSplatGaussian(gpa, engine)) conformance_failures += 1;
     watchHold("splat gaussian");
-    if (!try proveSplatPortal(gpa, engine)) return 1;
+    if (!try proveSplatPortal(gpa, engine)) conformance_failures += 1;
     watchHold("splat portal");
-    if (!try proveSplatBackground(gpa, engine)) return 1;
+    if (!try proveSplatBackground(gpa, engine)) conformance_failures += 1;
     watchHold("splat background");
-    if (!try proveCaptureReconstruct(gpa, engine)) return 1;
+    if (!try proveCaptureReconstruct(gpa, engine)) conformance_failures += 1;
     watchHold("capture reconstruct");
-    if (!try proveReconstructionRender(gpa, engine)) return 1;
+    if (!try proveReconstructionRender(gpa, engine)) conformance_failures += 1;
     watchHold("reconstruction render");
-    if (!try proveMlInferSelfieAvatar(gpa, engine)) return 1;
+    if (!try proveMlInferSelfieAvatar(gpa, engine)) conformance_failures += 1;
     watchHold("ml infer selfie avatar");
-    if (!try proveCompilePrompt(gpa, engine)) return 1;
+    if (!try proveCompilePrompt(gpa, engine)) conformance_failures += 1;
     watchHold("compile prompt");
-    if (!try proveGenerateSong(gpa, engine)) return 1;
+    if (!try proveGenerateSong(gpa, engine)) conformance_failures += 1;
     watchHold("generate song");
-    if (!try proveScanBarcode(gpa, engine)) return 1;
+    if (!try proveScanBarcode(gpa, engine)) conformance_failures += 1;
     watchHold("scan barcode");
-    if (!try proveScanQr(gpa, engine)) return 1;
+    if (!try proveScanQr(gpa, engine)) conformance_failures += 1;
     watchHold("scan qr");
-    if (!try proveProvenance(gpa, engine)) return 1;
+    if (!try proveProvenance(gpa, engine)) conformance_failures += 1;
     watchHold("provenance");
-    if (!try proveMediaLibrary(gpa, engine)) return 1;
+    if (!try proveMediaLibrary(gpa, engine)) conformance_failures += 1;
     watchHold("media library");
-    if (!try proveWorldMeshAnchor(gpa, engine)) return 1;
+    if (!try proveWorldMeshAnchor(gpa, engine)) conformance_failures += 1;
     watchHold("world mesh anchor");
-    if (!try proveScript(gpa, engine)) return 1;
+    if (!try proveScript(gpa, engine)) conformance_failures += 1;
     watchHold("script");
-    if (!try proveScriptFile(gpa, engine)) return 1;
+    if (!try proveScriptFile(gpa, engine)) conformance_failures += 1;
     watchHold("script-file");
-    if (!try proveLogicGraphMath(gpa, engine)) return 1;
+    if (!try proveLogicGraphMath(gpa, engine)) conformance_failures += 1;
     watchHold("logic-math");
-    if (!try proveScriptState(gpa, engine)) return 1;
+    if (!try proveScriptState(gpa, engine)) conformance_failures += 1;
     watchHold("script-state");
-    if (!try proveLocomotion(gpa, engine)) return 1;
+    if (!try proveLocomotion(gpa, engine)) conformance_failures += 1;
     watchHold("locomotion");
-    if (!try proveHdrComposite(gpa, engine)) return 1;
+    if (!try proveHdrComposite(gpa, engine)) conformance_failures += 1;
     watchHold("hdr-composite");
-    if (!try proveDirectionalLight(gpa, engine)) return 1;
+    if (!try proveDirectionalLight(gpa, engine)) conformance_failures += 1;
     watchHold("directional-light");
-    if (!try proveLitMorph(gpa, engine)) return 1;
+    if (!try proveLitMorph(gpa, engine)) conformance_failures += 1;
     watchHold("lit-morph");
-    if (!try proveModelMaterial(gpa, engine)) return 1;
+    if (!try proveModelMaterial(gpa, engine)) conformance_failures += 1;
     watchHold("model-material");
-    if (!try proveHemisphereIBL(gpa, engine)) return 1;
+    if (!try proveHemisphereIBL(gpa, engine)) conformance_failures += 1;
     watchHold("hemisphere-ibl");
-    if (!try proveAudio(gpa, engine)) return 1;
+    if (!try proveAudio(gpa, engine)) conformance_failures += 1;
     watchHold("audio");
-    if (!try proveBuiltinSfx(gpa, engine)) return 1;
+    if (!try proveBuiltinSfx(gpa, engine)) conformance_failures += 1;
     watchHold("builtin sfx");
-    if (!try proveFlashDetection(gpa, engine)) return 1;
+    if (!try proveFlashDetection(gpa, engine)) conformance_failures += 1;
     watchHold("flash detection");
-    if (!try proveOutputMix(gpa, engine)) return 1;
+    if (!try proveOutputMix(gpa, engine)) conformance_failures += 1;
     watchHold("output mix");
-    if (!try proveCameraControls(gpa, engine)) return 1;
+    if (!try proveCameraControls(gpa, engine)) conformance_failures += 1;
     watchHold("camera controls");
-    if (!try proveEventTrigger(gpa, engine)) return 1;
+    if (!try proveEventTrigger(gpa, engine)) conformance_failures += 1;
     watchHold("event trigger");
-    if (!try proveShowHideSwap(gpa, engine)) return 1;
+    if (!try proveShowHideSwap(gpa, engine)) conformance_failures += 1;
     watchHold("show hide swap");
-    if (!try proveVolumeTrigger(gpa, engine)) return 1;
+    if (!try proveVolumeTrigger(gpa, engine)) conformance_failures += 1;
     watchHold("volume trigger");
-    if (!try proveLayoutComposite(gpa, engine)) return 1;
+    if (!try proveLayoutComposite(gpa, engine)) conformance_failures += 1;
     watchHold("layout composite");
-    if (!try proveCompositeOpacity(gpa, engine)) return 1;
+    if (!try proveCompositeOpacity(gpa, engine)) conformance_failures += 1;
     watchHold("composite opacity");
-    if (!try proveSourceMask(gpa, engine)) return 1;
+    if (!try proveSourceMask(gpa, engine)) conformance_failures += 1;
     watchHold("source mask");
-    if (!try proveChromaSpill(gpa, engine)) return 1;
+    if (!try proveChromaSpill(gpa, engine)) conformance_failures += 1;
     watchHold("chroma spill");
-    if (!try proveSourceSegmentation(gpa, engine)) return 1;
+    if (!try proveSourceSegmentation(gpa, engine)) conformance_failures += 1;
     watchHold("source segmentation");
-    if (!try proveGeofilter(gpa, engine)) return 1;
+    if (!try proveGeofilter(gpa, engine)) conformance_failures += 1;
     watchHold("geofilter");
-    if (!try proveBrushStroke(gpa, engine)) return 1;
+    if (!try proveBrushStroke(gpa, engine)) conformance_failures += 1;
     watchHold("brush stroke");
-    if (!try proveStampBrush(gpa, engine)) return 1;
+    if (!try proveStampBrush(gpa, engine)) conformance_failures += 1;
     watchHold("stamp brush");
-    if (!try proveValueStability(gpa, engine)) return 1;
+    if (!try proveValueStability(gpa, engine)) conformance_failures += 1;
     watchHold("value stability");
-    if (!try proveBlur(gpa, engine)) return 1;
+    if (!try proveBlur(gpa, engine)) conformance_failures += 1;
     watchHold("blur");
-    if (!try proveGrade(gpa, engine)) return 1;
+    if (!try proveGrade(gpa, engine)) conformance_failures += 1;
     watchHold("grade");
-    if (!try proveColorAdjust(gpa, engine)) return 1;
+    if (!try proveColorAdjust(gpa, engine)) conformance_failures += 1;
     watchHold("color adjust");
-    if (!try proveBloom(gpa, engine)) return 1;
+    if (!try proveBloom(gpa, engine)) conformance_failures += 1;
     watchHold("bloom");
-    if (!try proveStackedPostEffects(gpa, engine)) return 1;
+    if (!try proveStackedPostEffects(gpa, engine)) conformance_failures += 1;
     watchHold("stacked post effects");
-    if (!try proveStylize(gpa, engine)) return 1;
+    if (!try proveStylize(gpa, engine)) conformance_failures += 1;
     watchHold("stylize");
-    if (!try proveEdge(gpa, engine)) return 1;
+    if (!try proveEdge(gpa, engine)) conformance_failures += 1;
     watchHold("edge");
-    if (!try proveWarp(gpa, engine)) return 1;
+    if (!try proveWarp(gpa, engine)) conformance_failures += 1;
     watchHold("warp");
-    if (!try proveLiquifySymmetry(gpa, engine)) return 1;
+    if (!try proveLiquifySymmetry(gpa, engine)) conformance_failures += 1;
     watchHold("liquify symmetry");
-    if (!try proveBodyReshapeMasked(gpa, engine)) return 1;
+    if (!try proveBodyReshapeMasked(gpa, engine)) conformance_failures += 1;
     watchHold("body reshape");
-    if (!try proveReshapeBody(gpa, engine)) return 1;
+    if (!try proveReshapeBody(gpa, engine)) conformance_failures += 1;
     watchHold("reshape body node");
-    if (!try proveReshapeBank(gpa, engine)) return 1;
+    if (!try proveReshapeBank(gpa, engine)) conformance_failures += 1;
     watchHold("reshape bank");
-    if (!try proveFaceTransform(gpa, engine)) return 1;
+    if (!try proveFaceTransform(gpa, engine)) conformance_failures += 1;
     watchHold("face transform");
-    if (!try proveExpressionScript(gpa, engine)) return 1;
+    if (!try proveExpressionScript(gpa, engine)) conformance_failures += 1;
     watchHold("expression script");
-    if (!try proveEmber(gpa, engine)) return 1;
+    if (!try proveEmber(gpa, engine)) conformance_failures += 1;
     watchHold("ember");
-    if (!try proveStarSprite(gpa, engine)) return 1;
+    if (!try proveStarSprite(gpa, engine)) conformance_failures += 1;
     watchHold("star sprite");
-    if (!try proveParticlePatterns(gpa, engine)) return 1;
+    if (!try proveParticlePatterns(gpa, engine)) conformance_failures += 1;
     watchHold("particle patterns");
-    if (!try proveParticleTrail(gpa, engine)) return 1;
+    if (!try proveParticleTrail(gpa, engine)) conformance_failures += 1;
     watchHold("particle trail");
-    if (!try provePresetLibrary(gpa, engine)) return 1;
+    if (!try provePresetLibrary(gpa, engine)) conformance_failures += 1;
     watchHold("preset library");
-    if (!try proveSubEmitter(gpa, engine)) return 1;
+    if (!try proveSubEmitter(gpa, engine)) conformance_failures += 1;
     watchHold("sub emitter");
-    if (!try proveGpuParticles(gpa, engine)) return 1;
+    if (!try proveGpuParticles(gpa, engine)) conformance_failures += 1;
     watchHold("gpu particles");
-    if (!try proveGpuForces(gpa, engine)) return 1;
+    if (!try proveGpuForces(gpa, engine)) conformance_failures += 1;
     watchHold("gpu forces");
-    if (!try proveParticleCollider(gpa, engine)) return 1;
+    if (!try proveParticleCollider(gpa, engine)) conformance_failures += 1;
     watchHold("particle collider");
-    if (!try proveMeshParticles(gpa, engine)) return 1;
+    if (!try proveMeshParticles(gpa, engine)) conformance_failures += 1;
     watchHold("mesh particles");
-    if (!try proveRibbon(gpa, engine)) return 1;
+    if (!try proveRibbon(gpa, engine)) conformance_failures += 1;
     watchHold("particle ribbon");
-    if (!try proveFaceSparkle(gpa, engine)) return 1;
+    if (!try proveFaceSparkle(gpa, engine)) conformance_failures += 1;
     watchHold("face sparkle");
-    if (!try proveJsonPostEffect(gpa, engine)) return 1;
+    if (!try proveJsonPostEffect(gpa, engine)) conformance_failures += 1;
     watchHold("json post effect");
-    if (!try proveJsonParticles(gpa, engine)) return 1;
+    if (!try proveJsonParticles(gpa, engine)) conformance_failures += 1;
     watchHold("json particles");
-    if (!try proveFullStack(gpa, engine)) return 1;
+    if (!try proveFullStack(gpa, engine)) conformance_failures += 1;
     watchHold("full stack");
-    if (!try proveTiledPostEffect(gpa, engine)) return 1;
+    if (!try proveTiledPostEffect(gpa, engine)) conformance_failures += 1;
     watchHold("tiled post effect");
-    if (!try proveHostileManifest(gpa, engine)) return 1;
+    if (!try proveHostileManifest(gpa, engine)) conformance_failures += 1;
     watchHold("hostile manifest");
-    if (!try proveManifestFuzz(gpa, engine)) return 1;
+    if (!try proveManifestFuzz(gpa, engine)) conformance_failures += 1;
     watchHold("manifest fuzz");
-    if (!try proveNoLeaks(gpa, engine, &frame_counter)) return 1;
+    if (!try proveNoLeaks(gpa, engine, &frame_counter)) conformance_failures += 1;
     watchHold("no leaks");
-    if (!try provePerFrameBudget(gpa, engine, &frame_counter)) return 1;
+    if (!try provePerFrameBudget(gpa, engine, &frame_counter)) conformance_failures += 1;
     watchHold("per frame budget");
-    if (!try provePerFrameAllocCalls(gpa, engine, &frame_counter)) return 1;
+    if (!try provePerFrameAllocCalls(gpa, engine, &frame_counter)) conformance_failures += 1;
     watchHold("per frame alloc calls");
-    if (!try provePeakBoundedCapture(gpa, engine, &frame_counter)) return 1;
+    if (!try provePeakBoundedCapture(gpa, engine, &frame_counter)) conformance_failures += 1;
     watchHold("peak bounded capture");
-    if (!try proveSecondLifecycle(gpa, engine, &frame_counter)) return 1;
+    if (!try proveSecondLifecycle(gpa, engine, &frame_counter)) conformance_failures += 1;
     watchHold("second lifecycle");
-    if (!try proveDegradationActuates(gpa, engine)) return 1;
+    if (!try proveDegradationActuates(gpa, engine)) conformance_failures += 1;
     watchHold("degradation actuates");
-    if (!try proveLensTargetsRelease(gpa, engine)) return 1;
+    if (!try proveLensTargetsRelease(gpa, engine)) conformance_failures += 1;
     watchHold("lens targets release");
-    if (!try provePoolServesScratchTargets(gpa, engine)) return 1;
-    if (!try proveOptionalNodeDeclaresBestEffort(gpa, engine)) return 1;
+    if (!try provePoolServesScratchTargets(gpa, engine)) conformance_failures += 1;
+    if (!try proveOptionalNodeDeclaresBestEffort(gpa, engine)) conformance_failures += 1;
     watchHold("optional node declares best effort");
+    if (!try provePauseLeavesNoGap(gpa, engine)) conformance_failures += 1;
+    watchHold("pause leaves no gap");
+    if (!try proveClipDrivesTheGraph(gpa, engine)) conformance_failures += 1;
+    watchHold("clip drives the graph");
+    if (!try proveColorMatchesOnBothPaths(gpa, engine)) conformance_failures += 1;
+    watchHold("colour matches on both paths");
     watchHold("pool serves scratch targets");
+    if (conformance_failures != 0) {
+        std.debug.print("conformance: {d} proof(s) failed\n", .{conformance_failures});
+        return 1;
+    }
     return 0;
 }

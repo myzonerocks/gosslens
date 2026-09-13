@@ -1,7 +1,7 @@
 # Gosslens - TypeScript SDK
 
-TypeScript SDK for [Gosslens](../../include/gosslens.h), a camera and AR engine
-behind one C ABI, compiled to `wasm32`. It wraps the engine as `GossEngine`,
+TypeScript SDK for [Gosslens](../../include/gosslens.h), real-time visual
+plumbing behind one C ABI, compiled to `wasm32`. It wraps the engine as `GossEngine`,
 `GossSession`, and `Gosslens`, the same names the [Swift](../swift/README.md) and
 [Kotlin](../kotlin/README.md) SDKs use.
 
@@ -466,6 +466,56 @@ session.setSourceComposite("guest", 1, 2, [0, 1, 0], 0.4);   // chroma-key green
 
 `defineScreenShare` registers a source whose frame letterboxes to fit its cell,
 `removeSource` drops one, and `clearLayout` returns to the camera alone.
+
+## The agent rail
+
+One versioned record of everything the engine sees, what the frame says, what it
+remembers, and the screen it is looking at.
+
+```ts
+// What the engine sees, as one record and as JSON.
+const record = session.perceptionSnapshot();
+const json = session.perceptionJson();
+
+// What the frame says, once the text rail is on.
+session.enableText(detectorBytes, recognizerBytes, keysBytes);
+for (const reading of session.readings()) {
+  console.log(reading.text, reading.quad, reading.trackId);
+}
+
+// What it remembers, and finding it again.
+session.memoryOpen(512);
+session.remember(1, embedding);
+for (const match of session.memorySearch(query, 5)) console.log(match.id, match.score);
+
+// And sealed under a host key. The nonce is yours: reusing one under the same key
+// breaks the cipher.
+const sealed = session.memorySaveSealed(key, nonce);
+session.memoryLoadSealed(key, sealed);
+
+// A screen, through the browser's own picker and consent.
+const share = await shareScreen();
+if (share) {
+  share.step(session);
+  share.stop();
+}
+
+// The room it is in: the floor, where a cup goes, a distance with its doubt, and
+// what another device's origin is in this one.
+const floor = session.floorPlaneId();
+for (const spot of session.placeOn({ width: 0.1, depth: 0.1, height: 0.12 })) {
+  console.log(spot.planeId, spot.position, spot.freeFraction);
+}
+const span = session.measureBetween(a, b, 0.01, 0.01);
+const alignment = session.alignShared(theirLandmarks);
+const route = session.pathAcrossWorld(here, there);
+
+// And what this session will answer at all.
+session.setScope(0xffffffff, gossVerbMask([GossVerb.Annotate, GossVerb.SubmitFrame]));
+```
+
+A read out of scope is dropped from the record rather than failing the call; a
+verb out of scope is refused. Nothing here sends a frame anywhere.
 
 ## Lives and calls
 

@@ -4,21 +4,37 @@
 //! file's surface.
 
 const std = @import("std");
+const media = @import("media");
 
 /// How the vended native handle binds: a sampleable texture, or a
 /// platform window the renderer presents into.
 pub const NativeHandleKind = enum { texture, window };
 pub const native_handle_kind: NativeHandleKind = .texture;
-/// Whether this backend muxes a submitted audio track.
-pub const audio_supported = true;
 
-/// Whether a real backend exists on this target.
-pub const supported = true;
-
-pub const Codec = enum(u32) {
-    h264 = 0,
-    hevc = 1,
+/// What this backend actually does, declared rather than assumed. The values come
+/// from what recording_apple.mm configures: an AVAssetWriter over MPEG-4 taking
+/// h264 or hevc, fed BGRA pixel buffers from its own pool, with hevc carrying the
+/// ten-bit hdr path. The engine asks this instead of reading two booleans.
+pub const backend: media.Backend = .{
+    .name = "avassetwriter",
+    .video = &.{
+        .{ .codec = .h264, .max_width = 4096, .max_height = 2304 },
+        .{ .codec = .hevc, .max_width = 4096, .max_height = 2304, .max_bit_depth = 10, .hdr = true },
+    },
+    .audio = &.{.aac},
+    .containers = &.{ .mp4, .mov },
+    .zero_copy = true,
+    .rank = 10,
 };
+
+/// Derived from the declaration above, so these stay true by construction rather
+/// than being a second place to keep in step. They remain because 131 call sites
+/// read them; the declaration is the contract now.
+pub const supported = backend.video.len > 0;
+pub const audio_supported = backend.audio.len > 0;
+
+/// One vocabulary: the codec a host names is the core's, not this file's.
+pub const Codec = media.VideoCodec;
 
 pub const Config = struct {
     width: u32,

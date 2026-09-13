@@ -1,0 +1,74 @@
+snapshot schema 1
+section frame tag=1 version=1 head=40 repeat=0
+  head width u32 offset=0
+  head height u32 offset=4
+  head pixel_format u32 offset=8
+  head color_standard u32 offset=12
+  head color_range u32 offset=16
+  head flags u32 offset=20
+  head timestamp_us i64 offset=24
+  head frames_submitted u64 offset=32
+section faces tag=2 version=1 head=4 repeat=0
+  head count u32 offset=0
+section hands tag=3 version=1 head=4 repeat=0
+  head count u32 offset=0
+section bodies tag=4 version=1 head=4 repeat=0
+  head count u32 offset=0
+section segmentation tag=5 version=1 head=4 repeat=0
+  head live u32 offset=0
+section world tag=6 version=1 head=12 repeat=0
+  head tracking_state u32 offset=0
+  head plane_count u32 offset=4
+  head anchor_count u32 offset=8
+section depth tag=7 version=1 head=4 repeat=0
+  head live u32 offset=0
+section scene tag=8 version=1 head=4 repeat=8
+  head count u32 offset=0
+  repeat channel u32
+  repeat score f32
+section audio tag=10 version=1 head=12 repeat=0
+  head level f32 offset=0
+  head beat u32 offset=4
+  head engine_fed u32 offset=8
+section engine tag=12 version=1 head=20 repeat=0
+  head degrade_level u32 offset=0
+  head degrade_transitions u32 offset=4
+  head frames_rendered u64 offset=8
+  head script_faults u32 offset=16
+section embedding tag=13 version=1 head=8 repeat=4
+  head dim u32 offset=0
+  head source u32 offset=4
+  repeat value f32
+section detections tag=14 version=1 head=4 repeat=24
+  head count u32 offset=0
+  repeat label u32
+  repeat score f32
+  repeat x f32
+  repeat y f32
+  repeat width f32
+  repeat height f32
+section lens tag=11 version=2 head=12 repeat=12
+  head active u32 offset=0
+  head count u32 offset=4
+  head id_len u32 offset=8
+  repeat node_index u32
+  repeat state u32
+  repeat reason u32
+section text tag=9 version=2 head=4 repeat=64
+  head count u32 offset=0
+  repeat x0 f32
+  repeat y0 f32
+  repeat x1 f32
+  repeat y1 f32
+  repeat x2 f32
+  repeat y2 f32
+  repeat x3 f32
+  repeat y3 f32
+  repeat confidence f32
+  repeat origin u32
+  repeat script u32
+  repeat direction u32
+  repeat track_id u32
+  repeat line u32
+  repeat paragraph u32
+  repeat text_len u32

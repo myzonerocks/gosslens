@@ -1,6 +1,6 @@
 # Gosslens - Kotlin SDK
 
-Kotlin SDK for [Gosslens](../../include/gosslens.h), a camera and AR engine
+Kotlin SDK for [Gosslens](../../include/gosslens.h), real-time visual plumbing
 behind one C ABI. It wraps the engine as `GossEngine`, `GossSession`, and `Gosslens`, the same
 names the [Swift](../swift/README.md) and [TypeScript](../ts/README.md) SDKs use.
 
@@ -27,7 +27,7 @@ publishes the signed artifact to Maven Central. Add one coordinate:
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("io.github.avosa:gosslens:0.12.0")
+    implementation("io.github.avosa:gosslens:0.12.0-alpha.3")
 }
 ```
 
@@ -59,7 +59,7 @@ dependencyResolutionManagement {
 
 // build.gradle.kts
 dependencies {
-    implementation("com.github.myzonerocks:gosslens:v0.12.0")
+    implementation("com.github.myzonerocks:gosslens:v0.12.0-alpha.3")
 }
 ```
 
@@ -490,6 +490,52 @@ is in [API.md](../../docs/API.md).
 ## Demo app
 
 [`demo/`](demo/) is a real Android app; see [`demo/README.md`](demo/README.md).
+
+## The agent rail
+
+One versioned record of everything the engine sees, what the frame says, what it
+remembers, and the screen it is looking at.
+
+```kotlin
+// What the engine sees, as one record and as JSON.
+val record = session.perceptionSnapshot(session.selectAll(), buffer)
+val json = session.perceptionJson(session.selectAll(), buffer)
+
+// What the frame says, once the text rail is on.
+session.enableText(detectorBytes, recognizerBytes, keysBytes)
+session.readings().forEach { println("${it.text} ${it.trackId}") }
+
+// What it remembers, and finding it again.
+session.memoryOpen(512)
+session.remember(1L, embedding)
+session.memorySearch(query, 5).forEach { println("${it.id} ${it.score}") }
+
+// And sealed under a host key. The nonce is yours: reusing one under the same key
+// breaks the cipher.
+val sealed = session.memorySaveSealed(key, nonce)
+session.memoryLoadSealed(key, sealed)
+
+// A screen, after MediaProjection consent the Activity collects.
+GossScreenCapture.grant(widthPx, heightPx, density, "Phone display")
+val screen = session.openScreen(surfaceId)
+session.stepScreen(screen)
+
+// The room it is in: the floor, where a cup goes, a distance with its doubt, and
+// what another device's origin is in this one.
+val floor = session.floorPlaneId()
+session.placeOn(width = 0.1f, depth = 0.1f, height = 0.12f).forEach {
+    println("${it.planeId} ${it.position.toList()} ${it.freeFraction}")
+}
+val span = session.measureBetween(a, b, fromAccuracyM = 0.01f, toAccuracyM = 0.01f)
+val alignment = session.alignShared(theirLandmarks)
+val route = session.pathAcrossWorld(here, there)
+
+// And what this session will answer at all.
+session.setScope(-1, GossSession.Verb.ANNOTATE.bit or GossSession.Verb.SUBMIT_FRAME.bit)
+```
+
+A read out of scope is dropped from the record rather than failing the call; a
+verb out of scope is refused. Nothing here sends a frame anywhere.
 
 ## Tests
 
