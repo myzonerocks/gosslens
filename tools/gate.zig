@@ -6,6 +6,7 @@
 //!   --commit-msg <file> commit-msg hook: scan the message being written
 //!   --log <range>       CI: scan commit messages in a rev range
 //!   --diff <range>      CI: scan added lines in a rev range for comment hygiene
+//!   --pr-title <file>   CI: scan a PR title for provenance, counts and shape
 //!   --pr-body <file>    CI: scan a PR body for provenance and shape
 //!
 //! Direction one, outbound: no layer of ignore (repo, .git/info/exclude, or a
@@ -175,6 +176,21 @@ const platform_acquire_release = [_]struct { acquire: []const u8, release: []con
 // A PR body is a short paragraph, not a report: what changed and why,
 // nothing about how the change was proven out. Modeled on how ghostty's
 // own PRs read - three sentences, no headers, no checklist.
+const counted_numbers = [_][]const u8{
+    "two",      "three",     "four",      "five",     "six",
+    "seven",    "eight",     "nine",      "ten",      "eleven",
+    "twelve",   "thirteen",  "fourteen",  "fifteen",  "sixteen",
+    "seventeen", "eighteen", "nineteen",  "twenty",   "thirty",
+};
+// Sets that grow. A platform or a backend count is the shape of the world
+// rather than a tally, so neither is here.
+const countable_nouns = [_][]const u8{
+    "tools",   "ops",    "operations", "verbs",  "operators",
+    "SDKs",    "proofs", "checks",     "shapes", "models",
+    "tests",   "sections", "fields",   "structs",
+    "kinds",   "stages",   "entry points",
+};
+const max_pr_title_bytes: usize = 120;
 const max_pr_body_lines: usize = 12;
 const max_pr_body_bytes: usize = 900;
 
@@ -449,6 +465,31 @@ const Gate = struct {
             const snippet = clauseSnippet(text, idx);
             try g.flag("long-dash: {s} uses a long dash (\"{s}\"); a long dash reads as AI-written, so use a plain hyphen '-' or restructure the sentence. En-dashes are only for number ranges.", .{ context, snippet });
             from = idx + 3;
+        }
+    }
+
+    // Every merged title in this repository is a plain sentence saying what changed, and
+    // the only colons belong to a release prefix. A label with a flourish after it is
+    // the shape this refuses: it reads as written by a machine, and nothing saw titles.
+    fn checkTitleShape(g: *Gate, title: []const u8) !void {
+        if (title.len == 0) {
+            try g.flag("title-shape: the PR title is empty", .{});
+            return;
+        }
+        if (title.len > max_pr_title_bytes) {
+            try g.flag("title-shape: the PR title is {d} bytes; keep it to {d}, one plain sentence", .{ title.len, max_pr_title_bytes });
+        }
+        if (std.mem.indexOfScalar(u8, title, ':') != null and !std.mem.startsWith(u8, title, "release ")) {
+            try g.flag("title-shape: '{s}' puts a label before a colon; say what changed in one plain sentence, the way every merged title here does", .{title});
+        }
+        for (counted_numbers) |number| {
+            var at: usize = 0;
+            while (indexOfWord(title, number, at)) |found| {
+                at = found + number.len;
+                if (nearbyCountable(title, at, &countable_nouns)) |noun| {
+                    try g.flag("count-prose: the PR title says \"{s} {s}\"; name the thing, not how many", .{ number, noun });
+                }
+            }
         }
     }
 
@@ -1020,20 +1061,8 @@ const Gate = struct {
     // A count in published prose is a second source of truth with nothing holding it
     // to the first: wrong the moment the set changes, and no test notices.
     fn checkCountProse(g: *Gate, paths: []const []const u8) !void {
-        const numbers = [_][]const u8{
-            "two",      "three",     "four",      "five",     "six",
-            "seven",    "eight",     "nine",      "ten",      "eleven",
-            "twelve",   "thirteen",  "fourteen",  "fifteen",  "sixteen",
-            "seventeen", "eighteen", "nineteen",  "twenty",   "thirty",
-        };
-        // Sets that grow. A platform or a backend count is the shape of the world
-        // rather than a tally, so neither is here.
-        const countable = [_][]const u8{
-            "tools",   "ops",    "operations", "verbs",  "operators",
-            "SDKs",    "proofs", "checks",     "shapes", "models",
-            "tests",   "sections", "fields",   "structs",
-            "kinds",   "stages",   "entry points",
-        };
+        const numbers = counted_numbers;
+        const countable = countable_nouns;
         for (paths) |path| {
             // Only documents that describe the surface as it stands: a count inside a
             // dated ledger entry records what was true that day and is never rewritten,
@@ -1526,7 +1555,7 @@ pub fn main(init: std.process.Init) !u8 {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, arena);
     _ = args.next(); // program path
     const mode = args.next() orelse {
-        std.debug.print("gate: usage: gate --staged | --tree | --commit-msg <file> | --log <range> | --diff <range> | --pr-body <file>\n", .{});
+        std.debug.print("gate: usage: gate --staged | --tree | --commit-msg <file> | --log <range> | --diff <range> | --pr-title <file> | --pr-body <file>\n", .{});
         return 2;
     };
 
@@ -1598,6 +1627,16 @@ pub fn main(init: std.process.Init) !u8 {
         };
         try g.checkCommentHygiene(&.{range});
         try g.checkChangelog(range);
+    } else if (std.mem.eql(u8, mode, "--pr-title")) {
+        const file = args.next() orelse {
+            std.debug.print("gate: --pr-title needs a file argument\n", .{});
+            return 2;
+        };
+        const raw = try Io.Dir.cwd().readFileAlloc(g.io, file, arena, .limited(max_file_scan_bytes));
+        const title = std.mem.trim(u8, raw, " \t\r\n");
+        try g.checkMessage(title, "PR title");
+        try g.checkClauseDashes(title, "PR title");
+        try g.checkTitleShape(title);
     } else if (std.mem.eql(u8, mode, "--pr-body")) {
         const file = args.next() orelse {
             std.debug.print("gate: --pr-body needs a file argument\n", .{});
@@ -1983,14 +2022,27 @@ fn stripLineComments(arena: std.mem.Allocator, text: []const u8) ![]u8 {
 }
 
 /// A word boundary search, so "ten" does not match inside "often".
+/// Case-insensitive on purpose: a count opening a sentence is capitalised, and matching
+/// only the lower-case spelling is how "Eighteen tools answer" survived every sweep for
+/// exactly that phrase.
 fn indexOfWord(text: []const u8, word: []const u8, from: usize) ?usize {
     var at = from;
-    while (std.mem.indexOfPos(u8, text, at, word)) |found| {
+    while (indexOfIgnoreCasePos(text, word, at)) |found| {
         at = found + 1;
         const before_ok = found == 0 or !isWordByte(text[found - 1]);
         const after = found + word.len;
         const after_ok = after >= text.len or !isWordByte(text[after]);
         if (before_ok and after_ok) return found;
+    }
+    return null;
+}
+
+/// The first index at or after `from` where `needle` appears, ignoring case.
+fn indexOfIgnoreCasePos(text: []const u8, needle: []const u8, from: usize) ?usize {
+    if (needle.len == 0 or text.len < needle.len) return null;
+    var i = from;
+    while (i + needle.len <= text.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(text[i .. i + needle.len], needle)) return i;
     }
     return null;
 }
