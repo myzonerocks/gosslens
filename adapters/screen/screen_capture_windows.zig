@@ -84,9 +84,29 @@ const bi_rgb: u32 = 0;
 /// convention rather than winapi: they are the same on every Windows this targets, and
 /// winapi names one the host backend cannot even analyse this file under.
 const Module = *opaque {};
-extern "kernel32" fn LoadLibraryW(name: [*:0]const u16) callconv(.c) ?Module;
-extern "kernel32" fn GetProcAddress(module: Module, name: [*:0]const u8) callconv(.c) ?*anyopaque;
-extern "kernel32" fn FreeLibrary(module: Module) callconv(.c) i32;
+
+/// Declared only where the target actually has kernel32: this file is compiled for the
+/// host too, so that its pure logic is checked everywhere, and an extern that no host
+/// library defines fails the link rather than the compile. The host arm answers null,
+/// which is the same answer the backend gives when the loader refuses.
+const kernel32 = if (@import("builtin").target.os.tag == .windows) struct {
+    extern "kernel32" fn LoadLibraryW(name: [*:0]const u16) callconv(.c) ?Module;
+    extern "kernel32" fn GetProcAddress(module: Module, name: [*:0]const u8) callconv(.c) ?*anyopaque;
+    extern "kernel32" fn FreeLibrary(module: Module) callconv(.c) i32;
+} else struct {
+    fn LoadLibraryW(_: [*:0]const u16) callconv(.c) ?Module {
+        return null;
+    }
+    fn GetProcAddress(_: Module, _: [*:0]const u8) callconv(.c) ?*anyopaque {
+        return null;
+    }
+    fn FreeLibrary(_: Module) callconv(.c) i32 {
+        return 0;
+    }
+};
+const LoadLibraryW = kernel32.LoadLibraryW;
+const GetProcAddress = kernel32.GetProcAddress;
+const FreeLibrary = kernel32.FreeLibrary;
 
 /// The entry point a name resolves to, cast to the signature the table declares.
 fn lookup(comptime T: type, module: Module, comptime name: [:0]const u8) ?T {
