@@ -1646,6 +1646,8 @@ pub const Session = struct {
     location_lat: f64 = 0,
     location_lon: f64 = 0,
     location_accuracy_m: f32 = 0,
+    /// When the held fix was taken, so a later one cannot be replaced by an older.
+    location_timestamp_us: i64 = 0,
     location_engine_fed: bool = false,
     geofence: ?GeoRegion = null,
     /// Named geofences a lens fires by name, alongside the single default one.
@@ -8173,8 +8175,12 @@ fn composeLayout(r: *render.Renderer, s: *Session, current: CurrentFrame, target
 pub export fn goss_session_submit_location(session: ?*Session, latitude: f64, longitude: f64, horizontal_accuracy_m: f32, timestamp_us: i64) Status {
     const s = session orelse return .invalid_argument;
     if (!s.scope.allowsVerb(.submit_world)) return .out_of_scope;
-    _ = timestamp_us;
     if (latitude < -90 or latitude > 90 or longitude < -180 or longitude > 180) return .invalid_argument;
+    // The stamp the caller passes was discarded, so an out of order fix overwrote a
+    // newer one and the accuracy gate below judged a position it could not date. An
+    // older fix is accepted and kept, rather than replacing what the session already has.
+    if (s.location_engine_fed and timestamp_us < s.location_timestamp_us) return .ok;
+    s.location_timestamp_us = timestamp_us;
     s.location_lat = latitude;
     s.location_lon = longitude;
     s.location_accuracy_m = if (horizontal_accuracy_m > 0) horizontal_accuracy_m else 0;
