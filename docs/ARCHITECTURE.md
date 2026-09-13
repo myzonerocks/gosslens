@@ -216,6 +216,18 @@ What an agent needs sits on the same seams, not beside them.
   probability map becomes oriented quadrilaterals from each blob's second
   moments; a region unwarps to an upright crop; a region whose rectified pixels
   have not changed keeps its reading, so a static sign costs the detector alone.
+- **The model rail** (`adapters/tracking/onnx.zig`, `onnx_plan.zig`) runs a
+  published ONNX net with no vendored C++: it folds, fuses and plans at load, then
+  every frame allocates out of one buffer whose every operation is constant time,
+  sized from a measuring walk. A frame that outgrows it spills and sizes the plan
+  for the next one rather than being thrown away, and the session report says how
+  many bytes the rail reuses and how often it grew. A net's input range is part of the
+  contract, not an assumption: an export wanting zero to two hundred and fifty five
+  fed zero to one runs and finds nothing, which reads as working.
+- **What is in frame** comes from a detector's own outputs: a `detect` block names which
+  tensors hold the boxes, scores, classes and count, and the engine reads them into the
+  record as labelled boxes in the normalized frame, publishing a detection arriving,
+  leaving, or changing what it is.
 - **The memory plane** (`core/memory/`) is a navigable graph over embeddings with
   the exact search beside it as the oracle its recall is measured against, a
   bounded event log whose every bound retires the oldest rather than refusing the
@@ -225,15 +237,18 @@ What an agent needs sits on the same seams, not beside them.
   normalized point an agent sends lands on a real pixel and a point off the
   surface is refused rather than answered. The capture itself is per platform
   behind one seam (`adapters/screen/`): ScreenCaptureKit on Apple, MediaProjection
-  on Android whose consent dialog only an Activity can show, and getDisplayMedia
-  in the web SDK where the browser owns the picker.
+  on Android whose consent dialog only an Activity can show, getDisplayMedia in the
+  web SDK where the browser owns the picker, and on a desktop host Xlib or the
+  Wayland portal with its PipeWire stream, chosen at run time from the session the
+  process is in, or GDI on Windows. Every desktop library loads at run time, so a
+  build needs none of their headers.
 - **Spatial state** (`core/spatial/`) answers the questions an agent asks of a
   room it did not measure: a plane as a named kind rather than a platform number,
   where a footprint fits ordered by the room each surface keeps, a distance with
   the uncertainty its inputs carried, and the transform between two devices'
   origins solved from landmarks rather than a pose neither could read.
 - **Scope** (`core/perception/scope.zig`) is two words: the sections a caller may
-  read and the sixteen verbs it may act with, each verb checked at every op it
+  read and the verbs it may act with, each verb checked at every op it
   gates. A read out of scope is dropped from the record; a verb out of scope answers
   `out_of_scope`, a permission a host can grant, never `unsupported`. It only ever
   narrows, so widening means a new session.

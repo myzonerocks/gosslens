@@ -206,7 +206,7 @@ pub const Core = struct {
         result.frame_serial = core.serial + 1;
         result.timestamp_us = timestamp_us;
         result.presence = presence;
-        result.landmark_count_out = pose.landmark_count;
+        result.landmark_count = pose.landmark_count;
         for (0..pose.landmark_count) |at| {
             result.landmarks[at * 3] = landmarks[at].x;
             result.landmarks[at * 3 + 1] = landmarks[at].y;

@@ -17,8 +17,12 @@ else
 fi
 cc="${CC:-cc}"
 
-# Stage libgosslens (static + shared) and the header under zig-out/c.
-( cd "$root" && "$zig" build c )
+# Stage libgosslens (static + shared) and the header under zig-out/c. A build step
+# stages them itself and says so, because a nested build would wait on the cache
+# lock the outer one is holding.
+if [ -z "${GOSS_C_STAGED:-}" ]; then
+    ( cd "$root" && "$zig" build c )
+fi
 
 # Compile and link. The binary goes next to the staged library under zig-out,
 # which is not part of the tracked tree. -rpath lets it find the shared library

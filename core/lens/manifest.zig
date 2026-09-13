@@ -1091,6 +1091,18 @@ pub const MlOutput = struct {
     param: []const u8,
 };
 
+/// Binds a detector's four output tensors so the engine reads what is in frame
+/// rather than one scalar from it: boxes as normalized corners, a score and a class
+/// per detection, and how many the model kept. Anything under the threshold is not
+/// a detection, which is the line the model itself leaves to the caller.
+pub const MlDetect = struct {
+    boxes: u32 = 0,
+    scores: u32 = 2,
+    classes: u32 = 1,
+    count: u32 = 3,
+    threshold: f32 = 0.5,
+};
+
 /// Binds a whole output tensor of an ml.infer node as a segmentation mask: the
 /// tensor is a single-channel image the engine resamples to the mask resolution
 /// and feeds to the named mask channel, so a lens author's own segmenter drives
@@ -1133,6 +1145,9 @@ pub const MlField = struct {
     mask: ?MlMask = null,
     style: ?MlStyle = null,
     depth: ?MlDepth = null,
+    /// A detector's outputs read as detections, so what is in frame reaches the
+    /// record and the event ring instead of one number reaching one parameter.
+    detect: ?MlDetect = null,
     /// A bundled reference image (assets/<stem>.png) sampled into the model's
     /// second input, for a net conditioned on a reference (makeup, style, or
     /// identity transfer). Empty for a one-input model.
@@ -1141,10 +1156,10 @@ pub const MlField = struct {
     /// recurrent pass that fuses across time (denoise, stabilize, upscale).
     /// Mutually exclusive with aux_reference.
     temporal: bool = false,
-    /// The input contract the model was exported with: symmetric samples rgb
-    /// to [-1,1] instead of [0,1], and mean/std divide per channel afterward,
-    /// so an ImageNet-style export reads the numbers it was trained on.
-    input_symmetric: bool = false,
+    /// The input contract the model was exported with: `unit` writes rgb in zero to
+    /// one, `symmetric` in minus one to one, `byte` in zero to two hundred and fifty
+    /// five, and mean and std divide per channel afterward for an ImageNet export.
+    input_range: MlRange = .unit,
     input_mean: [3]f32 = .{ 0, 0, 0 },
     input_std: [3]f32 = .{ 1, 1, 1 },
 };
@@ -1247,7 +1262,12 @@ pub const VoiceTransformField = struct {
     robot: f32 = 0,
 };
 
-/// A diffusion node's restyle slot: the three bundled models the loop runs (a
+/// Which range an ml.infer input plane is written in. It was a boolean that could say
+/// symmetric or nothing, and a detector wanting zero to two hundred and fifty five got
+/// zero to one and returned no detections, which reads as a model that works.
+pub const MlRange = enum { unit, symmetric, byte };
+
+/// A diffusion node's restyle slot: the bundled models the loop runs (a
 /// VAE encoder, a UNet, a VAE decoder), an optional precomputed text embedding
 /// the UNet conditions on, the sprite the restyled frame draws through, and the
 /// sampler settings (few-step count, img2img strength, and noise seed).
@@ -1723,7 +1743,7 @@ fn readVec6(value: std.json.Value, out: *[6]f32) bool {
 }
 
 /// Diagnoses every key an object carries that this parser does not read. A manifest that names a
-/// gesture the parser has no field for used to validate clean and then simply never fire — the
+/// gesture the parser has no field for used to validate clean and then simply never fire. The
 /// object-move reference asked for "scale" and silently could not resize for exactly that reason.
 fn rejectUnknownKeys(diags: *Diagnostics, path: *PathStack, what: []const u8, object: std.json.ObjectMap, comptime known: []const []const u8) error{OutOfMemory}!void {
     var it = object.iterator();
@@ -1737,7 +1757,7 @@ fn rejectUnknownKeys(diags: *Diagnostics, path: *PathStack, what: []const u8, ob
     }
 }
 
-/// Reads a boolean, diagnosing anything else rather than leaving the field at its default — a
+/// Reads a boolean, diagnosing anything else rather than leaving the field at its default. A
 /// gesture written as a string is an authoring mistake, not an off switch.
 fn expectBool(diags: *Diagnostics, path: *PathStack, what: []const u8, key: []const u8, value: std.json.Value) error{OutOfMemory}!?bool {
     if (value == .bool) return value.bool;
@@ -4528,6 +4548,29 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
         }
         path.pop(depth_mark);
     }
+    var detect: ?MlDetect = null;
+    if (getField(object, "detect")) |dv| {
+        const detect_mark = path.push("detect");
+        if (dv != .object) {
+            try diags.add(path.slice(), "ml detect must be an object", .{});
+        } else {
+            var dd: MlDetect = .{};
+            inline for (.{ "boxes", "scores", "classes", "count" }) |name| {
+                if (getField(dv.object, name)) |v| {
+                    if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) {
+                        @field(dd, name) = @intCast(v.integer);
+                    } else {
+                        try diags.add(path.slice(), "ml detect " ++ name ++ " must be a tensor index", .{});
+                    }
+                }
+            }
+            if (getField(dv.object, "threshold")) |v| {
+                dd.threshold = @floatCast(@max(0.0, @min(1.0, numberOf(v) orelse 0.5)));
+            }
+            detect = dd;
+        }
+        path.pop(detect_mark);
+    }
     var aux_reference: []const u8 = "";
     var temporal = false;
     if (getField(object, "aux")) |av| {
@@ -4548,11 +4591,13 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
         try diags.add(path.slice(), "ml aux cannot set both reference and temporal", .{});
         temporal = false;
     }
-    var input_symmetric = false;
+    var input_range: MlRange = .unit;
     if (getField(object, "input_range")) |v| {
         const name = try expectString(diags, path, v) orelse "";
         if (std.mem.eql(u8, name, "symmetric")) {
-            input_symmetric = true;
+            input_range = .symmetric;
+        } else if (std.mem.eql(u8, name, "byte")) {
+            input_range = .byte;
         } else if (name.len > 0 and !std.mem.eql(u8, name, "unit")) {
             const mark = path.push("input_range");
             try diags.add(path.slice(), "input_range names an unknown range '{s}'", .{name});
@@ -4573,7 +4618,8 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
         .depth = depth,
         .aux_reference = try arena.dupe(u8, aux_reference),
         .temporal = temporal,
-        .input_symmetric = input_symmetric,
+        .detect = detect,
+        .input_range = input_range,
         .input_mean = input_mean,
         .input_std = input_std,
     };

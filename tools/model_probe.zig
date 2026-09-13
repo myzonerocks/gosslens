@@ -2,10 +2,11 @@
 //! costs and what it kept. It is how the sides in the model proofs were chosen:
 //! a naive interpreter's budget is a measurement, never a guess.
 
-// Usage: model-probe -- <model.onnx> [side] [runs]
+// Usage: model-probe -- <model.onnx> [side] [runs] [picture] [unit|symmetric|byte]
 
 const std = @import("std");
 const onnx = @import("onnx");
+const stb = @import("stb");
 
 pub fn main(init: std.process.Init) !void {
     var gpa_state: std.heap.DebugAllocator(.{}) = .init;
@@ -20,6 +21,10 @@ pub fn main(init: std.process.Init) !void {
     };
     const side: i64 = if (args.next()) |a| try std.fmt.parseInt(i64, a, 10) else 0;
     const runs: usize = if (args.next()) |a| try std.fmt.parseInt(usize, a, 10) else 3;
+    const picture = args.next();
+    // The same vocabulary the lens manifest uses, plus the byte range it does not
+    // have, because a model that wants 0..255 is the question this argument answers.
+    const range = args.next() orelse "unit";
 
     const bytes = std.Io.Dir.cwd().readFileAlloc(init.io, path, gpa, .limited(512 << 20)) catch |err| {
         std.debug.print("model-probe: {s}: {t}\n", .{ path, err });
@@ -50,6 +55,50 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    // A real picture, sampled into the input tensor the model declared. Without one
+    // the tensor holds zeros, and a detector finds nothing in a blank frame, which
+    // says nothing about whether it works.
+    if (picture) |pic| {
+        const encoded = try std.Io.Dir.cwd().readFileAlloc(init.io, pic, gpa, .limited(64 << 20));
+        defer gpa.free(encoded);
+        var w: c_int = 0;
+        var h: c_int = 0;
+        var channels: c_int = 0;
+        const pixels = stb.stbi_load_from_memory(encoded.ptr, @intCast(encoded.len), &w, &h, &channels, 4) orelse {
+            std.debug.print("model-probe: {s} would not decode\n", .{pic});
+            return error.UndecodablePicture;
+        };
+        const image: struct { width: usize, height: usize, pixels: [*c]u8 } = .{
+            .width = @intCast(w),
+            .height = @intCast(h),
+            .pixels = pixels,
+        };
+        const declared = try engine.inputDims(0, &dims_buf);
+        const nhwc = declared.len == 4 and declared[3] == 3;
+        const edge: usize = @intCast(if (nhwc) declared[1] else declared[2]);
+        const floats = try gpa.alloc(f32, edge * edge * 3);
+        defer gpa.free(floats);
+        for (0..edge) |y| {
+            const sy = y * image.height / edge;
+            for (0..edge) |x| {
+                const sx = x * image.width / edge;
+                const at = (sy * image.width + sx) * 4;
+                inline for (0..3) |c| {
+                    const raw = @as(f32, @floatFromInt(image.pixels[at + c]));
+                    const v = if (std.mem.eql(u8, range, "byte"))
+                        raw
+                    else if (std.mem.eql(u8, range, "symmetric"))
+                        raw / 127.5 - 1.0
+                    else
+                        raw / 255.0;
+                    if (nhwc) floats[(y * edge + x) * 3 + c] = v else floats[c * edge * edge + y * edge + x] = v;
+                }
+            }
+        }
+        try engine.writeInput(0, std.mem.sliceAsBytes(floats));
+        std.debug.print("model-probe: fed {s} at {d}x{d} as {s}\n", .{ pic, image.width, image.height, range });
+    }
+
     const in_dims = try engine.inputDims(0, &dims_buf);
     std.debug.print("model-probe: {s} input", .{path});
     for (in_dims) |d| std.debug.print(" {d}", .{d});
@@ -68,11 +117,23 @@ pub fn main(init: std.process.Init) !void {
         const cost: u64 = @intCast(@divTrunc(started.durationTo(std.Io.Timestamp.now(init.io, .awake)).nanoseconds, 1000));
         best_us = @min(best_us, cost);
     }
+    std.debug.print("model-probe: {d}us an inference, {d} pool growths\n", .{ best_us, engine.pool_growths });
+    // Every output, not the first: a detector's boxes, classes, scores and count are
+    // four tensors, and reporting one of them says nothing about which to read.
     var out_dims_buf: [8]i32 = undefined;
-    const out_dims = try engine.outputDims(0, &out_dims_buf);
-    std.debug.print("model-probe: {d}us an inference, output", .{best_us});
-    for (out_dims) |d| std.debug.print(" {d}", .{d});
-    std.debug.print(", {d} pool growths\n", .{engine.pool_growths});
+    for (0..engine.outputCount()) |i| {
+        const out_dims = try engine.outputDims(i, &out_dims_buf);
+        std.debug.print("model-probe: output {d}", .{i});
+        for (out_dims) |d| std.debug.print(" {d}", .{d});
+        const values = engine.outputFloats(i) catch &[_]f32{};
+        // The first few rather than the first: a box is four numbers and which four
+        // is the question a caller actually has.
+        if (values.len != 0) {
+            std.debug.print(", first", .{});
+            for (values[0..@min(values.len, 8)]) |v| std.debug.print(" {d:.4}", .{v});
+        }
+        std.debug.print("\n", .{});
+    }
 }
 
 /// When the node that failed carries a body, says which node inside it asks for

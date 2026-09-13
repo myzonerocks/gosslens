@@ -57,7 +57,7 @@ const tools = [_]Tool{
         .name = "annotate",
         .description = "Draw back into the frame. An annotation is addressed by id, so moving one every frame leaks nothing, and carries a lifetime because the failure mode of an overlay is annotations nobody removed.",
         .schema =
-        \\{"type":"object","properties":{"id":{"type":"integer"},"kind":{"type":"integer","description":"0 box, 1 label, 2 point."},"rect":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"Normalized left, top, width, height."},"text":{"type":"string"}},"required":["id","kind"]}
+        \\{"type":"object","properties":{"id":{"type":"integer"},"kind":{"type":"integer","description":"1 box, 2 label, 3 point, 4 arrow, 5 path, 6 highlight, 7 mask overlay, 8 image, 9 meter. These are the engine's own numbers; this said 0 box and was off by one."},"rect":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"Normalized left, top, width, height."},"text":{"type":"string"}},"required":["id","kind"]}
         ,
     },
     .{

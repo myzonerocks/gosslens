@@ -47,7 +47,7 @@ Point a client at the binary:
 | `open_screen` | Opens a shared screen or window as a source, and answers its logical size, scale and desktop origin. |
 | `screen_point` | Where a point in the frame lands: in the surface's logical coordinates, in its pixels, and on the desktop. |
 | `model_support` | Which operators a model needs that this build lacks, so a failure is a list rather than the word unsupported. |
-| `engine_report` | The renderer backend, the pool high-water marks, frames drawn, and how far the engine has degraded. |
+| `engine_report` | The renderer backend, the pool high-water marks, frames drawn, how far the engine has degraded, and what a model rail costs: the bytes it reuses each frame and how often it had to grow. |
 
 ## What it does not do
 
@@ -57,7 +57,7 @@ same C ABI the Swift, Kotlin and TypeScript SDKs use, and a session's
 the record. A verb out of scope answers `out_of_scope`, which names a permission a
 host can grant, rather than `unsupported`, which names a capability no amount of
 asking will produce: an agent reading the first knows to ask, and reading the
-second knows to stop. Seventeen verbs cover the acting surface, each one checked at
+second knows to stop. The verbs cover the acting surface, each one checked at
 every op it gates, each one nameable, and a session's scope only ever narrows.
 
 The engine and its session are made on the first call that needs them, so a

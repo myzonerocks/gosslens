@@ -31,6 +31,23 @@ pub const Engine = struct {
         }
     }
 
+    /// The frame buffer this model reuses, and how often it had to grow. The
+    /// TFLite backend answers zero: its arena belongs to the vendor runtime,
+    /// which does not report one, and a made-up number would read as measured.
+    pub fn planBytes(self: *const Engine) usize {
+        return switch (self.backend) {
+            .onnx => |*e| e.planBytes(),
+            .tflite => 0,
+        };
+    }
+
+    pub fn planGrowths(self: *const Engine) u32 {
+        return switch (self.backend) {
+            .onnx => |*e| e.planGrowths(),
+            .tflite => 0,
+        };
+    }
+
     pub fn inputCount(self: *const Engine) usize {
         return switch (self.backend) {
             inline else => |*e| e.inputCount(),

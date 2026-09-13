@@ -124,6 +124,10 @@ pub const Core = struct {
     output_count: u32,
     outputs: [max_outputs][]f32,
     published: bool = false,
+    /// The model's frame buffer and its growths, snapshotted at publish so a
+    /// reader takes them under the lock that already guards the outputs.
+    plan_bytes: usize = 0,
+    plan_growths: u32 = 0,
 
     /// Loads the model under the sandbox bounds. Rejects a model whose input is
     /// not one square RGB image (NHWC or NCHW), whose output count is outside
@@ -267,7 +271,11 @@ pub const Core = struct {
     /// leaving the result in the engine for publish(). Reuses the input plane,
     /// so a compute allocates nothing.
     pub fn compute(core: *Core, frame: sampler.Frame) bool {
-        const range: sampler.Range = if (core.norm.symmetric) .symmetric else .unit;
+        const range: sampler.Range = switch (core.norm.range) {
+            .unit => .unit,
+            .symmetric => .symmetric,
+            .byte => .byte,
+        };
         ml_sample.writeFrameNormalized(&core.engine, 0, core.in_sq, frame, core.input_tensor, core.nchw_scratch, range, core.norm.mean, core.norm.std_dev) catch return false;
         if (core.aux_sq) |sq| {
             if (core.temporal) {
@@ -296,6 +304,8 @@ pub const Core = struct {
             const dst = core.outputs[i];
             if (src.len == dst.len) @memcpy(dst, src);
         }
+        core.plan_bytes = core.engine.planBytes();
+        core.plan_growths = core.engine.planGrowths();
         core.published = true;
     }
 
@@ -386,6 +396,10 @@ pub const AudioCore = struct {
     output_count: u32,
     outputs: [max_outputs][]f32,
     published: bool = false,
+    /// The model's frame buffer and its growths, snapshotted at publish so a
+    /// reader takes them under the lock that already guards the outputs.
+    plan_bytes: usize = 0,
+    plan_growths: u32 = 0,
 
     /// The largest window a bounded audio model may take, so a hostile shape
     /// never allocates an unbounded buffer.
@@ -469,6 +483,8 @@ pub const AudioCore = struct {
             const m = @min(floats.len, self.outputs[i].len);
             @memcpy(self.outputs[i][0..m], floats[0..m]);
         }
+        self.plan_bytes = self.engine.planBytes();
+        self.plan_growths = self.engine.planGrowths();
         self.published = true;
         return true;
     }
@@ -609,6 +625,10 @@ pub const TemporalCore = struct {
     phase: f32 = 0.5,
     style_out: []f32,
     published: bool = false,
+    /// The model's frame buffer and its growths, snapshotted at publish so a
+    /// reader takes them under the lock that already guards the outputs.
+    plan_bytes: usize = 0,
+    plan_growths: u32 = 0,
 
     pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, frames_req: u32) CreateError!*TemporalCore {
         if (frames_req < 2 or frames_req > 8) return error.InvalidModel;
@@ -749,6 +769,8 @@ pub const TemporalCore = struct {
     pub fn publish(core: *TemporalCore) void {
         const src = core.engine.outputFloats(0) catch return;
         if (src.len == core.style_out.len) @memcpy(core.style_out, src);
+        core.plan_bytes = core.engine.planBytes();
+        core.plan_growths = core.engine.planGrowths();
         core.published = true;
     }
 

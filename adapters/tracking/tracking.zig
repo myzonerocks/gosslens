@@ -340,7 +340,7 @@ fn processFrame(tracking: *Tracking, frame: *const PendingFrame) void {
     result.frame_serial = tracking.serial + 1;
     result.timestamp_us = frame.timestamp_us;
     result.presence = presence;
-    result.landmark_count_out = face.landmark_count;
+    result.landmark_count = face.landmark_count;
     for (landmarks, 0..) |landmark, at| {
         result.landmarks[at * 3] = landmark.x;
         result.landmarks[at * 3 + 1] = landmark.y;
@@ -367,7 +367,7 @@ fn publishEmpty(tracking: *Tracking, timestamp_us: i64) void {
     result.frame_serial = tracking.serial + 1;
     result.timestamp_us = timestamp_us;
     result.presence = 0;
-    result.landmark_count_out = 0;
+    result.landmark_count = 0;
     @memset(&result.landmarks, 0);
     @memset(&result.blendshapes, 0);
     publish(tracking, result);

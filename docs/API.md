@@ -136,6 +136,8 @@ file must move together.
 | ABI function | Public operation | Scope |
 |---|---|---|
 | `goss_abi_version` | `Gosslens.abiVersion()` | all SDKs |
+| `goss_lens_capabilities_missing` | `Gosslens.lensCapabilitiesMissing(manifestJson)`, the rails a lens declares that this build lacks, so a catalogue filters before activating rather than activating to find out | all SDKs |
+| `goss_abi_check` | `Gosslens.abiCheck()`, the caller passing the major it was built against and the engine refusing another one, which every SDK asks at engine creation rather than leaving a caller to remember | all SDKs |
 | `goss_capabilities` | `Gosslens.capabilities()`, which rails this build compiled real as `GOSS_CAP_*` bits, so a stub library is told apart from the full one before any bytes are fed | all SDKs |
 | `goss_color_yuv_to_rgb` | `Gosslens.yuvToRgb(colorStandard, colorRange)`, returning the conversion matrix | all SDKs |
 | `goss_solve_two_bone_ik` | `Gosslens.solveTwoBoneIk(root, upperLen, lowerLen, target, pole)`, analytic two-bone IK returning the mid joint and end positions; an out-of-reach target extends the limb straight at it | all SDKs |
@@ -214,7 +216,7 @@ Reading a code or a fingerprint is deliberately not a verb: every scan op is a p
 function over pixels or samples the caller already holds, so a permission there
 would gate nothing, and the audit that produced this table exists to remove exactly
 that.
-| `goss_engine_screen_count` | out count | What this process may capture; zero where permission has not been granted. |
+| `goss_engine_screen_count` | out count | What this process may capture; zero where permission has not been granted, and zero the same way on a host whose screen library is absent. Apple reads ScreenCaptureKit, Android MediaProjection, a desktop host Xlib or the Wayland portal chosen at run time, Windows GDI, and the web the browser's own picker. |
 | `goss_engine_screen_at` | index, out surface | One surface: its logical geometry, desktop origin and scale factor. |
 | `goss_engine_screen_title` | index, out buffer | The surface title; GOSS_AGAIN with the size when the buffer is short. |
 | `goss_session_open_screen` | surface id, scale | Opens a surface as a source; a scale of zero takes its own. |
@@ -225,7 +227,7 @@ that.
 | `goss_session_memory_load_sealed` | key, bytes | Reads a sealed memory, refusing a wrong key, a changed byte or a relabelled file. |
 | `goss_perception_select_all` | none | Every snapshot section this build writes, as a select mask. |
 | `goss_engine_read_report` | `engineReport()`, what the engine is doing now rather than what it was asked for: the render backend it actually brought up, whether the zero-copy image import came up, the bounded texture and staging pools with their live counts, peaks, exhaustion counts, the distinct descriptions each holds and the descriptions turned away at the bin cap, the bytes held on the heap no managed allocator sees, and the vendor-heap allocation calls and bytes of the frame just drawn | all SDKs |
-| `goss_session_read_report` | `sessionReport()`, this session's counters: frames submitted and rendered, the degradation rung and how many times it moved, how much analysis each modality actually ran, how many lens nodes are not ready, and how many script handlers or ticks threw | all SDKs |
+| `goss_session_read_report` | `sessionReport()`, this session's counters: frames submitted and rendered, the degradation rung and how many times it moved, how much analysis each modality actually ran, how many lens nodes are not ready, how many script handlers or ticks threw, and the bytes every model rail reuses each frame beside how often one had to grow | all SDKs |
 | `goss_session_node_report_count` | `nodeReportCount()`, how many nodes of the active lens are not doing what the manifest asked, beside how many diagnostics could not be recorded at all; a zero count with a non-zero lost count means the lens degraded in ways the session could not write down | all SDKs |
 | `goss_session_node_report_at` | `nodeReportAt(index)`, one node's diagnostic: its graph index, whether it is ready, degraded or failed, and why (out of memory, a missing or malformed or oversized asset, a missing or unlinkable shader, a rejected or unsupported model, a capability the target does not carry) | all SDKs |
 | `goss_session_node_report_id` | `nodeReportId(index)`, the manifest id of the node a report names, so a host reports which node rather than which index | all SDKs |
@@ -315,7 +317,7 @@ the capability is present on all three platforms; only the mechanism differs.
 
 ### Face tracking
 
-All three SDKs expose the in-engine tracking, beauty, and result-readback ops
+Every SDK exposes the in-engine tracking, beauty, and result-readback ops
 below (the "native tracking path" rows). On web they call the same symbols and
 return `unsupported` unless the wasm build carries the inference stack; a web app
 without it feeds tracking through the producer path (`submitFaces`,

@@ -137,6 +137,16 @@ pub fn outputLen(ml: *MlInfer, tensor: u32) usize {
     return ml.core.outputLen(tensor);
 }
 
+/// The plan the model reuses, read straight off the core: this seam runs the
+/// inference on the calling thread, so there is no publish to take it under.
+pub fn planBytes(ml: *MlInfer) usize {
+    return ml.core.plan_bytes;
+}
+
+pub fn planGrowths(ml: *MlInfer) u32 {
+    return ml.core.plan_growths;
+}
+
 pub fn argmaxOutput(ml: *MlInfer, tensor: u32) u32 {
     return ml.core.argmaxOutput(tensor);
 }
@@ -210,6 +220,14 @@ pub fn temporalStyleLen(ti: *const TemporalInfer) usize {
 
 pub fn temporalFilled(ti: *const TemporalInfer) u32 {
     return ti.core.filled;
+}
+
+pub fn temporalPlanBytes(ti: *TemporalInfer) usize {
+    return ti.core.plan_bytes;
+}
+
+pub fn temporalPlanGrowths(ti: *TemporalInfer) u32 {
+    return ti.core.plan_growths;
 }
 
 pub fn temporalLayoutIsNchw(ti: *const TemporalInfer) bool {

@@ -142,7 +142,7 @@ fn runTool(live: *Live, arena: std.mem.Allocator, name: []const u8, arguments: ?
     if (std.mem.eql(u8, name, "engine_report")) return engineReport(live, w);
     if (std.mem.eql(u8, name, "remember")) return remember(arena, live, arguments, w);
     if (std.mem.eql(u8, name, "search_memory")) return searchMemory(arena, live, arguments, w);
-    if (std.mem.eql(u8, name, "read_perception")) return readPerception(arena, live, w);
+    if (std.mem.eql(u8, name, "read_perception")) return readPerception(arena, live, arguments, w);
     if (std.mem.eql(u8, name, "read_text")) return readText(live, w);
     if (std.mem.eql(u8, name, "open_screen")) return openScreen(live, arguments, w);
     if (std.mem.eql(u8, name, "screen_point")) return screenPoint(live, arguments, w);
@@ -208,6 +208,12 @@ fn engineReport(live: *Live, w: *std.Io.Writer) !bool {
             try w.print("; {d} frames submitted, {d} rendered, degrade level {d}", .{
                 session_report.frames_submitted, session_report.frames_rendered, session_report.degrade_level,
             });
+            // What a model rail costs and whether it is steady, which is the
+            // difference between a reading an agent can plan against and a byte
+            // count that happens to be true this frame.
+            try w.print("; model plan {d} bytes, {d} growths", .{
+                session_report.ml_plan_bytes, session_report.ml_plan_growths,
+            });
         }
     }
     return false;
@@ -271,14 +277,35 @@ fn searchMemory(arena: std.mem.Allocator, live: *Live, arguments: ?std.json.Valu
     return false;
 }
 
-fn readPerception(arena: std.mem.Allocator, live: *Live, w: *std.Io.Writer) !bool {
+/// The sections the caller named, or every one when it named none. A name this
+/// build does not know is skipped rather than failing the read, so a newer agent
+/// asking for a section this engine lacks still gets the ones it has.
+fn selectFrom(arguments: ?std.json.Value) u32 {
+    const names = arrayArg(arguments, "sections") orelse return abi.goss_perception_select_all();
+    var mask: u32 = 0;
+    for (names) |value| {
+        const name = switch (value) {
+            .string => |text| text,
+            else => continue,
+        };
+        inline for (comptime std.meta.fieldNames(abi.PerceptionSelect), 0..) |field, bit| {
+            if (comptime std.mem.startsWith(u8, field, "_")) continue;
+            if (std.mem.eql(u8, name, field)) mask |= @as(u32, 1) << @intCast(bit);
+        }
+    }
+    // An empty or wholly unrecognised list is a caller asking for nothing, which is not
+    // an answer; give it everything rather than an empty record it cannot read.
+    return if (mask == 0) abi.goss_perception_select_all() else mask;
+}
+
+fn readPerception(arena: std.mem.Allocator, live: *Live, arguments: ?std.json.Value, w: *std.Io.Writer) !bool {
     const s = live.sessionOrNull() orelse {
         try w.writeAll("no session on this host");
         return true;
     };
     // The json projection, because a model reads text. The mask comes from the
     // engine rather than from here, and the session narrows it to its own scope.
-    const select = abi.goss_perception_select_all();
+    const select = selectFrom(arguments);
     var needed: usize = 0;
     _ = abi.goss_session_perception_json(s, select, null, 0, &needed);
     if (needed == 0) {
@@ -341,14 +368,19 @@ fn openScreen(live: *Live, arguments: ?std.json.Value, w: *std.Io.Writer) !bool 
         return true;
     }
     const wanted: u64 = if (intArg(arguments, "surface_id")) |id| @bitCast(id) else surface.id;
+    // The scale the caller asked for, which the schema declares and this ignored: an
+    // agent setting it got the surface's own scale and no word that its number was
+    // dropped. Zero still means the surface's own, as the schema says.
+    const asked_scale = floatArg(arguments, "scale") orelse 0;
+    const scale = if (asked_scale > 0) asked_scale else surface.scale;
     var screen: u32 = 0;
-    const status = abi.goss_session_open_screen(s, wanted, surface.scale, &screen);
+    const status = abi.goss_session_open_screen(s, wanted, scale, &screen);
     if (status != .ok) {
         try w.print("the screen would not open: {t}", .{status});
         return true;
     }
     try w.print("screen {d} open at {d:.0}x{d:.0} logical, scale {d:.2}, origin {d:.0},{d:.0}", .{
-        screen, surface.logical_width, surface.logical_height, surface.scale, surface.origin_x, surface.origin_y,
+        screen, surface.logical_width, surface.logical_height, scale, surface.origin_x, surface.origin_y,
     });
     return false;
 }
@@ -406,7 +438,9 @@ fn annotate(arena: std.mem.Allocator, live: *Live, arguments: ?std.json.Value, w
     // server lasts a bounded number of frames unless the caller says otherwise.
     var desc = std.mem.zeroes(abi.AnnotationDesc);
     desc.id = @intCast(@max(0, id));
-    desc.kind = @intCast(@max(0, intArg(arguments, "kind") orelse 0));
+    // A box by default, which is kind one. Defaulting to zero meant the engine's
+    // "no such kind" value, so an agent omitting it asked for nothing drawable.
+    desc.kind = @intCast(@max(1, intArg(arguments, "kind") orelse 1));
     desc.colour = .{ 255, 255, 255, 255 };
     desc.opacity = 1;
     desc.lifetime_kind = 1;

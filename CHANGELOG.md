@@ -5,8 +5,10 @@ A release moves that section under its tag with the date, and the release notes 
 
 ## Unreleased
 
+## v0.13.0 (2026-09-13)
+
 The engine reaches an agent rail: a camera, a clip or a screen in, one versioned record of what is
-in it out, and whatever an agent draws composited back, over a frozen C ABI that four SDKs and an
+in it out, and whatever an agent draws composited back, over a frozen C ABI that every SDK and an
 MCP server all speak. Everything below is new since the last release.
 
 - The engine is real-time visual plumbing for agents, and the documents say so: one versioned
@@ -15,9 +17,11 @@ MCP server all speak. Everything below is new since the last release.
 
 - An MCP server ships in the repository: one static binary speaking JSON-RPC on stdio over the
   same C ABI every SDK uses, so the session is tools a model can call with no runtime to install.
-  Ten tools answer from the engine, including opening a shared screen and turning a point in the
-  frame into a point on the desktop; the engine and its session come up on the first call that
-  needs one, and a tool whose precondition is missing names that one precondition.
+  The tools all answer from the engine, including opening a shared screen, turning a point in the
+  frame into a point on the desktop, and the spatial questions: where the floor is, whether a cup
+  fits on a surface, how far apart two points are with the error bar, a path across scanned
+  geometry, and two devices agreeing on one room; the engine and its session come up on the first
+  call that needs one, and a tool whose precondition is missing names that one precondition.
 
 - Media is a contract the core owns. A clip is a source the graph cannot tell from a camera, with
   seek, presentation timestamps and audio; the portable codecs are pinned with their licences; and
@@ -29,10 +33,10 @@ MCP server all speak. Everything below is new since the last release.
 - The ONNX engine runs modern vision: around ninety operators added, including attention's einsum,
   the reductions, the gather and scatter families, the detector's TopK and non-max suppression, the
   int8 path with per-channel scales, and If, Loop and Scan under a hard depth and iteration bound.
-  Nine published models are held to it, fetched by digest and never committed: four run a
-  frame through the graph, a classifier and a detector and a depth net among them, and the
-  five past a lens bundle's asset cap are held to loading, planning and naming no operator
-  this build lacks.
+  Published models are held to it, fetched by digest and never committed. Those inside a lens
+  bundle's asset cap run a frame through the graph, a classifier and a detector and a depth net
+  among them; those past it are held to loading, planning and naming no operator this build
+  lacks.
 
 - Inference allocates nothing after load. Constants fold, dead nodes go, batch normalization folds
   into the convolution before it, and one measuring run at load sizes the single buffer every later
@@ -45,9 +49,42 @@ MCP server all speak. Everything below is new since the last release.
   model rail, oriented quadrilaterals, per-character confidence, reading order, and a track id
   that survives a frame. A region whose pixels have not changed keeps its reading.
 
-- Screens are a source. A display or a window arrives through ScreenCaptureKit, MediaProjection or
-  `getDisplayMedia`, carrying the scale factor and desktop origin that put a coordinate an agent
-  sent back onto a real pixel.
+- What is in frame reaches an agent. A detector's own output tensors are read as
+  detections through a `detect` block on the ml node: labelled boxes in the normalized
+  frame, in the record and on the event ring as one arrives, leaves or changes what it
+  is. The input range is part of that contract: an export wanting zero to two hundred and
+  fifty five, fed zero to one, runs and finds nothing, which reads as a model that works,
+  so `input_range` takes `byte` beside `unit` and `symmetric`.
+
+- Every event kind the header declares now reaches a host. A subscription to a plane
+  arriving, a hand appearing, the device warming, a trigger firing or a frame dropping
+  used to wait for something the engine never sent, and a gate refuses a kind nothing
+  emits.
+
+- The model rail's frame allocator is constant time. Its free list scanned every block on every
+  allocation and rescanned the whole array on every free, so one trip through a detector's
+  five-thousand-node post-processing loop paid for all the allocations before it. Blocks are
+  linked in address order now, free ones threaded onto a list per size class, and each allocation
+  carries its own block index: 27 per cent faster on a quarter less memory for the same inference.
+  A frame that outgrows its plan spills into the arena and sizes the plan for the next one, rather
+  than being thrown away and run again.
+
+- A model rail says what it costs. `goss_session_read_report` carries the bytes every model reuses
+  each frame and how often one had to grow, summed over the session and snapshotted where the
+  outputs are, so a host can tell a plan that has settled from a number that happens to be true
+  this frame. One growth is the design; two is a rail that is not settling.
+
+- The ABI version moves on a struct change, not only on a new op. `GOSS_ABI_MINOR` derives from
+  the op list and every field of every struct that crosses the boundary, and the update is refused
+  if the surface moved while the version stood still. A caller that sizes a struct by the version
+  it built against can no longer be handed a wider one.
+
+- Screens are a source on every host the engine runs on. A display or a window arrives through
+  ScreenCaptureKit, MediaProjection, `getDisplayMedia`, Xlib, the Wayland portal with its PipeWire
+  stream, or GDI, each carrying the scale factor and desktop origin that put a coordinate an agent
+  sent back onto a real pixel. The desktop libraries load at run time, so a build needs no X
+  headers, no PipeWire headers and no Windows SDK, and a host missing one answers zero surfaces,
+  which is the same answer as permission not granted.
 
 - The memory plane remembers and finds again: a navigable index over embeddings with the exact
   search beside it as the oracle its recall is measured against, a bounded event log, keyframe
@@ -74,13 +111,13 @@ MCP server all speak. Everything below is new since the last release.
   scanned ground rather than through it. Refused when no mesh is submitted or no route exists,
   because a caller can act on "not here" and cannot act on an empty list.
 
-- Spatial state is reachable: six ops answer over the planes and anchors a host already submits,
+- Spatial state is reachable: the spatial ops answer over the planes and anchors a host already submits,
   so an agent asks which surface is the floor, where a footprint fits and how much of that surface
   it leaves, what a distance is with the uncertainty its inputs carried, and what the transform
   between two devices' origins is. Anchors survive a session with their purpose and label, and
   never with a confidence nothing has re-earned.
 
-- Scope is a boundary rather than advice. Seventeen verbs cover the acting surface, each checked at
+- Scope is a boundary rather than advice. A verb per class of action covers the acting surface, each checked at
   every op it gates and each one nameable, so a refusal reads as a sentence instead of a bitmask. A
   verb out of scope answers `out_of_scope`, which a host can grant, never `unsupported`, which it
   cannot. A session's scope only ever narrows: anything running inside it can ask, so widening means

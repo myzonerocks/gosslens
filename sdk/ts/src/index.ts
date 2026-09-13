@@ -558,6 +558,24 @@ export class Gosslens {
     return Number(this.mod.ccall("goss_capabilities", "number", [], []));
   }
 
+  /// The rails a lens declares that this build lacks, as GOSS_CAP_ bits; zero means
+  /// every one it asked for is here. A catalogue filters on this rather than
+  /// activating a lens to find out.
+  lensCapabilitiesMissing(manifestJson: string): number {
+    const bytes = new TextEncoder().encode(manifestJson);
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]) as number;
+    const out = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      this.mod.HEAPU8.set(bytes, ptr);
+      const status = this.mod.ccall("goss_lens_capabilities_missing", "number", ["number", "number", "number"], [ptr, bytes.length, out]);
+      if (status !== GOSS_OK) return 0;
+      return this.mod.HEAPU32[out >> 2];
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [out, 8]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
+    }
+  }
+
   /// Loads gosslens_web.js and checks its ABI major version. A
   /// dynamic import, not static: bun's bundler would otherwise inline
   /// this file, breaking Emscripten's own import.meta.url-relative
@@ -565,8 +583,12 @@ export class Gosslens {
   static async load(canvas: HTMLCanvasElement, wasmJsUrl: string | URL): Promise<Gosslens> {
     const imported = (await import(/* @vite-ignore */ String(wasmJsUrl))) as { default: EngineModuleFactory };
     const mod = await imported.default({ canvas });
+    // The engine decides, rather than this file comparing against a literal major
+    // that would go stale the day the major moves.
     const version = mod.ccall("goss_abi_version", "number", [], []) >>> 0;
-    if (version >> 16 !== 0) throw new Error(`gosslens abi major mismatch: ${version >> 16}`);
+    if (mod.ccall("goss_abi_check", "number", ["number"], [GOSS_ABI_MAJOR << 16]) !== GOSS_OK) {
+      throw new Error(`gosslens abi major mismatch: ${version >> 16}`);
+    }
     return new Gosslens(mod, version);
   }
 
@@ -1346,7 +1368,7 @@ export class GossEngine {
   }
 
   engineReport(): GossEngineReport | null {
-    const bytes = 14 * 4 + 3 * 8;
+    const bytes = ENGINE_REPORT_BYTES;
     const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
     try {
       if (this.mod.ccall("goss_engine_read_report", "number", ["number", "number"], [this.handle, ptr]) !== 0) return null;
@@ -1451,6 +1473,15 @@ export interface GossEngineReport {
   bgfxBytesLastFrame: number;
 }
 
+/// The ABI major these bindings were generated against: handing the engine its own
+/// version back would always match and test nothing. The major, not the whole version,
+/// because only the major decides compatibility. Held to the header by the abi gate.
+const GOSS_ABI_MAJOR = 0;
+
+/// What a report struct measures, checked against the engine's own layout.
+const ENGINE_REPORT_BYTES = 80;
+const SESSION_REPORT_BYTES = 88;
+
 /// This session's counters: work asked for against work done.
 export interface GossSessionReport {
   framesSubmitted: number;
@@ -1465,6 +1496,9 @@ export interface GossSessionReport {
   nodesDegraded: number;
   nodeReportsLost: number;
   scriptFaults: number;
+  /// A model rail's frame buffer growing mid-run; steady state is zero.
+  mlPlanGrowths: number;
+  mlPlanBytes: number;
 }
 
 /// What a lens node is doing, as against what its manifest asked for.
@@ -4008,7 +4042,7 @@ export class GossSession {
   /// This session's counters: frames in and out, the rung and how often it
   /// moved, the analysis each modality ran, the nodes that are not ready.
   sessionReport(): GossSessionReport | null {
-    const bytes = 2 * 8 + 2 * 4 + 5 * 8 + 3 * 4;
+    const bytes = SESSION_REPORT_BYTES;
     const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
     try {
       if (this.mod.ccall("goss_session_read_report", "number", ["number", "number"], [this.handle, ptr]) !== 0) return null;
@@ -4028,6 +4062,8 @@ export class GossSession {
         nodesDegraded: low(64),
         nodeReportsLost: low(68),
         scriptFaults: low(72),
+        mlPlanGrowths: low(76),
+        mlPlanBytes: low(80),
       };
     } finally {
       this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);

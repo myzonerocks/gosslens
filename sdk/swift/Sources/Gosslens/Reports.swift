@@ -58,6 +58,10 @@ public struct GossSessionReport: Sendable {
     public var nodesDegraded: UInt32
     public var nodeReportsLost: UInt32
     public var scriptFaults: UInt32
+    /// A model rail's frame buffer growing mid-run. Steady state is zero: a plan
+    /// that grows every frame is not a plan.
+    public var mlPlanGrowths: UInt32
+    public var mlPlanBytes: UInt64
 
     init(_ raw: goss_session_report) {
         framesSubmitted = raw.frames_submitted
@@ -72,6 +76,8 @@ public struct GossSessionReport: Sendable {
         nodesDegraded = raw.nodes_degraded
         nodeReportsLost = raw.node_reports_lost
         scriptFaults = raw.script_faults
+        mlPlanGrowths = raw.ml_plan_growths
+        mlPlanBytes = raw.ml_plan_bytes
     }
 }
 

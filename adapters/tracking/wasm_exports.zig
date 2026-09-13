@@ -222,7 +222,7 @@ pub export fn goss_tracking_process(instance: ?*Instance, rgba: ?[*]const u8, wi
     tracking.result.frame_serial = tracking.serial;
     tracking.result.timestamp_us = timestamp_us;
     tracking.result.presence = presence;
-    tracking.result.landmark_count_out = face.landmark_count;
+    tracking.result.landmark_count = face.landmark_count;
     for (landmarks, 0..) |landmark, at| {
         tracking.result.landmarks[at * 3] = landmark.x;
         tracking.result.landmarks[at * 3 + 1] = landmark.y;

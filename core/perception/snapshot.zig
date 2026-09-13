@@ -31,6 +31,9 @@ pub const Tag = enum(u16) {
     /// section rather than a side channel so a semantic index reads it from the
     /// same snapshot as everything else it stores.
     embedding = 13,
+    /// What the detector found in the frame: a box, a label and a score each. It is
+    /// a section because an agent asking what is in front of it is asking this.
+    detections = 14,
     _,
 };
 
@@ -51,7 +54,8 @@ pub const Select = packed struct(u32) {
     lens: bool = false,
     engine: bool = false,
     embedding: bool = false,
-    _reserved: u19 = 0,
+    detections: bool = false,
+    _reserved: u18 = 0,
 
     pub const all: Select = .{
         .frame = true,
@@ -67,6 +71,7 @@ pub const Select = packed struct(u32) {
         .lens = true,
         .engine = true,
         .embedding = true,
+        .detections = true,
     };
 
     pub fn wants(s: Select, tag: Tag) bool {

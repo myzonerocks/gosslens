@@ -503,7 +503,7 @@ try session.setScope(sections: 0xFFFF_FFFF, verbs: 0)
 
 A read out of scope is dropped from the record rather than failing the call. A verb
 out of scope throws `.outOfScope`, which a host can grant, as against
-`.unsupported`, which no amount of asking changes. Seventeen verbs cover the acting
+`.unsupported`, which no amount of asking changes. The verbs cover the acting
 surface and `GossSession.Verb` names them, so a refusal reads as a sentence. Scope
 only ever narrows: anything inside the session can call `setScope`, so widening
 means a new session. Nothing here sends a frame anywhere.

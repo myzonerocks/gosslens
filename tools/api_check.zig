@@ -1,6 +1,11 @@
-//! The public-contract gate. The frozen header, abi_functions, docs/API.md and
-//! the three SDK surfaces describe one operation set, and nothing checked that
-//! they agreed until this existed.
+//! The public-contract gate. The frozen header, abi_functions, docs/API.md and every
+//! SDK surface describe one operation set, and nothing checked that they agreed until
+//! this existed.
+
+//! It compares names, not signatures, and that limit is the point: a wrapper whose call
+//! does not match its own binding passes here and does not compile. The Kotlin SDK sat
+//! broken that way while this gate was green, so a compiler per SDK is part of the bar
+//! and this is not a substitute for one.
 
 //! A drift in any direction is a defect a consumer finds first: an op no SDK
 //! wraps cannot be called, an op the header omits is invisible, and an op with
@@ -324,7 +329,7 @@ pub fn main(init: std.process.Init) !u8 {
         if (!jni_set.contains(name)) try c.flag("Kotlin declares external fun {s} and the JNI binds nothing for it", .{name});
     }
 
-    // Every value of a mirrored enum reaches all three SDKs, spelled each one's
+    // Every value of a mirrored enum reaches every SDK, spelled each one's
     // way. The Kotlin reader decodes by ordinal, so a missing case there does not
     // fail to compile, it mislabels every value after the gap.
     for (mirrored_enums) |prefix| {
@@ -348,7 +353,7 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("api-check: {d} violation(s) across {d} operations\n", .{ c.violations.items.len, header_ops.items.len });
         return 1;
     }
-    std.debug.print("api-check: {d} operations agree across the header, abi_functions, docs/API.md, and all three SDKs\n", .{header_ops.items.len});
+    std.debug.print("api-check: {d} operations agree across the header, abi_functions, docs/API.md, and every SDK\n", .{header_ops.items.len});
     return 0;
 }
 

@@ -53,9 +53,10 @@ release.
 | 8 | `scene` | `u32` label count, then per label its id and score. |
 | 9 | `text` | `u32` count, then per reading: eight `f32` of quadrilateral in reading order, `f32` confidence, `u32` origin, script, direction, track_id, line, paragraph, text_len, then `text_len` bytes of UTF-8. |
 | 10 | `audio` | `f32` level, `u32` beat, `u32` engine_fed. |
-| 11 | `lens` | `u32` whether a lens is active, node count. |
+| 11 | `lens` | `u32` whether a lens is active, count of degraded nodes, id length; then per degraded node its index, state and reason; then the lens id's bytes. |
 | 12 | `engine` | `u32` degrade_level, degrade_transitions; `u64` frames_rendered; `u32` script_faults. |
 | 13 | `embedding` | `u32` dim, `u32` source, then `dim` `f32`. |
+| 14 | `detections` | `u32` count, then per detection its `u32` label, and `f32` score, x, y, width and height in the normalized frame. |
 
 An eight-byte field is aligned to eight inside a payload. A section whose count
 is zero still appears, because absent and empty are different facts: no face
@@ -64,12 +65,21 @@ found is not the same as faces never looked for.
 ## Selecting sections
 
 A caller passes a bitmask in the section order above, bit zero being `frame`. A
-snapshot is read every frame by a consumer that usually wants two sections, and
-writing all thirteen to be ignored is the cost selection avoids.
+snapshot is read every frame by a consumer that usually wants a section or two, and
+writing every one of them to be ignored is the cost selection avoids.
 
 Ask for the all-sections mask rather than writing one: `goss_perception_select_all`
 answers it from the engine's own section list. A mask typed by hand goes stale the
 moment a section is added, and it did.
+
+## Drawing an answer back
+
+Every box in this record is in the normalized frame, origin top left, which is the
+space `GOSS_ANCHOR_SCREEN` annotations are placed in. So a detection read out of the
+`detections` section goes straight back as an overlay with no conversion: the engine
+says what it saw in the coordinates the answer is drawn in. That is the whole round
+trip, and it is why the boxes are normalized rather than in pixels, which would have
+bound an answer to the camera that produced it.
 
 ## Scope
 

@@ -1,4 +1,4 @@
-abi 0.172
+abi 0.176
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -30,7 +30,7 @@ type face.Result size=5968 align=8
   field frame_serial offset=0 size=8
   field timestamp_us offset=8 size=8
   field presence offset=16 size=4
-  field landmark_count_out offset=20 size=4
+  field landmark_count offset=20 size=4
   field landmarks offset=24 size=5736
   field blendshapes offset=5760 size=208
 type hand.Result size=560 align=8
@@ -43,7 +43,7 @@ type pose.Result size=688 align=8
   field frame_serial offset=0 size=8
   field timestamp_us offset=8 size=8
   field presence offset=16 size=4
-  field landmark_count_out offset=20 size=4
+  field landmark_count offset=20 size=4
   field landmarks offset=24 size=396
   field visibilities offset=420 size=132
   field presences offset=552 size=132
@@ -125,7 +125,7 @@ type abi.EngineReport size=80 align=8
   field bgfx_live_bytes offset=56 size=8
   field bgfx_alloc_calls_last_frame offset=64 size=8
   field bgfx_bytes_last_frame offset=72 size=8
-type abi.SessionReport size=80 align=8
+type abi.SessionReport size=88 align=8
   field frames_submitted offset=0 size=8
   field frames_rendered offset=8 size=8
   field degrade_level offset=16 size=4
@@ -138,7 +138,142 @@ type abi.SessionReport size=80 align=8
   field nodes_degraded offset=64 size=4
   field node_reports_lost offset=68 size=4
   field script_faults offset=72 size=4
+  field ml_plan_growths offset=76 size=4
+  field ml_plan_bytes offset=80 size=8
+type abi.AnnotationDesc size=64 align=8
+  field id offset=0 size=4
+  field kind offset=4 size=4
+  field space offset=8 size=4
+  field rect offset=12 size=16
+  field track_id offset=28 size=4
+  field colour offset=32 size=4
+  field z offset=36 size=4
+  field opacity offset=40 size=4
+  field lifetime_kind offset=44 size=4
+  field lifetime_value offset=48 size=8
+  field on_lost offset=56 size=4
+  field value offset=60 size=4
+type abi.CaptureConfig size=28 align=4
+  field width offset=0 size=4
+  field height offset=4 size=4
+  field supersample offset=8 size=4
+  field format offset=12 size=4
+  field quality offset=16 size=4
+  field color_space offset=20 size=4
+  field bit_depth offset=24 size=4
+type abi.ClipInfo size=32 align=8
+  field width offset=0 size=4
+  field height offset=4 size=4
+  field duration_us offset=8 size=8
+  field position_us offset=16 size=8
+  field ended offset=24 size=4
+type abi.EgressConfig size=48 align=8
+  field target_long_edge offset=0 size=4
+  field format offset=4 size=4
+  field quality offset=8 size=4
+  field max_fps offset=12 size=4
+  field max_bytes_per_second offset=16 size=8
+  field source offset=24 size=4
+  field trigger offset=28 size=4
+  field change_threshold offset=32 size=4
+  field keyframe_interval_us offset=40 size=8
+type abi.EgressDecision size=40 align=8
+  field send offset=0 size=4
+  field reason offset=4 size=4
+  field change_score offset=8 size=4
+  field since_last_us offset=16 size=8
+  field sent_total offset=24 size=8
+  field held_total offset=32 size=8
+type abi.Event size=40 align=8
+  field kind offset=0 size=4
+  field sequence offset=8 size=8
+  field timestamp_us offset=16 size=8
+  field a offset=24 size=4
+  field b offset=28 size=4
+  field value offset=32 size=4
+type abi.Footprint size=12 align=4
+  field width offset=0 size=4
+  field depth offset=4 size=4
+  field height offset=8 size=4
+type abi.MediaCapabilities size=32 align=4
+  field video_codecs offset=0 size=4
+  field audio_codecs offset=4 size=4
+  field containers offset=8 size=4
+  field max_width offset=12 size=4
+  field max_height offset=16 size=4
+  field max_bit_depth offset=20 size=4
+  field hdr offset=24 size=4
+  field zero_copy offset=28 size=4
+type abi.Occupant size=24 align=8
+  field plane_id offset=0 size=8
+  field x offset=8 size=4
+  field z offset=12 size=4
+  field width offset=16 size=4
+  field depth offset=20 size=4
+type abi.Placement size=24 align=8
+  field plane_id offset=0 size=8
+  field position offset=8 size=12
+  field free_fraction offset=20 size=4
+type abi.RecordingConfig size=16 align=4
+  field width offset=0 size=4
+  field height offset=4 size=4
+  field bitrate_bps offset=8 size=4
+  field codec offset=12 size=4
+type abi.RecordingReport size=48 align=8
+  field duration_us offset=0 size=8
+  field clips offset=8 size=4
+  field interruptions offset=12 size=4
+  field drift_us offset=16 size=8
+  field frames offset=24 size=8
+  field dropped offset=32 size=8
+  field paused offset=40 size=4
+type abi.ScreenSurface size=40 align=8
+  field id offset=0 size=8
+  field kind offset=8 size=4
+  field logical_width offset=12 size=4
+  field logical_height offset=16 size=4
+  field origin_x offset=20 size=4
+  field origin_y offset=24 size=4
+  field scale offset=28 size=4
+  field title_len offset=32 size=4
+type abi.SharedLandmark size=24 align=8
+  field id offset=0 size=8
+  field x offset=8 size=4
+  field y offset=12 size=4
+  field z offset=16 size=4
+  field confidence offset=20 size=4
+type abi.TextEntry size=80 align=8
+  field quad offset=0 size=32
+  field confidence offset=32 size=4
+  field origin offset=36 size=4
+  field script offset=40 size=4
+  field direction offset=44 size=4
+  field track_id offset=48 size=4
+  field line offset=52 size=4
+  field paragraph offset=56 size=4
+  field text_len offset=60 size=4
+  field first_seen_us offset=64 size=8
+  field last_seen_us offset=72 size=8
+type abi.WorldAnchor size=72 align=8
+  field id offset=0 size=8
+  field pose offset=8 size=64
+type abi.WorldLight size=8 align=4
+  field ambient_intensity offset=0 size=4
+  field color_temperature_kelvin offset=4 size=4
+type abi.WorldPlane size=88 align=8
+  field id offset=0 size=8
+  field pose offset=8 size=64
+  field extent_x offset=72 size=4
+  field extent_z offset=76 size=4
+  field classification offset=80 size=4
+type abi.WorldState size=144 align=8
+  field tracking_state offset=0 size=4
+  field world_from_camera offset=4 size=64
+  field projection offset=68 size=64
+  field timestamp_us offset=136 size=8
 fn uint32_t goss_abi_version(void)
+fn goss_status goss_abi_check(uint32_t caller_version)
+fn goss_status goss_lens_capabilities_missing(const uint8_t *manifest_json, size_t manifest_len, uint64_t *out_missing)
 fn uint64_t goss_capabilities(void)
 fn void *goss_alloc(size_t size)
 fn void goss_free(void *ptr, size_t size)

@@ -777,8 +777,13 @@ pub const WarpPassNode = struct {
 /// live tracked contour and submits them into the shared reshape bank shader.
 pub const ReshapePassNode = struct {
     graph_index: graph.NodeIndex,
-    params: [66]f32,
+    params: [reshape_param_count]f32,
 };
+
+/// Derived, beside its body equivalent: the length was written as a literal in three
+/// places against a struct that can change, and a struct with fewer fields than the
+/// literal would have shipped uninitialised floats to a shader.
+pub const reshape_param_count = std.meta.fieldNames(manifest.ReshapeField).len;
 
 /// One reshape.body node ready to draw: which graph node it is, and its body
 /// sculpt amounts in BodyReshapeField order, each in [-1,1] with 0 the identity.
@@ -915,6 +920,9 @@ pub const Lens = struct {
     tick_timer_values: []trigger.TimerValue,
     tick_counter_values: []trigger.CounterValue,
     tick_touched: []bool,
+    /// What the last tick's triggers did, for a caller that publishes it.
+    tick_triggers_fired: u32 = 0,
+    tick_last_trigger: u32 = 0,
     tick_applied: []AppliedEffect,
     /// Bundle-relative paths of sounds a play_sound trigger fired this tick;
     /// the host drains them each frame. Sized to the trigger count, so the
@@ -1481,7 +1489,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .reshape_bank) continue;
             const rf = node.reshape orelse manifest.ReshapeField{};
-            var params: [66]f32 = undefined;
+            var params: [reshape_param_count]f32 = undefined;
             inline for (comptime std.meta.fieldNames(manifest.ReshapeField), 0..) |name, i| {
                 params[i] = @field(rf, name);
             }
@@ -1854,6 +1862,32 @@ pub const Lens = struct {
 
     /// Sets a live parameter by name, clamped to its declared range. Silent
     /// no-op for an unknown name, the same tolerance a trigger action takes.
+    /// How many triggers fired on the last tick and which one fired last, so a host
+    /// hears a trigger fire instead of inferring it from a parameter moving.
+    pub fn triggersFired(self: *const Lens) u32 {
+        return self.tick_triggers_fired;
+    }
+
+    pub fn lastTriggerFired(self: *const Lens) u32 {
+        return self.tick_last_trigger;
+    }
+
+    /// One parameter's live value by index, beside the by-name reader, so a caller
+    /// walking what moved does not look each name up again.
+    pub fn paramValueAt(self: *const Lens, index: usize) f32 {
+        if (index >= self.param_values.len) return 0;
+        return self.param_values[index];
+    }
+
+    /// Whether a parameter moved on the last tick, by index.
+    pub fn paramTouched(self: *const Lens, index: usize) bool {
+        return index < self.tick_touched.len and self.tick_touched[index];
+    }
+
+    pub fn paramCount(self: *const Lens) usize {
+        return self.param_values.len;
+    }
+
     pub fn setParam(self: *Lens, name: []const u8, value: f32) void {
         const i = paramIndex(self, name) orelse return;
         self.param_values[i] = clampToParam(self.manifest.parameters[i], value);
@@ -2453,10 +2487,16 @@ pub fn tick(lens: *Lens, real_dt_us: u32, signals: trigger.Signals) []const Appl
         }
     }
 
+    lens.tick_triggers_fired = 0;
+    lens.tick_last_trigger = 0;
     for (lens.compiled_triggers, 0..) |*expr, i| {
         const is_true = trigger.evaluate(expr.root, live_signals);
         defer lens.trigger_was_true[i] = is_true;
         if (is_true and !lens.trigger_was_true[i]) {
+            // Which one fired, for a caller that publishes it: a trigger firing was
+            // something only the lens knew, so nothing outside could hear it.
+            lens.tick_triggers_fired += 1;
+            lens.tick_last_trigger = @intCast(i);
             applyAction(lens, lens.manifest.triggers[i].action, touched_params);
         }
     }

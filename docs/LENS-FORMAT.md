@@ -58,9 +58,15 @@ adds its own fields. The types group into a few families:
   model whose output binds to a parameter, a mask, a stylized image, or the
   scene depth. The engine runs the model; the lens names the file and the
   binding, and any model that fits the slot plugs in. The slot's input is one
-  square three-channel RGB image, [0,1] by default, and the ml block's
-  `input_range`, `input_mean`, and `input_std` declare an export's own
-  preprocessing so its numbers arrive as trained.
+  square three-channel RGB image, and the ml block's `input_range`, `input_mean`
+  and `input_std` declare an export's own preprocessing so its numbers arrive as
+  trained. `input_range` takes `unit` for zero to one, the default, `symmetric` for
+  minus one to one, and `byte` for zero to two hundred and fifty five, which is what
+  a detector exported from TensorFlow with a float placeholder wants: give one of
+  those the wrong range and it runs, finds nothing, and reads as working. A `detect`
+  block names which tensors hold the boxes, scores, classes and count, and the engine
+  then reads what is in frame into the record's `detections` section and publishes a
+  detection arriving, leaving, or changing what it is.
 - **Logic**: `logic.graph` and the scripting node - deterministic per-tick
   computation with no ambient authority.
 

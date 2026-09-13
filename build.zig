@@ -74,6 +74,16 @@ pub fn build(b: *std.Build) void {
             }),
         });
         probe.root_module.addImport("onnx", onnxModule(b, target, .ReleaseFast));
+        // A decoder, so the probe runs a model on a real picture rather than the blank
+        // frame an unwritten input tensor holds: a detector finds nothing in a blank
+        // frame, which says nothing about whether it works. stb reads the corpus jpegs
+        // as well as png.
+        probe.root_module.addCSourceFile(.{
+            .file = b.path("harness/stb_image_impl.c"),
+            .flags = &.{ "-std=c99", "-fno-sanitize=undefined", "-w" },
+        });
+        probe.root_module.addIncludePath(b.path(".vendor/gpupixel/third_party/stb/include/stb"));
+        attachC(b, probe.root_module, "stb", "harness/stb_c.h");
         const run_probe = b.addRunArtifact(probe);
         run_probe.setCwd(b.path("."));
         if (b.args) |args| run_probe.addArgs(args);
@@ -204,6 +214,13 @@ pub fn build(b: *std.Build) void {
         .{ .custom = "c/include" },
         "gosslens.h",
     ).step);
+
+    // Below the staging it depends on, because the step needs that handle.
+    {
+        const cmd = cDemoCommand(b, c_step);
+        sdk_check_step.dependOn(&cmd.step);
+        ci_step.dependOn(&cmd.step);
+    }
 
     const abi_dump_module = b.createModule(.{
         .root_source_file = b.path("tools/abi_dump.zig"),
@@ -473,6 +490,22 @@ pub fn build(b: *std.Build) void {
         lens_package_reference_step.dependOn(&run.step);
     }
 
+    // Every packaged lens zipped and each archive checked the way a client checks
+    // it. No probe for the archiver: a step that skips itself when a tool is
+    // missing is a gate that quietly does nothing.
+    const lens_zip_step = b.step("lens-zip", "Zip every packaged reference lens and verify each archive against its sidecar");
+    for (listReferenceLenses(b)) |lens_dir| {
+        const name = std.fs.path.basename(lens_dir);
+        const run = b.addSystemCommand(&.{ "/bin/sh", "tools/lens-zip.sh" });
+        run.setCwd(b.path("."));
+        run.addArg(b.fmt(".lens-packages/{s}", .{name}));
+        run.addArg("zig-out/lens-zips");
+        run.setName(b.fmt("lens-zip {s}", .{name}));
+        run.step.dependOn(lens_package_reference_step);
+        lens_zip_step.dependOn(&run.step);
+    }
+    ci_step.dependOn(lens_zip_step);
+
     const media_core_tests = b.addTest(.{ .root_module = mediaCoreModule(b, target, optimize, math_module) });
     const text_core_tests = b.addTest(.{ .root_module = textModule(b, target, optimize) });
     const screen_core_tests = b.addTest(.{ .root_module = screenModule(b, target, optimize) });
@@ -569,6 +602,26 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(media_core_tests).step);
     test_step.dependOn(&b.addRunArtifact(text_core_tests).step);
     test_step.dependOn(&b.addRunArtifact(screen_core_tests).step);
+    // The desktop backends carry real logic a host can check without that host's
+    // display: a channel placed by the server's mask, a pod built to the byte, a
+    // frame copied at the producer's own stride, a file URI turned into a path.
+    // They run on every host, and the capture itself waits on a Linux machine.
+    const desktop_capture_tests = [_][]const u8{
+        "adapters/screen/screen_capture_x11.zig",
+        "adapters/screen/screen_capture_windows.zig",
+        "adapters/screen/wayland_dbus.zig",
+        "adapters/screen/wayland_pipewire.zig",
+    };
+    for (desktop_capture_tests) |path| {
+        const module = b.createModule(.{
+            .root_source_file = b.path(path),
+            .target = target,
+            .optimize = optimize,
+        });
+        module.link_libc = true;
+        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
+    }
+
     test_step.dependOn(&b.addRunArtifact(screen_capture_tests).step);
     test_step.dependOn(&b.addRunArtifact(memory_core_tests).step);
     test_step.dependOn(&b.addRunArtifact(spatial_core_tests).step);
@@ -2478,10 +2531,16 @@ fn screenCaptureModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize
     if (b.modules.get(key)) |existing| return existing;
     const is_apple = target.result.os.tag == .macos or target.result.os.tag == .ios;
     const is_android = target.result.abi == .android or target.result.abi == .androideabi;
+    // Every host that has a screen API this engine can reach gets its own backend.
+    // The stub is for a target with none, which is now wasm alone.
     const root_file = if (is_apple)
         "adapters/screen/screen_capture.zig"
     else if (is_android)
         "adapters/screen/screen_capture_android.zig"
+    else if (target.result.os.tag == .linux)
+        "adapters/screen/screen_capture_linux.zig"
+    else if (target.result.os.tag == .windows)
+        "adapters/screen/screen_capture_windows.zig"
     else
         "adapters/screen/screen_capture_stub.zig";
     const module = b.addModule(key, .{
@@ -2489,6 +2548,11 @@ fn screenCaptureModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         .target = target,
         .optimize = optimize,
     });
+    if (target.result.os.tag == .linux) {
+        // dlopen and getenv come from libc, which is how both Linux backends reach
+        // the desktop's own libraries without this build needing their headers.
+        module.link_libc = true;
+    }
     if (is_apple) {
         module.addCSourceFile(.{
             .file = b.path("adapters/screen/screen_capture_apple.mm"),
@@ -4474,6 +4538,18 @@ fn typescriptTypecheckCommand(b: *std.Build) ?*std.Build.Step.Run {
     const cmd = b.addSystemCommand(&.{ "bun", "x", "tsc", "--noEmit" });
     cmd.setCwd(b.path("sdk/ts"));
     cmd.setName("tsc --noEmit (sdk/ts)");
+    return cmd;
+}
+
+/// The C SDK's example, compiled against the staged header and run. It was the one
+/// SDK surface no step exercised. The staging is a dependency in the graph rather
+/// than a nested `zig build`.
+fn cDemoCommand(b: *std.Build, c_step: *std.Build.Step) *std.Build.Step.Run {
+    const cmd = b.addSystemCommand(&.{ "/bin/sh", "sdk/c/demo/build.sh" });
+    cmd.setCwd(b.path("."));
+    cmd.setName("c sdk example");
+    cmd.setEnvironmentVariable("GOSS_C_STAGED", "1");
+    cmd.step.dependOn(c_step);
     return cmd;
 }
 

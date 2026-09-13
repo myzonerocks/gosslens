@@ -244,6 +244,8 @@ pub const Engine = struct {
     /// is how a caller sees a regression rather than guessing at one.
     optimization: plan.Optimization = .{},
     pool_growths: u32 = 0,
+    /// What the last frame had to spill, applied to the plan before the next one.
+    pending_growth: usize = 0,
     /// Where the last failed run failed. A model that will not run is a bug
     /// report, and `TensorMissing` on its own names neither the node nor the
     /// tensor, which is a whole afternoon of bisecting a graph by hand.
@@ -334,48 +336,55 @@ pub const Engine = struct {
     }
 
     fn measureAndPlan(engine: *Engine) Error!void {
-        try engine.runNodes(engine.run_arena.allocator(), null);
-        try engine.adoptPlan();
+        // One pass, on an allocator that frees and counts: its high water is the most
+        // the graph ever holds at once, which is exactly what the frame buffer needs.
+        // Three walks before the first frame published is what made a detector with a
+        // five-thousand-node loop body take minutes to say anything.
+        _ = engine.run_arena.reset(.retain_capacity);
+        var counter = plan.Counting.init(engine.run_arena.allocator());
+        engine.runNodes(counter.allocator()) catch |err| {
+            engine.result_table = .empty;
+            return err;
+        };
+        engine.result_table = .empty;
+        try engine.adoptPlanFrom(counter.high_water);
     }
 
     /// Allocates the frame buffer from the measuring run's high-water mark and
     /// switches inference onto it, so nothing after this reaches the general
     /// allocator.
-    fn adoptPlan(engine: *Engine) Error!void {
-        // The arena's capacity is the sum of everything the graph produced, not
-        // what it held at once. A second pass through a pool of that size, with
-        // the lifetime frees running, reports the peak live figure, and that is
-        // what every frame after this actually needs.
-        const upper_bound = @max(engine.run_arena.queryCapacity(), 4096);
-        engine.pool_words = engine.gpa.alloc(u64, upper_bound / 8 + 1) catch return error.OutOfMemory;
+    /// Sizes the frame buffer from the most the graph was ever holding at once, with
+    /// room for the free list's own fragmentation: a pool hands back blocks, and a
+    /// later tensor of a different size does not always fit the hole a freed one
+    /// left. A graph that outgrows it still grows the plan, counted.
+    fn adoptPlanFrom(engine: *Engine, peak_live: usize) Error!void {
+        const sized = @max(peak_live + peak_live / 2 + 4096, 8192);
+        engine.pool_words = engine.gpa.alloc(u64, sized / 8 + 1) catch return error.OutOfMemory;
         engine.pool_blocks = engine.gpa.alloc(plan.Pool.Block, plan.nodeCount(engine.nodes) * 8 + 64) catch return error.OutOfMemory;
         engine.pool = plan.Pool.init(std.mem.sliceAsBytes(engine.pool_words), engine.pool_blocks);
         _ = engine.run_arena.reset(.free_all);
         engine.result_table = .empty;
-
-        if (engine.pool) |*measuring| {
-            engine.runNodes(measuring.allocator(), measuring) catch return;
-            const peak = measuring.high_water + measuring.high_water / 8 + 4096;
-            if (peak < upper_bound) {
-                engine.gpa.free(engine.pool_words);
-                engine.pool_words = engine.gpa.alloc(u64, peak / 8 + 1) catch return error.OutOfMemory;
-                engine.pool = plan.Pool.init(std.mem.sliceAsBytes(engine.pool_words), engine.pool_blocks);
-                engine.result_table = .empty;
-            }
-        }
     }
 
-    /// Grows the frame buffer after a data-dependent shape outran the plan. It
-    /// is counted, because a rail that grows every frame has no plan at all.
-    fn growPlan(engine: *Engine) Error!void {
-        const bigger = engine.pool_words.len * 2;
+    /// Grows the frame buffer to cover what a frame had to spill. Applied before
+    /// the next frame rather than after the one that spilled, whose outputs still
+    /// point into the buffer the caller is about to read. It is counted, because
+    /// a rail that grows every frame has no plan at all.
+    fn growPlanBy(engine: *Engine, shortfall: usize) Error!void {
+        const want = engine.pool_words.len * @sizeOf(u64) + shortfall;
+        const sized = want + want / 2;
         const blocks = engine.pool_blocks.len * 2;
         engine.gpa.free(engine.pool_words);
         engine.gpa.free(engine.pool_blocks);
-        engine.pool_words = engine.gpa.alloc(u64, bigger) catch return error.OutOfMemory;
+        engine.pool_words = engine.gpa.alloc(u64, sized / 8 + 1) catch return error.OutOfMemory;
         engine.pool_blocks = engine.gpa.alloc(plan.Pool.Block, blocks) catch return error.OutOfMemory;
         engine.pool = plan.Pool.init(std.mem.sliceAsBytes(engine.pool_words), engine.pool_blocks);
         engine.pool_growths += 1;
+        engine.result_table = .empty;
+        // The spill is in the plan now, so the capacity the arena kept to serve it
+        // goes back: retaining it would hold a frame's worth of bytes nothing will
+        // use again for the life of the engine.
+        _ = engine.run_arena.reset(.free_all);
     }
 
     pub fn deinit(engine: *Engine) void {
@@ -393,6 +402,12 @@ pub const Engine = struct {
     /// costs in memory before it ships it.
     pub fn planBytes(engine: *const Engine) usize {
         return engine.pool_words.len * @sizeOf(u64);
+    }
+
+    /// How often a frame asked for more than the plan reserved. Steady state is
+    /// zero: a rail that grows every frame has no plan at all.
+    pub fn planGrowths(engine: *const Engine) u32 {
+        return engine.pool_growths;
     }
 
     pub fn inputCount(engine: *const Engine) usize {
@@ -447,31 +462,39 @@ pub const Engine = struct {
         // successful frame, so every frame after the first is still free of
         // allocation even though the first one could not be measured.
         if (engine.pool == null) {
+            // A model whose shapes were unknown at load is measured on its first real
+            // frame, then run again through the plan that measurement sized. The
+            // second run is what the caller reads: handing back the measuring pass's
+            // table meant handing back tensors whose allocator had already been reset.
             _ = engine.run_arena.reset(.retain_capacity);
-            try engine.runNodes(engine.run_arena.allocator(), null);
-            const produced = engine.result_table;
-            engine.adoptPlan() catch return;
-            engine.result_table = produced;
-            return;
-        }
-        var attempt: u8 = 0;
-        while (attempt < 3) : (attempt += 1) {
-            if (engine.pool) |*p| p.reset();
-            const ra = if (engine.pool) |*p| p.allocator() else engine.run_arena.allocator();
-            engine.runNodes(ra, if (engine.pool) |*p| p else null) catch |err| {
-                if (err != error.OutOfMemory or engine.pool == null) return err;
-                try engine.growPlan();
-                continue;
+            var counter = plan.Counting.init(engine.run_arena.allocator());
+            engine.runNodes(counter.allocator()) catch |err| {
+                engine.result_table = .empty;
+                return err;
             };
+            engine.result_table = .empty;
+            try engine.adoptPlanFrom(counter.high_water);
+        }
+        if (engine.pending_growth != 0) {
+            const shortfall = engine.pending_growth;
+            engine.pending_growth = 0;
+            try engine.growPlanBy(shortfall);
+        }
+        _ = engine.run_arena.reset(.retain_capacity);
+        if (engine.pool) |*p| {
+            p.reset();
+            var spill: plan.Fallback = .{ .pool = p, .spill = engine.run_arena.allocator() };
+            try engine.runNodes(spill.allocator());
+            engine.pending_growth = spill.peak_spilled;
             return;
         }
-        return error.OutOfMemory;
+        return engine.runNodes(engine.run_arena.allocator());
     }
 
     /// Walks the graph once. With a pool present, a tensor whose last reader
     /// has run hands its bytes straight back, which is what keeps the frame
     /// buffer at the peak live size rather than the total produced.
-    fn runNodes(engine: *Engine, ra: std.mem.Allocator, frame: ?*plan.Pool) Error!void {
+    fn runNodes(engine: *Engine, ra: std.mem.Allocator) Error!void {
         engine.result_table = .empty;
         var table: std.StringHashMapUnmanaged(Tensor) = .empty;
         table.ensureTotalCapacity(ra, @intCast(engine.initializers.count() + engine.inputs.len + engine.nodes.len + 4)) catch return error.OutOfMemory;
@@ -493,7 +516,6 @@ pub const Engine = struct {
                 }
                 return err;
             };
-            if (frame == null) continue;
             for (node.inputs) |name| {
                 if (name.len == 0) continue;
                 if (!engine.lifetimes.diesAfter(name, i)) continue;
@@ -501,7 +523,7 @@ pub const Engine = struct {
                 const dead = table.get(name) orelse continue;
                 if (engine.feedsAnInput(dead)) continue;
                 _ = table.remove(name);
-                ra.free(std.mem.sliceAsBytes(dead.data));
+                ra.free(dead.data);
             }
         }
 
@@ -976,7 +998,7 @@ pub fn runNodes(ra: std.mem.Allocator, nodes: []const Node, table: *std.StringHa
             if (at != i) continue;
             const dead = table.get(name) orelse continue;
             _ = table.remove(name);
-            ra.free(std.mem.sliceAsBytes(dead.data));
+            ra.free(dead.data);
         }
     }
 }

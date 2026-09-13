@@ -4,11 +4,26 @@
 
 /// ABI bootstrap and pure math - callable before any handle exists.
 public enum Gosslens {
-    /// Any-thread. Must be the first call this SDK makes; compare the
-    /// high 16 bits against the header's own GOSS_ABI_MAJOR before
-    /// creating anything.
+    /// Any-thread. The raw version, for a caller that wants to read it;
+    /// `abiCheck` is what refuses a mismatch.
     public static func abiVersion() -> UInt32 {
         goss_abi_version()
+    }
+
+    /// Any-thread. Whether this binary speaks the major this SDK was built
+    /// against. `GossEngine.create` asks it, so a caller need not remember to.
+    public static func abiCheck() throws {
+        try checked(goss_abi_check(UInt32(GOSS_ABI_VERSION)))
+    }
+
+    /// Any-thread. The rails a lens declares that this build lacks, as GossCapability
+    /// bits; empty means every one it asked for is here. A catalogue filters on this
+    /// rather than activating a lens to find out.
+    public static func lensCapabilitiesMissing(_ manifestJson: String) throws -> UInt64 {
+        var missing: UInt64 = 0
+        var bytes = Array(manifestJson.utf8)
+        try checked(goss_lens_capabilities_missing(&bytes, bytes.count, &missing))
+        return missing
     }
 
     /// The capabilities this build compiled real. A stub library shares the

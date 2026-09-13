@@ -165,6 +165,8 @@ object Gosslens {
     }
 
     internal external fun nativeAbiVersion(): Int
+    internal external fun nativeAbiCheck(callerVersion: Int): Int
+    internal external fun nativeLensCapabilitiesMissing(manifestBuffer: ByteBuffer, manifestLen: Int): Long
     internal external fun nativeCapabilities(): Long
     internal external fun nativeEngineCreate(texturePoolCapacity: Int, stagingPoolCapacity: Int): Long
     internal external fun nativeEngineDestroy(engine: Long)
@@ -576,6 +578,26 @@ object Gosslens {
 
     fun abiVersion(): Int = nativeAbiVersion()
 
+    /** The ABI major these bindings were generated against, so the check compares two
+     * independent things: passing the engine its own version back would always match
+     * and test nothing. The major rather than the whole version, because the minor
+     * moves on every surface change. Held to the header by the abi gate. */
+    const val GOSS_ABI_MAJOR: Int = 0
+
+    /** Whether this binary speaks the major these bindings were built against.
+     * Engine.create asks it, so a caller need not remember to. */
+    fun abiCheck(): Boolean = nativeAbiCheck(GOSS_ABI_MAJOR shl 16) == 0
+
+    /** The rails a lens declares that this build lacks, as CAP_ bits; zero means every
+     * one it asked for is here. A catalogue filters on this rather than activating a
+     * lens to find out. */
+    fun lensCapabilitiesMissing(manifestJson: String): Long {
+        val bytes = manifestJson.toByteArray()
+        val buf = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder())
+        buf.put(bytes)
+        return nativeLensCapabilitiesMissing(buf, bytes.size)
+    }
+
     /** Which capabilities this build compiled real, as CAP_* bits. A stub
      * library shares the full one's filename and abi version, so check the
      * rail you need here before feeding real bytes to an enable call. */
@@ -726,6 +748,9 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     companion object {
         /** Null config means the core's own defaults, same as C's null. */
         fun create(config: GossEngineConfig? = null): GossEngine {
+            // The engine refuses a caller from another major, asked rather than
+            // remembered: these bindings read the version and never compared it.
+            check(Gosslens.abiCheck()) { "gosslens abi major mismatch" }
             val handle = Gosslens.nativeEngineCreate(
                 config?.texturePoolCapacity ?: -1,
                 config?.stagingPoolCapacity ?: -1,
@@ -1022,7 +1047,7 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
         val det = ByteBuffer.allocateDirect(detector.size).put(detector)
         val rec = if (recognizer.isEmpty()) null else ByteBuffer.allocateDirect(recognizer.size).put(recognizer)
         val dict = if (dictionary.isEmpty()) null else ByteBuffer.allocateDirect(dictionary.size).put(dictionary)
-        return Gosslens.nativeEnableText(det, detector.size, rec, recognizer.size, dict, dictionary.size, detectSide) == 0
+        return Gosslens.nativeEnableText(handle, det, detector.size, rec, recognizer.size, dict, dictionary.size, detectSide) == 0
     }
 
     fun disableText(): Boolean = Gosslens.nativeDisableText(handle) == 0
@@ -1644,6 +1669,10 @@ class GossSession private constructor(
     }
 
     companion object {
+        /** What a report struct measures, checked against the engine's own layout. */
+        internal const val ENGINE_REPORT_BYTES = 80
+        internal const val SESSION_REPORT_BYTES = 88
+
         /** Null config means the core's own defaults, same as C's null. */
         fun create(engine: GossEngine, config: GossSessionConfig? = null): GossSession {
             val handle = Gosslens.nativeSessionCreate(engine.handle, config?.frameBudgetUs ?: -1)
@@ -1936,6 +1965,9 @@ class GossSession private constructor(
         val nodesDegraded: Int,
         val nodeReportsLost: Int,
         val scriptFaults: Int,
+        /** A model rail's frame buffer growing mid-run; steady state is zero. */
+        val mlPlanGrowths: Int,
+        val mlPlanBytes: Long,
     )
 
     /** What a lens node is doing, as against what its manifest asked for. */
@@ -1964,7 +1996,7 @@ class GossSession private constructor(
 
     fun engineReport(): EngineReport? {
         // Thirteen u32, four padding bytes, then three u64: the struct's own layout.
-        val buf = ByteBuffer.allocateDirect(14 * 4 + 3 * 8).order(ByteOrder.nativeOrder())
+        val buf = ByteBuffer.allocateDirect(ENGINE_REPORT_BYTES).order(ByteOrder.nativeOrder())
         if (Gosslens.nativeEngineReport(engine.handle, buf) != 0) return null
         val w = buf.asIntBuffer()
         val q = buf.duplicate().order(ByteOrder.nativeOrder()).position(14 * 4).let { (it as ByteBuffer).asLongBuffer() }
@@ -1979,8 +2011,8 @@ class GossSession private constructor(
 
     /** This session's counters. */
     fun sessionReport(): SessionReport? {
-        // Two u64, two u32, five u64, three u32, in declaration order.
-        val buf = ByteBuffer.allocateDirect(80).order(ByteOrder.nativeOrder())
+        // Two u64, two u32, five u64, four u32, one u64, in declaration order.
+        val buf = ByteBuffer.allocateDirect(SESSION_REPORT_BYTES).order(ByteOrder.nativeOrder())
         if (Gosslens.nativeSessionReport(handle, buf) != 0) return null
         val q = buf.asLongBuffer()
         val w = buf.duplicate().order(ByteOrder.nativeOrder()).asIntBuffer()
@@ -1989,6 +2021,7 @@ class GossSession private constructor(
             DegradeLevel.from(w.get(4)), w.get(5),
             q.get(3), q.get(4), q.get(5), q.get(6), q.get(7),
             w.get(16), w.get(17), w.get(18),
+            w.get(19), q.get(10),
         )
     }
 

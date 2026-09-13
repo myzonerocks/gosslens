@@ -22,7 +22,7 @@ const requests = [_][]const u8{
     ,
     \\{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"read_text","arguments":{}}}
     ,
-    \\{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"annotate","arguments":{"id":3,"kind":0,"rect":[0.1,0.1,0.2,0.2],"text":"here"}}}
+    \\{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"annotate","arguments":{"id":3,"kind":1,"rect":[0.1,0.1,0.2,0.2],"text":"here"}}}
     ,
     \\{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"open_screen","arguments":{}}}
     ,
@@ -55,9 +55,34 @@ const requests = [_][]const u8{
     // Read again, now that a frame has been submitted: the record must say so.
     \\{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"read_perception","arguments":{}}}
     ,
+    // The section list, which this tool declared and ignored: asking for one section
+    // must answer that one and leave the rest out.
+    \\{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"read_perception","arguments":{"sections":["world"]}}}
+    ,
 };
 
 var failures: usize = 0;
+
+/// The line answering the narrowed read, which is the last request the proof sends.
+fn narrowedRead(text: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "\"id\":23") != null) return line;
+    }
+    return null;
+}
+
+/// The line answering the tools/list request, which is where the server says what it
+/// has. Scoped to that line because "name" appears in every tool call too.
+fn toolsListLine(text: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "\"id\":2") == null) continue;
+        if (std.mem.indexOf(u8, line, "\"tools\"") == null) continue;
+        return line;
+    }
+    return null;
+}
 
 fn check(ok: bool, what: []const u8) void {
     if (ok) {
@@ -111,22 +136,37 @@ pub fn main(init: std.process.Init) !u8 {
     check(std.mem.indexOf(u8, text, "2025-06-18") != null, "the server answers initialize with the protocol version it speaks");
     check(std.mem.indexOf(u8, text, "\"serverInfo\"") != null, "initialize carries the server's own name and version");
 
-    // Every tool the list declares, called. A tool nobody can call is not a tool.
-    for ([_][]const u8{
-        "open_clip",      "read_perception",   "read_text",         "annotate",
-        "remember",       "search_memory",     "model_support",     "engine_report",
-        "open_screen",    "screen_point",      "submit_image",      "submit_world",
-        "submit_world_mesh", "floor_plane",    "place_on",          "measure_between",
-        "path_across_world", "align_shared",
-    }) |name| {
-        check(std.mem.indexOf(u8, text, name) != null, name);
+    // Every tool the server declares, driven, read off the server's own list rather
+    // than a list typed here: a tool added to one and not the other is exactly the
+    // declared-and-unproven surface this whole proof exists to refuse.
+    const declared = toolsListLine(text) orelse {
+        check(false, "the server answers tools/list");
+        return 1;
+    };
+    var names: usize = 0;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, declared, at, "\"name\":\"")) |found| {
+        const start = found + "\"name\":\"".len;
+        const end = std.mem.indexOfScalarPos(u8, declared, start, '"') orelse break;
+        const name = declared[start..end];
+        at = end;
+        names += 1;
+        var called: [128]u8 = undefined;
+        const needle = std.fmt.bufPrint(&called, "\"name\":\"{s}\"", .{name}) catch continue;
+        var driven = false;
+        for (requests) |request| {
+            if (std.mem.indexOf(u8, request, needle) != null) driven = true;
+        }
+        check(driven, name);
     }
+    check(names != 0, "the tools list names at least one tool");
 
     // The wiring proof: an embedding put in through the server comes back out of
     // the same session by id, which only a live engine can do.
     check(std.mem.indexOf(u8, text, "remembered 7 at 4 dimensions") != null, "remember reaches the memory plane of a real session");
     check(std.mem.indexOf(u8, text, "7 at 1.0000") != null, "search_memory finds what remember put there, at the distance of an exact match");
     check(std.mem.indexOf(u8, text, "renderer backend") != null, "engine_report reads the engine's own counters");
+    check(std.mem.indexOf(u8, text, "model plan ") != null, "engine_report says what a model rail costs and whether it is steady");
     check(std.mem.indexOf(u8, text, "annotation 3 placed") != null, "annotate draws back into the frame through the session");
 
     // A missing precondition is an answer. The blanket refusal this replaced was
@@ -138,6 +178,25 @@ pub fn main(init: std.process.Init) !u8 {
     // getting an error it cannot act on.
     check(std.mem.indexOf(u8, text, "frames_submitted\\\":0") != null, "read_perception answers the record, saying it has seen no frame yet");
     check(std.mem.indexOf(u8, text, "\\\"schema\\\":1") != null, "the record a model reads carries the schema it was written against");
+    // A section projected as its own tag number is not an answer a model can act
+    // on. These are the sections this wave added, and the record has to name their
+    // fields rather than report how many bytes it is carrying.
+    check(std.mem.indexOf(u8, text, "tracking_state") != null, "the record names the world's tracking state rather than reporting a tag and a byte count");
+    check(std.mem.indexOf(u8, text, "anchor_count") != null, "the record names how many anchors the room has");
+    // A narrowed read answers the section asked for and not the others. The faces
+    // section rides every full read, so its absence from the narrowed one is the proof
+    // that the list was honoured rather than dropped.
+    if (narrowedRead(text)) |narrow| {
+        // Field names rather than quoted section names: the record rides inside a JSON
+        // string, so its own quotes are escaped and a check written with plain ones
+        // matches nothing. That is what made this fail on a record that was correct.
+        const answered = std.mem.indexOf(u8, narrow, "tracking_state") != null;
+        check(answered, "a read asking for one section answers that section");
+        if (!answered) std.debug.print("mcp-proof: the narrowed read answered {s}\n", .{narrow[0..@min(narrow.len, 400)]});
+        check(std.mem.indexOf(u8, narrow, "frames_submitted") == null, "a read asking for one section leaves the others out");
+    } else {
+        check(false, "the server answers a narrowed read");
+    }
     check(std.mem.indexOf(u8, text, "cannot read third_party/models/does-not-exist.onnx") != null, "model_support names the file it could not read");
     check(std.mem.indexOf(u8, text, "that clip would not open") != null, "open_clip refuses a path that is not a clip, and says which way");
     check(std.mem.indexOf(u8, text, "is declared and not wired") == null, "no declared tool is left unwired");
@@ -161,9 +220,9 @@ pub fn main(init: std.process.Init) !u8 {
     check(frame_landed or frame_refused, "submit_image either submits the png or names the renderer it needs");
     check(std.mem.count(u8, text, "frames_submitted") >= 2, "the record is readable before and after the attempt");
     if (frame_landed) {
-        check(std.mem.indexOf(u8, text, "frames_submitted\\":1") != null, "the record counts the frame the server submitted");
+        check(std.mem.indexOf(u8, text, "frames_submitted\\\":1") != null, "the record counts the frame the server submitted");
     } else {
-        check(std.mem.indexOf(u8, text, "frames_submitted\\":0") != null, "the record says it has seen no frame, agreeing with the refusal");
+        check(std.mem.indexOf(u8, text, "frames_submitted\\\":0") != null, "the record says it has seen no frame, agreeing with the refusal");
     }
     check(std.mem.indexOf(u8, text, "-32602") != null, "a tool this server does not have is a protocol error, not a result");
 

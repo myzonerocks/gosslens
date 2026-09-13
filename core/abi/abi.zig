@@ -152,10 +152,18 @@ pub const abi_major: u16 = 0;
 // The frozen ABI surface lives here so the version and the dump tool read
 // one list. A new export adds a line to abi_functions, its header decl, and
 // its body - nothing else.
-pub const abi_surface_types = .{ FrameDesc, Landmarks, EngineConfig, SessionConfig, RendererDesc, FramePlanes, FaceResult, HandResult, PoseResult, LensSignals, CameraControls, RecordingPolicy, CaptureUiIntent, CaptionSegment, CaptureGuidance, NodeReport, EngineReport, SessionReport };
+/// Which sections a caller may ask for, named rather than numbered by hand.
+pub const PerceptionSelect = perception.Select;
+
+/// Every struct that crosses the ABI. One left out is a layout the baseline never
+/// compares and a change the version cannot move, which is the one way a caller
+/// can still be handed a struct wider than the one it allocated.
+pub const abi_surface_types = .{ FrameDesc, Landmarks, EngineConfig, SessionConfig, RendererDesc, FramePlanes, FaceResult, HandResult, PoseResult, LensSignals, CameraControls, RecordingPolicy, CaptureUiIntent, CaptionSegment, CaptureGuidance, NodeReport, EngineReport, SessionReport, AnnotationDesc, CaptureConfig, ClipInfo, EgressConfig, EgressDecision, Event, Footprint, MediaCapabilities, Occupant, Placement, RecordingConfig, RecordingReport, ScreenSurface, SharedLandmark, TextEntry, WorldAnchor, WorldLight, WorldPlane, WorldState };
 
 pub const abi_functions = [_][]const u8{
     "uint32_t goss_abi_version(void)",
+    "goss_status goss_abi_check(uint32_t caller_version)",
+    "goss_status goss_lens_capabilities_missing(const uint8_t *manifest_json, size_t manifest_len, uint64_t *out_missing)",
     "uint64_t goss_capabilities(void)",
     "void *goss_alloc(size_t size)",
     "void goss_free(void *ptr, size_t size)",
@@ -392,11 +400,23 @@ pub const abi_functions = [_][]const u8{
 };
 
 // The minor advances from the surface, never by hand: a new op lengthens
-// abi_functions so the number moves on its own and parallel branches cannot
-// pick the same next value. The floor pins the value the day it landed.
+// abi_functions and a wider struct lengthens the bytes a caller has to allocate,
+// so the number moves on its own and parallel branches cannot pick the same next
+// value. The floors pin the values the day they landed.
 const abi_minor_floor: u16 = 34;
 const abi_functions_at_floor = 96;
-pub const abi_minor: u16 = abi_minor_floor + @as(u16, @intCast(abi_functions.len - abi_functions_at_floor));
+const abi_surface_fields_at_floor = 233;
+/// Every field of every struct crossing the ABI. A field appended to one of them
+/// is an ABI change a host cannot see from the op list: it sizes the buffer the
+/// engine writes into, so it moves the version exactly as a new op does, once.
+const abi_surface_fields: usize = blk: {
+    var total: usize = 0;
+    for (abi_surface_types) |T| total += std.meta.fields(T).len;
+    break :blk total;
+};
+pub const abi_minor: u16 = abi_minor_floor +
+    @as(u16, @intCast(abi_functions.len - abi_functions_at_floor)) +
+    @as(u16, @intCast(abi_surface_fields - abi_surface_fields_at_floor));
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -629,6 +649,11 @@ comptime {
 const default_texture_pool_capacity: u32 = 16;
 const default_staging_pool_capacity: u32 = 8;
 const default_frame_budget_us: u32 = 33_333;
+/// Where a room's noise floor ends and speech begins, and where speech has to fall
+/// before it counts as stopped. Two levels rather than one, so a voice sitting on the
+/// threshold does not emit a start and a stop on alternating frames.
+const voice_attack_level: f64 = 0.08;
+const voice_release_level: f64 = 0.05;
 
 const pixel_format_nv12: u32 = 0;
 const pixel_format_nv21: u32 = 1;
@@ -1424,7 +1449,7 @@ pub const Session = struct {
     /// reshape.bank nodes by graph index: their sixty-six per-region sculpt
     /// amounts in ReshapeField order, resolved at activation. The live tracked
     /// contour joins them each frame in the draw arm.
-    reshape_params: graph.NodeMap([66]f32) = .empty,
+    reshape_params: graph.NodeMap([runtime.reshape_param_count]f32) = .empty,
     /// reshape.body nodes by graph index: their body sculpt amounts in
     /// BodyReshapeField order, resolved at activation. The live pose landmarks
     /// and the body mask join them each frame in the draw arm.
@@ -1481,6 +1506,21 @@ pub const Session = struct {
     /// Set when a bounded pool turned this session's frame-path request away,
     /// read and cleared by the next report_frame.
     resource_pressure: bool = false,
+    /// The last thermal state and frame budget a report carried, so a change in
+    /// either is an event rather than something a host has to notice by polling.
+    last_thermal: i32 = -1,
+    /// Whether speech is running, so starting and stopping are each one event.
+    voice_active: bool = false,
+    /// The gesture last published, so holding one is a single event.
+    last_gesture: u32 = 0,
+    /// Which body actions were running, as jump, wave and dance bits.
+    last_actions: u32 = 0,
+    /// What the detector found on the last publish, and the top label then, so a
+    /// detection arriving or its label changing is an event rather than a poll.
+    detections: [max_detections]Detection = undefined,
+    detection_count: u32 = 0,
+    last_top_label: u32 = 0,
+    frame_budget_us: u32 = default_frame_budget_us,
     /// The lens's sound mixer and the mixer id each play_sound path resolves
     /// to, built from the bundle at activation. Playback is pulled out by the
     /// SDK; the engine only decodes and mixes.
@@ -2730,7 +2770,7 @@ fn tiledAspect(s: *Session, rect_w: u16, rect_h: u16) f32 {
 fn headWorldPosition(s: *Session, current: anytype) ?[3]f32 {
     const worker = s.face_tracking orelse return null;
     var tracked: face.Result = undefined;
-    if (!(tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5)) return null;
+    if (!(tracking.readResult(worker, &tracked) and tracked.landmark_count > 0 and tracked.presence >= 0.5)) return null;
     const h = face_geometry.estimateHeadPose(&tracked.landmarks) orelse return null;
     const fw: f32 = @floatFromInt(current.desc.width);
     const fh: f32 = @floatFromInt(current.desc.height);
@@ -2835,10 +2875,10 @@ fn drawBrushOverlay(e: *Engine, r: *render.Renderer, s: *Session, view_id: u8, w
 /// idempotent within a frame, so this matches fillReshapeContour's own gate
 /// and the readiness pass and the draw arm never disagree.
 fn reshapeFaceReady(s: *Session) bool {
-    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) return true;
+    if (s.face_count > 0 and s.face_results[0].landmark_count == face.landmark_count and s.face_results[0].presence >= 0.5) return true;
     if (s.face_tracking) |worker| {
         var result: face.Result = undefined;
-        if (tracking.readResult(worker, &result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) return true;
+        if (tracking.readResult(worker, &result) and result.landmark_count == face.landmark_count and result.presence >= 0.5) return true;
     }
     return false;
 }
@@ -2850,10 +2890,10 @@ fn reshapeFaceReady(s: *Session) bool {
 fn fillReshapeContour(s: *Session, width: u16, height: u16, rotation: u32, mirror: bool, contour: *[face106.point_count * 2]f32, hubs: *[4]f32) bool {
     var result: face.Result = undefined;
     var flat: ?*const [face.landmark_count * 3]f32 = null;
-    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) {
+    if (s.face_count > 0 and s.face_results[0].landmark_count == face.landmark_count and s.face_results[0].presence >= 0.5) {
         flat = &s.face_results[0].landmarks;
     } else if (s.face_tracking) |worker| {
-        if (tracking.readResult(worker, &result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) {
+        if (tracking.readResult(worker, &result) and result.landmark_count == face.landmark_count and result.presence >= 0.5) {
             flat = &result.landmarks;
         }
     }
@@ -2880,11 +2920,11 @@ fn fillReshapeContour(s: *Session, width: u16, height: u16, rotation: u32, mirro
 /// reads: host-submitted faces first, then the worker, then the web landmark
 /// path (copied into `scratch`). Null when no usable face holds.
 fn currentFaceLandmarks(s: *Session, result: *face.Result, scratch: *[face.landmark_count * 3]f32) ?*const [face.landmark_count * 3]f32 {
-    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) {
+    if (s.face_count > 0 and s.face_results[0].landmark_count == face.landmark_count and s.face_results[0].presence >= 0.5) {
         return &s.face_results[0].landmarks;
     }
     if (s.face_tracking) |worker| {
-        if (tracking.readResult(worker, result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) {
+        if (tracking.readResult(worker, result) and result.landmark_count == face.landmark_count and result.presence >= 0.5) {
             return &result.landmarks;
         }
     }
@@ -2915,10 +2955,10 @@ fn currentHands(s: *Session) ?hand.Result {
 fn faceAnchorScreen(s: *Session, idx: u32, width: u16, height: u16, rotation: u32, mirror: bool) ?[2]f32 {
     var result: face.Result = undefined;
     var flat: ?*const [face.landmark_count * 3]f32 = null;
-    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) {
+    if (s.face_count > 0 and s.face_results[0].landmark_count == face.landmark_count and s.face_results[0].presence >= 0.5) {
         flat = &s.face_results[0].landmarks;
     } else if (s.face_tracking) |worker| {
-        if (tracking.readResult(worker, &result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) {
+        if (tracking.readResult(worker, &result) and result.landmark_count == face.landmark_count and result.presence >= 0.5) {
             flat = &result.landmarks;
         }
     }
@@ -3022,10 +3062,10 @@ fn rollAngle(s: *Session) f32 {
     if (s.orientation_set) return std.math.atan2(s.orientation_prev[0], -s.orientation_prev[1]);
     var result: face.Result = undefined;
     var flat: ?*const [face.landmark_count * 3]f32 = null;
-    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) {
+    if (s.face_count > 0 and s.face_results[0].landmark_count == face.landmark_count and s.face_results[0].presence >= 0.5) {
         flat = &s.face_results[0].landmarks;
     } else if (s.face_tracking) |worker| {
-        if (tracking.readResult(worker, &result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) {
+        if (tracking.readResult(worker, &result) and result.landmark_count == face.landmark_count and result.presence >= 0.5) {
             flat = &result.landmarks;
         }
     }
@@ -3074,11 +3114,11 @@ fn gazeEyePoints(s: *Session, width: u16, height: u16, rotation: u32, mirror: bo
     var result: face.Result = undefined;
     var flat: ?*const [face.landmark_count * 3]f32 = null;
     var bshapes: ?*const [face.blendshape_count]f32 = null;
-    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) {
+    if (s.face_count > 0 and s.face_results[0].landmark_count == face.landmark_count and s.face_results[0].presence >= 0.5) {
         flat = &s.face_results[0].landmarks;
         bshapes = &s.face_results[0].blendshapes;
     } else if (s.face_tracking) |worker| {
-        if (tracking.readResult(worker, &result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) {
+        if (tracking.readResult(worker, &result) and result.landmark_count == face.landmark_count and result.presence >= 0.5) {
             flat = &result.landmarks;
             bshapes = &result.blendshapes;
         }
@@ -4346,7 +4386,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.submitShaderPass(view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
                 if (s.face_tracking) |worker| {
                     var tracked: face.Result = undefined;
-                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
+                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count > 0 and tracked.presence >= 0.5) {
                         r.submitFaceMesh(view_id, input_texture, mesh_texture, &tracked.landmarks, @floatFromInt(width), @floatFromInt(height), 1.0);
                     }
                 }
@@ -4480,7 +4520,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.submitShaderPass(view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
                 if (s.face_tracking) |worker| {
                     var tracked: face.Result = undefined;
-                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
+                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count > 0 and tracked.presence >= 0.5) {
                         r.submitLashMesh(view_id, input_texture, &tracked.landmarks, @floatFromInt(width), @floatFromInt(height), .{ params[0], params[1], params[2], params[3] }, params[4], params[5]);
                     }
                 }
@@ -4512,7 +4552,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.submitShaderPass(view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
                 if (s.face_tracking) |worker| {
                     var tracked: face.Result = undefined;
-                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
+                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count > 0 and tracked.presence >= 0.5) {
                         r.submitFaceMaterial(view_id, input_texture, paint_texture, mask_tex, &tracked.landmarks, @floatFromInt(width), @floatFromInt(height), params[0], params[1]);
                     }
                 }
@@ -4544,7 +4584,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.submitShaderPass(view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
                 if (s.face_tracking) |worker| {
                     var tracked: face.Result = undefined;
-                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
+                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count > 0 and tracked.presence >= 0.5) {
                         r.submitFaceSwap(view_id, input_texture, donor_texture, mask_tex, &tracked.landmarks, @floatFromInt(width), @floatFromInt(height), params[0], params[1]);
                     }
                 }
@@ -5006,7 +5046,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                             var head = math.Mat4.identity;
                             if (s.face_tracking) |worker| {
                                 var tracked: face.Result = undefined;
-                                if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
+                                if (tracking.readResult(worker, &tracked) and tracked.landmark_count > 0 and tracked.presence >= 0.5) {
                                     if (face_geometry.estimateHeadPose(&tracked.landmarks)) |h| head = h;
                                 }
                             }
@@ -5215,7 +5255,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     anchored_without_target = true;
                     if (s.face_tracking) |worker| {
                         var tracked: face.Result = undefined;
-                        if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
+                        if (tracking.readResult(worker, &tracked) and tracked.landmark_count > 0 and tracked.presence >= 0.5) {
                             if (face_geometry.estimateHeadPose(&tracked.landmarks)) |head| {
                                 model_matrix = pixel_to_world.mul(head).mul(base_model_matrix);
                                 anchored_without_target = false;
@@ -5443,6 +5483,7 @@ pub fn createSession(engine: *Engine, config: SessionConfig) error{OutOfMemory}!
     session.* = .{
         .engine = engine,
         .controller = graph.DegradeController.init(.{ .budget_us = budget }),
+        .frame_budget_us = budget,
         .lens_graph = graph.Graph.init(engine.gpa),
         .camera_node = undefined,
     };
@@ -5800,6 +5841,16 @@ pub export fn goss_abi_version() u32 {
     return (@as(u32, abi_major) << 16) | abi_minor;
 }
 
+/// Whether a caller's own ABI version can talk to this binary: it passes the major it
+/// compiled against and a different one is refused, which is what `abi_mismatch` is
+/// for. Zero means the caller is not saying. Reading the version and comparing by hand
+/// was the only check before, and two of the SDKs did not.
+pub export fn goss_abi_check(caller_version: u32) Status {
+    if (caller_version == 0) return .ok;
+    if (caller_version >> 16 != abi_major) return .abi_mismatch;
+    return .ok;
+}
+
 /// Which capabilities this build compiled real, as GOSS_CAP_* bits. The stub
 /// and full libraries share a filename and an abi version, so this is how a
 /// consumer tells them apart before feeding real bytes to an enable_* op.
@@ -5946,11 +5997,13 @@ fn queueRecordingCommit(e: *Engine, frame: ?media_recording.Frame, timestamp_us:
         if (aged.timestamp_us > e.recording_last_timestamp) {
             rec.commitFrame(aged.frame, aged.timestamp_us) catch {
                 e.recording_dropped += 1;
+                emitEngineWide(e, .frame_dropped, e.recording_dropped, 0, 0);
             };
             e.recording_last_timestamp = aged.timestamp_us;
         } else {
             rec.abortFrame(aged.frame);
             e.recording_dropped += 1;
+            emitEngineWide(e, .frame_dropped, e.recording_dropped, 0, 0);
         }
         e.recording_pending[at] = null;
     }
@@ -6446,7 +6499,15 @@ fn encodeLossyPhoto(gpa: std.mem.Allocator, pixels: []const u8, width: u32, heig
         return .ok;
     }
     if (!photo.supported) return .unsupported;
-    photo.encode(pixels, width, height, @enumFromInt(format), quality, data, out_len) catch return .invalid_argument;
+    // The format is a caller's number and the encoder's format enum is exhaustive, so
+    // a cast of anything outside it is illegal rather than wrong. Neither entry point
+    // bounded it, so a host asking for format three crashed the engine.
+    const encoded_format: photo.Format = switch (format) {
+        1 => .jpeg,
+        2 => .heic,
+        else => return .invalid_argument,
+    };
+    photo.encode(pixels, width, height, encoded_format, quality, data, out_len) catch return .invalid_argument;
     return .ok;
 }
 
@@ -6523,6 +6584,24 @@ pub const CaptureGuidance = extern struct {
 };
 
 pub const max_world_planes = 32;
+
+/// The most detections one frame carries into the record and the ring. A detector
+/// keeps a hundred slots and almost all of them are below any useful threshold, so
+/// this is the number a reader can act on rather than the number a tensor holds.
+pub const max_detections = 16;
+
+/// One thing the detector found: where it is in the normalized frame, what it is,
+/// and how sure. Not an extern struct: it never crosses the boundary as a type, the
+/// record's own schema is what declares the bytes, and an extern struct outside
+/// `abi_surface_types` is a layout the gate cannot see.
+const Detection = struct {
+    label: u32,
+    score: f32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+};
 pub const max_world_anchors = 32;
 
 /// Feeds the platform's world understanding into the session: drives
@@ -6808,6 +6887,12 @@ pub export fn goss_session_submit_world(session: ?*Session, state: ?*const World
     if (plane_count > 0 and planes == null) return .invalid_argument;
     if (anchor_count > 0 and anchors == null) return .invalid_argument;
 
+    // What changed, before the copy overwrites it. A host feeding the room every
+    // frame would otherwise have to diff it itself to learn a plane arrived.
+    const was_tracking = s.world.state.tracking_state;
+    const had_planes = s.world.plane_count;
+    const had_anchors = s.world.anchor_count;
+
     s.world.state = st.*;
     s.world.plane_count = @min(plane_count, max_world_planes);
     if (planes) |p| @memcpy(s.world.planes[0..s.world.plane_count], p[0..s.world.plane_count]);
@@ -6816,6 +6901,20 @@ pub export fn goss_session_submit_world(session: ?*Session, state: ?*const World
     if (anchors) |a| @memcpy(s.world.anchors[0..s.world.anchor_count], a[0..s.world.anchor_count]);
     s.world.dropped_anchors +|= std.math.lossyCast(u32, anchor_count -| max_world_anchors);
     if (light) |l| s.world.light = l.*;
+
+    if (st.tracking_state != was_tracking) emit(s, .tracking_state_changed, was_tracking, st.tracking_state, 0);
+    if (s.world.plane_count > had_planes) {
+        emit(s, .plane_added, @intCast(s.world.plane_count), @intCast(had_planes), 0);
+    } else if (s.world_engine_fed and s.world.plane_count != 0) {
+        // The same planes submitted again is the room being refined rather than
+        // grown, which is what a lens anchored to a surface needs to hear.
+        emit(s, .plane_updated, @intCast(s.world.plane_count), 0, 0);
+    }
+    if (s.world.anchor_count > had_anchors) {
+        emit(s, .anchor_added, @intCast(s.world.anchor_count), @intCast(had_anchors), 0);
+    } else if (s.world.anchor_count < had_anchors) {
+        emit(s, .anchor_lost, @intCast(s.world.anchor_count), @intCast(had_anchors), 0);
+    }
     s.world_engine_fed = true;
     return .ok;
 }
@@ -6853,6 +6952,9 @@ pub export fn goss_session_submit_world_mesh(session: ?*Session, vertices: ?[*]c
     @memcpy(inds, idx[0..index_count]);
     s.world.mesh_vertices = verts;
     s.world.mesh_indices = inds;
+    // A scan arriving is what a path query waits for, so it is an event rather than
+    // something a caller learns by asking for a route and being refused.
+    emit(s, .world_mesh_updated, @intCast(vertex_count), @intCast(index_count / 3), 0);
     return .ok;
 }
 
@@ -7015,7 +7117,10 @@ pub export fn goss_engine_recording_start(engine: ?*Engine, session: ?*Session, 
         .width = width,
         .height = height,
         .bitrate_bps = cfg.bitrate_bps,
-        .codec = @enumFromInt(cfg.codec),
+        // The value the backend already accepted, not the caller's number cast a second
+        // time: the recording codec is the same type the check above validated, so
+        // casting again assumed a numbering the two could drift apart on.
+        .codec = wanted.codec,
     }) catch return .invalid_argument;
     e.recording_session = s;
     e.recording_warmups = 0;
@@ -7142,6 +7247,14 @@ pub export fn goss_session_submit_audio(session: ?*Session, samples: ?[*]const f
     // The onset pulse, published rather than left for a poller to catch between
     // frames: a beat lasts one hop and a poll at frame rate misses most of them.
     if (s.audio.beat and !beat_before) emit(s, .audio_beat, 0, 0, s.audio.level);
+    // Speech starting and stopping, off the same level the beat reads. The threshold
+    // is where a room's noise floor ends, and the pair is hysteretic so a level
+    // sitting on the line does not emit on every frame.
+    const speaking = if (s.voice_active) s.audio.level > voice_release_level else s.audio.level > voice_attack_level;
+    if (speaking != s.voice_active) {
+        if (speaking) emit(s, .voice_activity_started, 0, 0, s.audio.level) else emit(s, .voice_activity_ended, 0, 0, s.audio.level);
+        s.voice_active = speaking;
+    }
     s.audio_engine_fed = true;
     s.audio_timestamp_us = timestamp_us;
 
@@ -8742,8 +8855,19 @@ fn readText(s: *Session, rgba: []const u8, width: u32, height: u32, stride: u32,
         }
     }
     s.text_lowered_len = lowered_len;
+    const had_text = previous_digest != 0;
     s.text_digest = s.text_store.digest();
     s.text_changed = s.text_digest != previous_digest;
+    // Text arriving where there was none, as against a reading changing. An agent
+    // watching for a sign to come into frame wants the first one, not every edit.
+    if (s.text_changed) {
+        const count: u32 = @intCast(s.text_store.items().len);
+        if (!had_text and count != 0) {
+            emit(s, .text_appeared, count, 0, 0);
+        } else {
+            emit(s, .text_changed, count, 0, 0);
+        }
+    }
 }
 
 /// Opens a clip as a source of frames for this session. The engine decodes it and
@@ -8897,7 +9021,7 @@ pub export fn goss_session_clip_step(session: ?*Session, clip: u32, frames: i32)
 
 /// One versioned record of what the engine currently sees, written into the
 /// caller's buffer. Selection matters: an agent polling every frame usually wants
-/// two sections, and a short buffer answers the size it needed rather than a
+/// a section or two, and a short buffer answers the size it needed rather than a
 /// partial record, so a caller sizes once.
 pub export fn goss_session_perception_snapshot(session: ?*Session, select: u32, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
     const s = session orelse return .invalid_argument;
@@ -8963,8 +9087,8 @@ pub export fn goss_session_perception_snapshot(session: ?*Session, select: u32, 
         w.u32v(s.face_count);
         for (s.face_results[0..@min(s.face_count, s.face_results.len)]) |result| {
             w.f32v(result.presence);
-            w.u32v(result.landmark_count_out);
-            const n = @min(result.landmark_count_out, face.landmark_count);
+            w.u32v(result.landmark_count);
+            const n = @min(result.landmark_count, face.landmark_count);
             w.u32v(n);
             for (0..n) |i| {
                 w.f32v(result.landmarks[i * 3]);
@@ -8997,6 +9121,63 @@ pub export fn goss_session_perception_snapshot(session: ?*Session, select: u32, 
         w.endSection();
     }
 
+    // The sections the format declared and nothing wrote: a reader asking for them
+    // could not tell an empty answer from one this build never produced.
+    if (want.segmentation) {
+        w.beginSection(.segmentation, 1);
+        w.u32v(if (s.seg_tex.valid()) 1 else 0);
+        w.endSection();
+    }
+
+    if (want.world) {
+        w.beginSection(.world, 1);
+        w.u32v(s.world.state.tracking_state);
+        w.u32v(@intCast(s.world.plane_count));
+        w.u32v(@intCast(s.world.anchor_count));
+        w.endSection();
+    }
+
+    if (want.depth) {
+        w.beginSection(.depth, 1);
+        // A depth map the host submitted, which is what the dof and fog passes read.
+        w.u32v(if (s.depth_width > 0 and s.depth_height > 0) 1 else 0);
+        w.endSection();
+    }
+
+    if (want.scene) {
+        w.beginSection(.scene, 1);
+        // The scene segmenter fills named channels, so a label is a channel and its
+        // score is whether that channel is live. No worker is a count of zero, which
+        // is an answer; an absent section was not.
+        const live = s.scene_worker != null;
+        const labels: u32 = if (live) scene_class_order.len else 0;
+        w.u32v(labels);
+        if (live) {
+            for (scene_class_order) |channel| {
+                w.u32v(channel);
+                w.f32v(if (s.shader_masks.count() > 0) 1 else 0);
+            }
+        }
+        w.endSection();
+    }
+
+    if (want.detections) {
+        // What the frame holds, as a box a reader can place without knowing the
+        // camera's size. A count of zero is an answer: the detector ran and found
+        // nothing, which is different from no detector running.
+        w.beginSection(.detections, 1);
+        w.u32v(s.detection_count);
+        for (s.detections[0..@min(s.detection_count, max_detections)]) |det| {
+            w.u32v(det.label);
+            w.f32v(det.score);
+            w.f32v(det.x);
+            w.f32v(det.y);
+            w.f32v(det.width);
+            w.f32v(det.height);
+        }
+        w.endSection();
+    }
+
     if (want.audio) {
         w.beginSection(.audio, 1);
         w.f32v(s.audio.level);
@@ -9006,19 +9187,19 @@ pub export fn goss_session_perception_snapshot(session: ?*Session, select: u32, 
     }
 
     if (want.lens) {
-        w.beginSection(.lens, 1);
-        if (s.active_lens) |*l| {
-            w.str(l.manifest.id);
-            w.u32v(@intCast(s.node_reports.items.len));
-            for (s.node_reports.items) |report| {
-                w.u32v(report.node_index);
-                w.u32v(report.state);
-                w.u32v(report.reason);
-            }
-        } else {
-            w.str("");
-            w.u32v(0);
+        // Fixed fields first and the id's bytes last, which is the shape every other
+        // repeating section takes and the only one a declared layout can describe.
+        w.beginSection(.lens, 2);
+        const lens_id = if (s.active_lens) |*l| l.manifest.id else "";
+        w.u32v(if (s.active_lens != null) 1 else 0);
+        w.u32v(@intCast(s.node_reports.items.len));
+        w.u32v(@intCast(lens_id.len));
+        for (s.node_reports.items) |report| {
+            w.u32v(report.node_index);
+            w.u32v(report.state);
+            w.u32v(report.reason);
         }
+        w.bytes(lens_id);
         w.endSection();
     }
 
@@ -9096,7 +9277,21 @@ pub export fn goss_session_annotate(session: ?*Session, annotation: ?*const Anno
     if (!s.scope.allowsVerb(.annotate)) return .out_of_scope;
     const d = annotation orelse return .invalid_argument;
     const label: []const u8 = if (text) |p| p[0..text_len] else "";
-    const kind: perception_actions.Kind = @enumFromInt(d.kind);
+    // Validated like every other field beside it. The enum is open, so an unknown
+    // kind was accepted and answered ok while nothing could draw it: an agent was
+    // told its overlay landed when it never would.
+    const kind: perception_actions.Kind = switch (d.kind) {
+        1 => .box,
+        2 => .label,
+        3 => .point,
+        4 => .arrow,
+        5 => .path,
+        6 => .highlight,
+        7 => .mask_overlay,
+        8 => .image,
+        9 => .meter,
+        else => return .invalid_argument,
+    };
     const space: perception_actions.AnchorSpace = switch (d.space) {
         0 => .screen,
         1 => .pixels,
@@ -9508,6 +9703,14 @@ pub const SessionReport = extern struct {
     /// frame still draws, so without this the host sees a lens that looks fine
     /// and behaves as though it had no script at all.
     script_faults: u32,
+    /// Every model rail's frame buffer growing mid-run, summed. A steady rail
+    /// reads zero: a plan that grows every frame is not a plan, and a host
+    /// metering memory cannot see that from the byte count alone.
+    ml_plan_growths: u32,
+    /// The bytes those rails reuse every frame, summed. Zero before the first
+    /// inference publishes, and zero for a model on the vendor runtime, whose
+    /// arena it does not report.
+    ml_plan_bytes: u64,
 };
 
 /// One node's diagnostic, POD across the ABI.
@@ -9561,6 +9764,13 @@ fn activationStatus(s: *Session) Status {
 fn emit(s: *Session, kind: perception_events.Kind, a: u32, b: u32, value: f32) void {
     const at = if (s.current) |cur| cur.desc.timestamp_us else 0;
     s.events.publish(kind, at, a, b, value);
+}
+
+/// An event that happened to the engine rather than to one session, reaching every
+/// ring. Recording is engine-level, so a dropped frame belongs to all of them: the
+/// alternative was a counter a host could only find by asking for a report.
+fn emitEngineWide(e: *Engine, kind: perception_events.Kind, a: u32, b: u32, value: f32) void {
+    for (e.sessions.items) |s| emit(s, kind, a, b, value);
 }
 
 /// A resource a node cannot draw without. A node the lens marked optional
@@ -9617,6 +9827,17 @@ pub export fn goss_session_report_frame(session: ?*Session, frame_time_us: u32, 
     // whatever the clock said, then clears: the rung is what shrinks demand.
     const pressure = s.resource_pressure;
     s.resource_pressure = false;
+    // The host's own reading, reported on change: a lens that dims itself when the
+    // device warms needs to hear this, and nothing told it before.
+    if (thermal != s.last_thermal) {
+        emit(s, .thermal_changed, @bitCast(s.last_thermal), @bitCast(thermal), 0);
+        s.last_thermal = thermal;
+    }
+    // A frame over the budget the session was created with, which is the number the
+    // ladder is measured against. A host reads how often rather than guessing.
+    if (frame_time_us > s.frame_budget_us) {
+        emit(s, .budget_exceeded, frame_time_us, s.frame_budget_us, 0);
+    }
     if (s.controller.step(.{
         .frame_time_us = frame_time_us,
         .thermal = thermalFromC(thermal),
@@ -9997,7 +10218,7 @@ pub export fn goss_session_submit_faces(session: ?*Session, faces: ?[*]const fac
     var i: u32 = 0;
     while (i < count and kept < face.max_faces) : (i += 1) {
         const f = src[i];
-        if (f.landmark_count_out == 0 or f.presence < 0.5) continue;
+        if (f.landmark_count == 0 or f.presence < 0.5) continue;
         s.face_results[kept] = f;
         kept += 1;
     }
@@ -10171,6 +10392,7 @@ pub export fn goss_session_face_track_id(session: ?*Session, index: u32, out_id:
 pub export fn goss_session_submit_bodies(session: ?*Session, bodies: ?[*]const pose.Result, count: u32) Status {
     const s = session orelse return .invalid_argument;
     if (count == 0) {
+        if (s.body_count != 0) emit(s, .body_lost, 0, s.body_count, 0);
         s.body_count = 0;
         return .ok;
     }
@@ -10179,9 +10401,13 @@ pub export fn goss_session_submit_bodies(session: ?*Session, bodies: ?[*]const p
     var i: u32 = 0;
     while (i < count and kept < pose.max_bodies) : (i += 1) {
         const b = src[i];
-        if (b.landmark_count_out == 0 or b.presence < 0.5) continue;
+        if (b.landmark_count == 0 or b.presence < 0.5) continue;
         s.body_results[kept] = b;
         kept += 1;
+    }
+    // A body arriving or leaving is what an agent watches for, the same as a face.
+    if (kept != s.body_count) {
+        if (kept > s.body_count) emit(s, .body_appeared, kept, s.body_count, 0) else emit(s, .body_lost, kept, s.body_count, 0);
     }
     s.body_count = kept;
     return .ok;
@@ -10194,6 +10420,9 @@ pub export fn goss_session_submit_bodies(session: ?*Session, bodies: ?[*]const p
 pub export fn goss_session_submit_hands(session: ?*Session, hands: ?*const hand.Result) Status {
     const s = session orelse return .invalid_argument;
     const src = hands orelse {
+        if (s.has_submitted_hands and s.submitted_hands.hand_count != 0) {
+            emit(s, .hand_lost, 0, s.submitted_hands.hand_count, 0);
+        }
         s.has_submitted_hands = false;
         return .ok;
     };
@@ -10207,6 +10436,11 @@ pub export fn goss_session_submit_hands(session: ?*Session, hands: ?*const hand.
         kept += 1;
     }
     out.hand_count = kept;
+    // A hand arriving or leaving, the same shape as a face and a body.
+    const before: u32 = if (s.has_submitted_hands) s.submitted_hands.hand_count else 0;
+    if (kept != before) {
+        if (kept > before) emit(s, .hand_appeared, kept, before, 0) else emit(s, .hand_lost, kept, before, 0);
+    }
     s.submitted_hands = out;
     s.has_submitted_hands = true;
     return .ok;
@@ -11066,8 +11300,27 @@ pub export fn goss_session_read_report(session: ?*Session, out_report: ?*Session
         .nodes_degraded = @intCast(s.node_reports.items.len),
         .node_reports_lost = s.node_reports_lost,
         .script_faults = s.script_faults,
+        .ml_plan_growths = mlPlanGrowths(s),
+        .ml_plan_bytes = mlPlanBytes(s),
     };
     return .ok;
+}
+
+/// Sums every model rail this session is running: the single-frame workers and
+/// the temporal ones. Summed rather than maxed, because what a host meters is
+/// the memory the session holds, not the largest one model holds.
+fn mlPlanBytes(s: *Session) u64 {
+    var total: u64 = 0;
+    for (s.ml_workers.items) |mw| total += ml_infer.planBytes(mw.worker);
+    for (s.temporal_workers.items) |tw| total += ml_infer.temporalPlanBytes(tw.worker);
+    return total;
+}
+
+fn mlPlanGrowths(s: *Session) u32 {
+    var total: u32 = 0;
+    for (s.ml_workers.items) |mw| total +|= ml_infer.planGrowths(mw.worker);
+    for (s.temporal_workers.items) |tw| total +|= ml_infer.temporalPlanGrowths(tw.worker);
+    return total;
 }
 
 pub export fn goss_session_node_report_count(session: ?*Session, out_count: ?*u32, out_lost: ?*u32) Status {
@@ -11696,7 +11949,7 @@ pub export fn goss_session_face_region(session: ?*Session, region: u32, out_xyz:
     const r = face.Region.fromU32(region) orelse return .invalid_argument;
     if (s.face_tracking) |worker| {
         var result: face.Result = undefined;
-        if (tracking.readResult(worker, &result) and result.landmark_count_out > 0 and result.presence >= 0.5) {
+        if (tracking.readResult(worker, &result) and result.landmark_count > 0 and result.presence >= 0.5) {
             out.* = face.regionPoint(&result.landmarks, r);
             return .ok;
         }
@@ -12040,7 +12293,11 @@ fn pollSegmentationMask(session: *Session) void {
         if (!maskChannelNeeded(session, @intCast(channel))) continue;
         const source = classChannelSource(class_count, channel) orelse continue;
         if (!segmentation.readClassMask(worker, source, mask)) continue;
+        const was_live = session.segmentation_class_textures[channel] != null;
         session.segmentation_class_textures[channel] = uploadMaskFromF32(sessionRenderer(session) orelse return, &session.class_tex[channel], mask);
+        // A class the segmenter had not found before: hair entering frame is an
+        // event, not something a lens learns by sampling a mask that used to be zero.
+        if (!was_live) emit(session, .segmentation_class_appeared, @intCast(channel), source, 0);
     }
 }
 
@@ -12054,7 +12311,9 @@ fn pollSceneSegmentation(session: *Session) void {
         if (!maskChannelNeeded(session, channel)) continue;
         const source = sceneChannelSource(channel) orelse continue;
         if (!segmentation.readClassMask(worker, source, mask)) continue;
+        const was_live = session.segmentation_class_textures[channel] != null;
         session.segmentation_class_textures[channel] = uploadMaskFromF32(sessionRenderer(session) orelse return, &session.class_tex[channel], mask);
+        if (!was_live) emit(session, .segmentation_class_appeared, @intCast(channel), source, 0);
     }
 }
 
@@ -12104,7 +12363,7 @@ fn faceMattePoints(session: *Session, out: *[face.landmark_count][2]f32) bool {
     if (w <= 0 or h <= 0) return false;
     if (session.face_tracking) |worker| {
         var result: face.Result = undefined;
-        if (tracking.readResult(worker, &result) and result.landmark_count_out > 0 and result.presence >= 0.5) {
+        if (tracking.readResult(worker, &result) and result.landmark_count > 0 and result.presence >= 0.5) {
             for (0..face.landmark_count) |i| {
                 out[i] = .{ result.landmarks[i * 3] / w, result.landmarks[i * 3 + 1] / h };
             }
@@ -12630,11 +12889,51 @@ fn destroyModelState(session: *Session) void {
 /// down: a manifest that fails to parse, or that names an unsupported
 /// node type, leaves whatever was already active running rather than
 /// destroying a working lens over a failed swap.
+/// Refuses a lens whose own compatibility range excludes this engine. The range was
+/// parsed and `contains` called by nothing, so a lens needing a newer engine ran on an
+/// older one. A missing capability is not refused here: that build is meant to activate
+/// and degrade the nodes that needed it, and the query op is how a host asks first.
+fn refuseIncompatibleLens(parsed: *const manifest.Manifest) !void {
+    if (!parsed.engine_compat.contains(abi_major, abi_minor)) return error.EngineIncompatible;
+}
+
+/// Which capabilities a lens declares that this build does not have, as GOSS_CAP_ bits.
+/// Zero means every rail it asked for is here. A lens states what it needs and nothing
+/// could read that back, so a catalogue had to activate a lens to find out.
+pub export fn goss_lens_capabilities_missing(manifest_json: ?[*]const u8, manifest_len: usize, out_missing: ?*u64) Status {
+    const bytes = manifest_json orelse return .invalid_argument;
+    const out = out_missing orelse return .invalid_argument;
+    if (manifest_len == 0) return .invalid_argument;
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    var diags = manifest.Diagnostics{ .arena = arena.allocator() };
+    const maybe = manifest.parse(arena.allocator(), &diags, bytes[0..manifest_len]) catch return .out_of_memory;
+    var parsed = maybe orelse return .invalid_argument;
+    defer parsed.deinit();
+
+    const have = goss_capabilities();
+    var missing: u64 = 0;
+    for (parsed.capabilities) |cap| {
+        const bit: u6 = switch (cap) {
+            .face, .hands => 0,
+            .segmentation => 1,
+            .world => 13,
+            .audio_level => 11,
+        };
+        const mask = @as(u64, 1) << bit;
+        if (have & mask == 0) missing |= mask;
+    }
+    out.* = missing;
+    return .ok;
+}
+
 fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []const u8) !void {
     var diag_arena = std.heap.ArenaAllocator.init(gpa);
     defer diag_arena.deinit();
     var diags = manifest.Diagnostics{ .arena = diag_arena.allocator() };
     var parsed = try manifest.parse(gpa, &diags, manifest_json) orelse return error.InvalidManifest;
+    try refuseIncompatibleLens(&parsed);
     // Once activate succeeds the lens owns the manifest arena and
     // new_lens.deinit frees it; the disarm keeps a later failure from
     // walking the same arena twice.
@@ -13422,6 +13721,9 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     const gpa = s.engine.gpa;
     activateLens(s, gpa, bytes[0..manifest_len]) catch |err| return switch (err) {
         error.OutOfMemory => .out_of_memory,
+        // A lens whose own range excludes this engine is not a malformed lens: the
+        // manifest is fine and this build is the wrong one for it.
+        error.EngineIncompatible => .unsupported,
         else => .invalid_argument,
     };
     // No bundle directory: the same resource pass the directory path runs, with an empty
@@ -14826,7 +15128,7 @@ fn feedFaceEmitters(s: *Session, sys: *particles.System, frame_w: u32, frame_h: 
         return;
     };
     var tracked: face.Result = undefined;
-    if (!tracking.readResult(worker, &tracked) or tracked.landmark_count_out == 0 or tracked.presence < 0.5) {
+    if (!tracking.readResult(worker, &tracked) or tracked.landmark_count == 0 or tracked.presence < 0.5) {
         sys.setEmitters(&.{});
         return;
     }
@@ -14834,7 +15136,7 @@ fn feedFaceEmitters(s: *Session, sys: *particles.System, frame_w: u32, frame_h: 
     const fh: f32 = @floatFromInt(@max(frame_h, 1));
     const aspect = fw / fh;
     const half: f32 = 0.828; // tan(22.5 deg) * the particle camera's eye z (2)
-    const total = @min(tracked.landmark_count_out, face.landmark_count);
+    const total = @min(tracked.landmark_count, face.landmark_count);
     const stride = @max(total / s.particle_emitter_buf.len, 1);
     var n: usize = 0;
     var i: usize = 0;
@@ -14988,6 +15290,9 @@ const MlWorker = struct {
     /// host addresses this model's outputs by the name the manifest gave it.
     node_id: []u8,
     outputs: []const manifest.MlOutput,
+    /// A detector's output mapping, when the node declares one: what is in frame
+    /// read off four tensors rather than one scalar off one.
+    detect: ?manifest.MlDetect = null,
     /// A mask binding routes a whole output tensor to a mask channel; null when
     /// the node only drives parameters. mask_side is the model mask's square
     /// side, and the two scratch planes hold its raw and resampled copies.
@@ -15040,7 +15345,15 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
             noteMl(session, gi, node.optional, .model_rejected);
             continue;
         }
-        const norm: ml_infer.Norm = .{ .symmetric = ml.input_symmetric, .mean = ml.input_mean, .std_dev = ml.input_std };
+        const norm: ml_infer.Norm = .{
+            .range = switch (ml.input_range) {
+                .unit => .unit,
+                .symmetric => .symmetric,
+                .byte => .byte,
+            },
+            .mean = ml.input_mean,
+            .std_dev = ml.input_std,
+        };
         // A two-input model reads a second plane. A temporal model takes the
         // previous frame; a reference model conditions on a bundled image,
         // decoded here and sampled by the worker into input 1 (create copies
@@ -15162,6 +15475,7 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
             .worker = worker,
             .node_id = node_id,
             .outputs = ml.outputs,
+            .detect = ml.detect,
             .mask = mask,
             .mask_side = mask_side,
             .mask_src = mask_src,
@@ -15226,7 +15540,53 @@ fn pollMlOutputs(session: *Session) void {
             };
             lens.setParam(out.param, value);
         }
+        if (mw.detect) |d| pollDetections(session, mw.worker, d);
     }
+}
+
+/// Reads a detector's four tensors into what the frame holds: the boxes above the
+/// threshold, each with its label and score, in the normalized frame an annotation
+/// and a record section both speak. A model keeps a hundred slots and means almost
+/// none of them, so the threshold is the line and the cap is what a reader can use.
+fn pollDetections(session: *Session, worker: *ml_infer.MlInfer, d: manifest.MlDetect) void {
+    const reported = ml_infer.readOutput(worker, d.count, 0);
+    const slots: u32 = if (reported > 0) @intFromFloat(@min(reported, @as(f32, @floatFromInt(max_detections)))) else max_detections;
+    var kept: u32 = 0;
+    var top_label: u32 = 0;
+    var top_score: f32 = 0;
+    var i: u32 = 0;
+    while (i < slots and kept < max_detections) : (i += 1) {
+        const score = ml_infer.readOutput(worker, d.scores, i);
+        if (score < d.threshold) continue;
+        // A box arrives as top, left, bottom, right in the normalized frame, which
+        // is the order every detector in this family writes.
+        const top = ml_infer.readOutput(worker, d.boxes, i * 4);
+        const left = ml_infer.readOutput(worker, d.boxes, i * 4 + 1);
+        const bottom = ml_infer.readOutput(worker, d.boxes, i * 4 + 2);
+        const right = ml_infer.readOutput(worker, d.boxes, i * 4 + 3);
+        session.detections[kept] = .{
+            .label = @intFromFloat(@max(0, ml_infer.readOutput(worker, d.classes, i))),
+            .score = score,
+            .x = @min(left, right),
+            .y = @min(top, bottom),
+            .width = @abs(right - left),
+            .height = @abs(bottom - top),
+        };
+        if (score > top_score) {
+            top_score = score;
+            top_label = session.detections[kept].label;
+        }
+        kept += 1;
+    }
+
+    const had = session.detection_count;
+    session.detection_count = kept;
+    if (kept != 0 and had == 0) emit(session, .detection_appeared, kept, 0, top_score);
+    if (kept == 0 and had != 0) emit(session, .detection_lost, 0, had, 0);
+    if (kept != 0 and top_label != session.last_top_label) {
+        emit(session, .label_changed, top_label, session.last_top_label, top_score);
+    }
+    session.last_top_label = if (kept != 0) top_label else 0;
 }
 
 /// Resolves the active lens's audio.enhance and voice.transform nodes into the
@@ -16801,9 +17161,10 @@ pub export fn goss_session_ml_output(session: ?*Session, node_id: ?[*]const u8, 
         const len = ml_infer.outputLen(mw.worker, tensor);
         if (len == 0) return .invalid_argument;
         ol.* = len;
-        // The size, and `again` rather than a refusal: the caller's buffer was
-        // short, which every other sizing op here answers the same way.
-        if (capacity < len) return .again;
+        // The size, then a refusal: six other sizing ops on this surface answer a short
+        // buffer that way and three SDKs check for it. This answered `again` on a comment
+        // claiming the opposite, which broke two proofs that were right.
+        if (capacity < len) return .invalid_argument;
         const dst = (out orelse return .invalid_argument)[0..len];
         if (!ml_infer.copyOutput(mw.worker, tensor, dst)) return .again;
         return .ok;
@@ -16828,8 +17189,8 @@ pub export fn goss_session_ml_mask(session: ?*Session, node_id: ?[*]const u8, no
         const mask = mw.mask orelse return .invalid_argument;
         if (mw.mask_src.len == 0 or mw.mask_dst.len < segmentation.mask_len) return .invalid_argument;
         ol.* = segmentation.mask_len;
-        // The same sizing answer the rest of this surface gives.
-        if (capacity < segmentation.mask_len) return .again;
+        // The same refusal every other sizing op on this surface gives.
+        if (capacity < segmentation.mask_len) return .invalid_argument;
         const dst = out orelse return .invalid_argument;
         if (!ml_infer.copyOutput(mw.worker, mask.tensor, mw.mask_src)) return .again;
         resampleMask(mw.mask_src, mw.mask_side, mw.mask_dst);
@@ -17564,6 +17925,8 @@ pub export fn goss_session_activate_lens_from_directory(session: ?*Session, bund
     activateLensFromDirectory(s, s.engine.gpa, path[0..bundle_path_len]) catch |err| return switch (err) {
         error.OutOfMemory => .out_of_memory,
         error.Unsupported => .unsupported,
+        // The same refusal the inline path gives.
+        error.EngineIncompatible => .unsupported,
         else => .invalid_argument,
     };
     emit(s, .lens_activated, @intCast(s.chain_order.len), 0, 0);
@@ -17802,7 +18165,7 @@ fn currentPose(s: *Session) ?pose.Result {
     const worker = s.pose_tracking orelse return null;
     var result: pose.Result = undefined;
     if (!tracking.pose_worker.readResult(worker, &result)) return null;
-    if (result.landmark_count_out == 0 or result.presence < 0.5) return null;
+    if (result.landmark_count == 0 or result.presence < 0.5) return null;
     applyPoseMode(s, &result);
     return result;
 }
@@ -18473,7 +18836,7 @@ fn volumeContains(vol: manifest.Volume, p: [3]f32) bool {
 fn faceCentroid(result: *const face.Result) [2]f32 {
     var sx: f32 = 0;
     var sy: f32 = 0;
-    const n = result.landmark_count_out;
+    const n = result.landmark_count;
     if (n == 0) return .{ 0, 0 };
     for (0..n) |i| {
         sx += result.landmarks[i * 3];
@@ -18712,7 +19075,14 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
         const region = s.active_lens.?.manifest.region2d;
         const gestures = s.active_lens.?.manifest.gestures;
         for (hands.hands[0..@min(hands.hand_count, hand.max_hands)]) |*h| {
-            if (h.gesture != 0 and live_signals.hand_gesture == 0) live_signals.hand_gesture = h.gesture;
+            if (h.gesture != 0 and live_signals.hand_gesture == 0) {
+                live_signals.hand_gesture = h.gesture;
+                // A gesture is a one-tick pulse, so it is published on the edge: a
+                // host polling at frame rate misses most of them, which is why this
+                // is an event and not a field somebody reads.
+                if (h.gesture != s.last_gesture) emit(s, .gesture_recognised, h.gesture, s.last_gesture, h.gesture_score);
+                s.last_gesture = h.gesture;
+            }
             if (hand.isPinching(&h.landmarks)) live_signals.hand_pinch = true;
             // The index fingertip against the lens's 2D trigger rectangle,
             // both in the normalized frame, so a lens fires while the hand
@@ -18754,6 +19124,14 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
             live_signals.body_jump = actions.jump;
             live_signals.body_wave = actions.wave;
             live_signals.body_dance = actions.dance;
+            // The same pulses the triggers read, published on their edges: a jump
+            // lasts one tick, so a host polling at frame rate sees almost none of
+            // them, and the trigger expression was the only thing that could.
+            const now: u32 = (if (actions.jump) @as(u32, 1) else 0) |
+                (if (actions.wave) @as(u32, 2) else 0) |
+                (if (actions.dance) @as(u32, 4) else 0);
+            if (now != s.last_actions and now != 0) emit(s, .action_recognised, now, s.last_actions, 0);
+            s.last_actions = now;
         }
     }
     if (s.audio_engine_fed) {
@@ -18827,6 +19205,16 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     // its writes flow into this tick's effects.
     runScript(s, &live_signals);
     const effects = runtime.tick(&s.active_lens.?, dt_us, live_signals);
+    // What the tick did, published: a trigger firing and a parameter moving were
+    // both things only the lens knew, so a host had to poll every parameter to
+    // notice either.
+    if (s.active_lens) |*lens| {
+        if (lens.triggersFired() != 0) emit(s, .trigger_fired, lens.lastTriggerFired(), lens.triggersFired(), 0);
+        for (0..lens.paramCount()) |i| {
+            if (!lens.paramTouched(i)) continue;
+            emit(s, .parameter_changed, @intCast(i), 0, lens.paramValueAt(i));
+        }
+    }
     applyLensEffects(s, effects);
     playFiredSounds(s);
     drainHaptics(s);
@@ -19172,10 +19560,10 @@ test "submitted faces round-trip by index and drop the ones no real face fills" 
 
     // Two real faces, one too faint and one with no landmarks, in that order.
     var faces: [4]FaceResult = @splat(std.mem.zeroes(FaceResult));
-    faces[0] = .{ .frame_serial = 10, .timestamp_us = 1, .presence = 0.9, .landmark_count_out = face.landmark_count, .landmarks = @splat(1.0), .blendshapes = @splat(0) };
-    faces[1] = .{ .frame_serial = 20, .timestamp_us = 2, .presence = 0.2, .landmark_count_out = face.landmark_count, .landmarks = @splat(2.0), .blendshapes = @splat(0) };
-    faces[2] = .{ .frame_serial = 30, .timestamp_us = 3, .presence = 0.95, .landmark_count_out = 0, .landmarks = @splat(3.0), .blendshapes = @splat(0) };
-    faces[3] = .{ .frame_serial = 40, .timestamp_us = 4, .presence = 0.8, .landmark_count_out = face.landmark_count, .landmarks = @splat(4.0), .blendshapes = @splat(0) };
+    faces[0] = .{ .frame_serial = 10, .timestamp_us = 1, .presence = 0.9, .landmark_count = face.landmark_count, .landmarks = @splat(1.0), .blendshapes = @splat(0) };
+    faces[1] = .{ .frame_serial = 20, .timestamp_us = 2, .presence = 0.2, .landmark_count = face.landmark_count, .landmarks = @splat(2.0), .blendshapes = @splat(0) };
+    faces[2] = .{ .frame_serial = 30, .timestamp_us = 3, .presence = 0.95, .landmark_count = 0, .landmarks = @splat(3.0), .blendshapes = @splat(0) };
+    faces[3] = .{ .frame_serial = 40, .timestamp_us = 4, .presence = 0.8, .landmark_count = face.landmark_count, .landmarks = @splat(4.0), .blendshapes = @splat(0) };
     try t.expectEqual(Status.ok, goss_session_submit_faces(session, &faces, 4));
 
     // Only faces 0 and 3 survive, compacted to slots 0 and 1 in order.
@@ -19220,10 +19608,10 @@ test "submitted bodies round-trip by index and drop the ones no real body fills"
 
     // Two real bodies, one too faint and one with no landmarks, in that order.
     var bodies: [4]PoseResult = @splat(std.mem.zeroes(PoseResult));
-    bodies[0] = .{ .frame_serial = 10, .timestamp_us = 1, .presence = 0.9, .landmark_count_out = pose.landmark_count, .landmarks = @splat(1.0), .visibilities = @splat(1), .presences = @splat(1) };
-    bodies[1] = .{ .frame_serial = 20, .timestamp_us = 2, .presence = 0.2, .landmark_count_out = pose.landmark_count, .landmarks = @splat(2.0), .visibilities = @splat(1), .presences = @splat(1) };
-    bodies[2] = .{ .frame_serial = 30, .timestamp_us = 3, .presence = 0.95, .landmark_count_out = 0, .landmarks = @splat(3.0), .visibilities = @splat(1), .presences = @splat(1) };
-    bodies[3] = .{ .frame_serial = 40, .timestamp_us = 4, .presence = 0.8, .landmark_count_out = pose.landmark_count, .landmarks = @splat(4.0), .visibilities = @splat(1), .presences = @splat(1) };
+    bodies[0] = .{ .frame_serial = 10, .timestamp_us = 1, .presence = 0.9, .landmark_count = pose.landmark_count, .landmarks = @splat(1.0), .visibilities = @splat(1), .presences = @splat(1) };
+    bodies[1] = .{ .frame_serial = 20, .timestamp_us = 2, .presence = 0.2, .landmark_count = pose.landmark_count, .landmarks = @splat(2.0), .visibilities = @splat(1), .presences = @splat(1) };
+    bodies[2] = .{ .frame_serial = 30, .timestamp_us = 3, .presence = 0.95, .landmark_count = 0, .landmarks = @splat(3.0), .visibilities = @splat(1), .presences = @splat(1) };
+    bodies[3] = .{ .frame_serial = 40, .timestamp_us = 4, .presence = 0.8, .landmark_count = pose.landmark_count, .landmarks = @splat(4.0), .visibilities = @splat(1), .presences = @splat(1) };
     try t.expectEqual(Status.ok, goss_session_submit_bodies(session, &bodies, 4));
 
     // Only bodies 0 and 3 survive, compacted to slots 0 and 1 in order.
@@ -20191,7 +20579,7 @@ test "submitted bodies and faces feed body_joint, pose_result, and face_pose wit
     try t.expectEqual(Status.again, goss_session_body_joint(session, 0, &xyz));
     var body: PoseResult = std.mem.zeroes(PoseResult);
     body.presence = 0.9;
-    body.landmark_count_out = pose.landmark_count;
+    body.landmark_count = pose.landmark_count;
     body.landmarks = @splat(7.0);
     body.visibilities = @splat(1);
     body.presences = @splat(1);
@@ -20207,7 +20595,7 @@ test "submitted bodies and faces feed body_joint, pose_result, and face_pose wit
     try t.expectEqual(Status.again, goss_session_face_pose(session, &matrix));
     var f: FaceResult = std.mem.zeroes(FaceResult);
     f.presence = 0.9;
-    f.landmark_count_out = face.landmark_count;
+    f.landmark_count = face.landmark_count;
     // A flat plane of identical landmarks is degenerate; spread them so the
     // canonical fit has geometry to lock onto.
     for (0..face.landmark_count) |i| {

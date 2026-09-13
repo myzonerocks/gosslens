@@ -56,6 +56,18 @@ pub const Section = struct {
         return at;
     }
 
+    /// Where one field sits inside a repeated entry, so a reader of a repeating
+    /// section takes its offsets from the declaration too rather than counting.
+    pub fn repeatOffsetOf(section: Section, name: []const u8) ?usize {
+        var at: usize = 0;
+        for (section.repeat) |f| {
+            at = std.mem.alignForward(usize, at, f.type.size());
+            if (std.mem.eql(u8, f.name, name)) return at;
+            at += f.type.size();
+        }
+        return null;
+    }
+
     pub fn repeatSize(section: Section) usize {
         var at: usize = 0;
         for (section.repeat) |f| {
@@ -100,6 +112,34 @@ pub const sections = [_]Section{
         .head = &.{.{ .name = "count", .type = .u32 }},
     },
     .{
+        .tag = .segmentation,
+        .version = 1,
+        .head = &.{.{ .name = "live", .type = .u32 }},
+    },
+    .{
+        .tag = .world,
+        .version = 1,
+        .head = &.{
+            .{ .name = "tracking_state", .type = .u32 },
+            .{ .name = "plane_count", .type = .u32 },
+            .{ .name = "anchor_count", .type = .u32 },
+        },
+    },
+    .{
+        .tag = .depth,
+        .version = 1,
+        .head = &.{.{ .name = "live", .type = .u32 }},
+    },
+    .{
+        .tag = .scene,
+        .version = 1,
+        .head = &.{.{ .name = "count", .type = .u32 }},
+        .repeat = &.{
+            .{ .name = "channel", .type = .u32 },
+            .{ .name = "score", .type = .f32 },
+        },
+    },
+    .{
         .tag = .audio,
         .version = 1,
         .head = &.{
@@ -126,6 +166,37 @@ pub const sections = [_]Section{
             .{ .name = "source", .type = .u32 },
         },
         .repeat = &.{.{ .name = "value", .type = .f32 }},
+    },
+    .{
+        .tag = .detections,
+        .version = 1,
+        .head = &.{.{ .name = "count", .type = .u32 }},
+        // A box in the normalized frame, so a reader can place it without knowing
+        // the camera's size, beside what it is and how sure the model was.
+        .repeat = &.{
+            .{ .name = "label", .type = .u32 },
+            .{ .name = "score", .type = .f32 },
+            .{ .name = "x", .type = .f32 },
+            .{ .name = "y", .type = .f32 },
+            .{ .name = "width", .type = .f32 },
+            .{ .name = "height", .type = .f32 },
+        },
+    },
+    .{
+        .tag = .lens,
+        .version = 2,
+        .head = &.{
+            .{ .name = "active", .type = .u32 },
+            .{ .name = "count", .type = .u32 },
+            .{ .name = "id_len", .type = .u32 },
+        },
+        // One node the lens did not bring up, and why. The id's bytes follow the
+        // entries, the way every variable part of this format trails its fixed one.
+        .repeat = &.{
+            .{ .name = "node_index", .type = .u32 },
+            .{ .name = "state", .type = .u32 },
+            .{ .name = "reason", .type = .u32 },
+        },
     },
     .{
         .tag = .text,
@@ -201,6 +272,14 @@ test "the text section's repeated head is the size every reader assumes" {
     // Eight quad floats, confidence, then six u32 and the length.
     try testing.expectEqual(@as(usize, 8 * 4 + 4 + 7 * 4), text.repeatSize());
     try testing.expectEqual(@as(u16, 2), text.version);
+}
+
+test "a repeated field's offset comes from the declaration, not from counting" {
+    const scene = sectionFor(.scene).?;
+    try testing.expectEqual(@as(usize, 0), scene.repeatOffsetOf("channel").?);
+    try testing.expectEqual(@as(usize, 4), scene.repeatOffsetOf("score").?);
+    try testing.expectEqual(@as(usize, 8), scene.repeatSize());
+    try testing.expectEqual(@as(?usize, null), scene.repeatOffsetOf("nothing_declared"));
 }
 
 test "every declared section names a tag the record can carry" {

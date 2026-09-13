@@ -156,6 +156,16 @@ pub fn temporalFilled(ti: *const TemporalInfer) u32 {
     _ = ti;
     return 0;
 }
+pub fn temporalPlanBytes(ti: *TemporalInfer) usize {
+    _ = ti;
+    return 0;
+}
+
+pub fn temporalPlanGrowths(ti: *TemporalInfer) u32 {
+    _ = ti;
+    return 0;
+}
+
 pub fn temporalLayoutIsNchw(ti: *const TemporalInfer) bool {
     _ = ti;
     return false;
@@ -251,6 +261,18 @@ pub fn readOutput(ml: *MlInfer, tensor: u32, index: u32) f32 {
 pub fn hasPublished(ml: *MlInfer) bool {
     _ = ml;
     return false;
+}
+
+/// No model runs on this build, so there is no plan to report: zero is the
+/// truthful answer rather than a number nothing measured.
+pub fn planBytes(ml: *MlInfer) usize {
+    _ = ml;
+    return 0;
+}
+
+pub fn planGrowths(ml: *MlInfer) u32 {
+    _ = ml;
+    return 0;
 }
 
 pub fn outputLen(ml: *MlInfer, tensor: u32) usize {

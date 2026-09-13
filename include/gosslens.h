@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 172u
+#define GOSS_ABI_MINOR 176u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -52,6 +52,17 @@ uint32_t goss_abi_version(void);
 #define GOSS_CAP_PHOTO_CAPTURE (1ull << 7)
 #define GOSS_CAP_RECORDING (1ull << 8)
 #define GOSS_CAP_FILE_IO (1ull << 9)
+/* The engine reported these and the header did not name them, so a consumer read
+ * bits it could not interpret. The last four are built in every configuration: the
+ * world seam is the host's to feed, stroke boards and the reconstruction store are
+ * pure core, and the diagnostics exist wherever this ABI does. */
+#define GOSS_CAP_SCRIPT (1ull << 10)
+#define GOSS_CAP_AUDIO_PLAYBACK (1ull << 11)
+#define GOSS_CAP_AUDIO_RECORDING (1ull << 12)
+#define GOSS_CAP_WORLD_TRACKING (1ull << 13)
+#define GOSS_CAP_STROKE_BOARDS (1ull << 14)
+#define GOSS_CAP_RECONSTRUCTION (1ull << 15)
+#define GOSS_CAP_DIAGNOSTICS (1ull << 16)
 
 /* Any-thread. */
 uint64_t goss_capabilities(void);
@@ -80,6 +91,19 @@ typedef enum goss_status {
      * asking changes the other. */
     GOSS_OUT_OF_SCOPE = 9,
 } goss_status;
+
+/* Any-thread. Pass GOSS_ABI_VERSION, the version you compiled against, and get
+ * GOSS_STATUS_ABI_MISMATCH when this binary speaks a different major. Zero means
+ * you are not saying, and is allowed. This is the check, rather than reading the
+ * version and remembering to compare it. */
+goss_status goss_abi_check(uint32_t caller_version);
+
+/* Any-thread. Which capabilities a lens's manifest declares that this build does not
+ * have, as GOSS_CAP_ bits; zero means every rail it asked for is here. A lens states
+ * what it needs and nothing could read that back, so a catalogue had to activate one
+ * to find out. Activation still runs such a lens and degrades the nodes that needed
+ * the missing rail, which the node reports name. */
+goss_status goss_lens_capabilities_missing(const uint8_t *manifest_json, size_t manifest_len, uint64_t *out_missing);
 
 typedef struct goss_engine goss_engine;
 typedef struct goss_session goss_session;
@@ -487,6 +511,8 @@ typedef struct goss_session_report {
     uint32_t nodes_degraded;
     uint32_t node_reports_lost;
     uint32_t script_faults;       /* handlers and ticks that threw; a lens still draws */
+    uint32_t ml_plan_growths;     /* model frame buffers that grew mid-run; steady is 0 */
+    uint64_t ml_plan_bytes;       /* bytes those rails reuse every frame, summed */
 } goss_session_report;
 
 /* One node's diagnostic. node_index is the node's index in the session graph,

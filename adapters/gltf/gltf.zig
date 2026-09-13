@@ -207,7 +207,7 @@ pub const Material = struct {
 };
 
 pub const AnimationPath = enum { translation, rotation, scale };
-pub const Interpolation = enum { linear, step };
+pub const Interpolation = enum { linear, step, cubic_spline };
 
 /// One glTF animation channel: a keyframe curve on one node's one
 /// transform component (translation/rotation/scale). weights (morph
@@ -235,6 +235,14 @@ pub const AnimationChannel = struct {
         return if (ch.path() == .rotation) 4 else 3;
     }
 
+    /// Floats one keyframe occupies. Cubic spline stores three per keyframe, the
+    /// in-tangent, the value and the out-tangent, so the buffer is three times the
+    /// size and the sampler reads the middle group.
+    pub fn floatsPerKeyframe(ch: AnimationChannel) usize {
+        const components = ch.componentsPerKeyframe();
+        return if (ch.interpolation() == .cubic_spline) components * 3 else components;
+    }
+
     pub fn keyframeCount(ch: AnimationChannel) usize {
         const sampler = ch.raw.sampler orelse return 0;
         return sampler.*.input.*.count;
@@ -242,15 +250,15 @@ pub const AnimationChannel = struct {
 
     /// null for cubic_spline: it stores an in-tangent and out-tangent
     /// alongside every value (3x the plain keyframe count) - real
-    /// glTF, just not sampled by readValues below, which assumes one
-    /// value per keyframe. A channel using it reads as unsupported
-    /// rather than silently sampling tangent data as if it were a
-    /// value.
+    /// glTF. Cubic spline stores three values per keyframe, the in-tangent, the
+    /// value and the out-tangent, and the spec's own Hermite basis combines them:
+    /// the decode keeps all three and the sampler reads the middle one as the value.
     pub fn interpolation(ch: AnimationChannel) ?Interpolation {
         const sampler = ch.raw.sampler orelse return null;
         return switch (sampler.*.interpolation) {
             c.cgltf_interpolation_type_linear => .linear,
             c.cgltf_interpolation_type_step => .step,
+            c.cgltf_interpolation_type_cubic_spline => .cubic_spline,
             else => null,
         };
     }
@@ -268,14 +276,18 @@ pub const AnimationChannel = struct {
     /// Copies keyframe values into out, flattened componentsPerKeyframe
     /// floats at a time (translation/scale: x,y,z; rotation: x,y,z,w,
     /// matching Quat's own field order).
+    /// Answers keyframes, not accessor elements: a cubic channel's accessor holds
+    /// three elements per keyframe and the caller counts keyframes.
     pub fn readValues(ch: AnimationChannel, out: []f32) Error!usize {
         const sampler = ch.raw.sampler orelse return 0;
         const accessor = sampler.*.output;
         const components = ch.componentsPerKeyframe();
-        const count = @min(accessor.*.count, out.len / components);
+        const per_keyframe = ch.floatsPerKeyframe();
+        const groups = per_keyframe / components;
+        const count = @min(accessor.*.count, (out.len / components));
         const unpacked = c.cgltf_accessor_unpack_floats(accessor, out.ptr, count * components);
         if (unpacked != count * components) return error.MalformedAsset;
-        return count;
+        return count / groups;
     }
 };
 
@@ -443,6 +455,9 @@ pub const DecodedAnimChannel = struct {
     path: AnimationPath,
     times: []f32,
     values: []f32,
+    /// How the author meant these read. Cubic spline stores three values per
+    /// keyframe, so the stride and the sampling both depend on it.
+    interpolation: Interpolation = .linear,
 };
 
 /// One sampled pose: the translation, rotation, and scale a node's
@@ -537,18 +552,76 @@ fn bracket(ch: DecodedAnimChannel, t_seconds: f32) struct { lo: usize, hi: usize
     unreachable;
 }
 
+/// The glTF spec's Hermite basis, written once: a keyframe's value and the two
+/// tangents around the span, with the tangents scaled by the span in seconds
+/// because they are authored per second.
+fn hermite(v0: f32, out_tangent0: f32, v1: f32, in_tangent1: f32, factor: f32, span: f32) f32 {
+    const f2 = factor * factor;
+    const f3 = f2 * factor;
+    const h00 = 2 * f3 - 3 * f2 + 1;
+    const h10 = f3 - 2 * f2 + factor;
+    const h01 = -2 * f3 + 3 * f2;
+    const h11 = f3 - f2;
+    return h00 * v0 + h10 * span * out_tangent0 + h01 * v1 + h11 * span * in_tangent1;
+}
+
+/// Where one keyframe's three cubic values start: in-tangent, value, out-tangent.
+fn cubicBase(index: usize, components: usize) usize {
+    return index * components * 3;
+}
+
 fn sampleVec3(ch: DecodedAnimChannel, t_seconds: f32) math.Vec3 {
     const br = bracket(ch, t_seconds);
+    if (ch.interpolation == .cubic_spline) {
+        const lo_base = cubicBase(br.lo, 3);
+        var out: math.Vec3 = .{ ch.values[lo_base + 3], ch.values[lo_base + 4], ch.values[lo_base + 5] };
+        if (br.lo == br.hi) return out;
+        const hi_base = cubicBase(br.hi, 3);
+        const span = ch.times[br.hi] - ch.times[br.lo];
+        inline for (0..3) |i| {
+            out[i] = hermite(
+                ch.values[lo_base + 3 + i],
+                ch.values[lo_base + 6 + i],
+                ch.values[hi_base + 3 + i],
+                ch.values[hi_base + i],
+                br.factor,
+                span,
+            );
+        }
+        return out;
+    }
     const lo: math.Vec3 = .{ ch.values[br.lo * 3], ch.values[br.lo * 3 + 1], ch.values[br.lo * 3 + 2] };
-    if (br.lo == br.hi) return lo;
+    if (br.lo == br.hi or ch.interpolation == .step) return lo;
     const hi: math.Vec3 = .{ ch.values[br.hi * 3], ch.values[br.hi * 3 + 1], ch.values[br.hi * 3 + 2] };
     return math.vec.lerp(lo, hi, br.factor);
 }
 
 fn sampleQuat(ch: DecodedAnimChannel, t_seconds: f32) math.Quat {
     const br = bracket(ch, t_seconds);
+    if (ch.interpolation == .cubic_spline) {
+        const lo_base = cubicBase(br.lo, 4);
+        if (br.lo == br.hi) {
+            return math.Quat.init(ch.values[lo_base + 4], ch.values[lo_base + 5], ch.values[lo_base + 6], ch.values[lo_base + 7]);
+        }
+        const hi_base = cubicBase(br.hi, 4);
+        const span = ch.times[br.hi] - ch.times[br.lo];
+        var q: [4]f32 = undefined;
+        inline for (0..4) |i| {
+            q[i] = hermite(
+                ch.values[lo_base + 4 + i],
+                ch.values[lo_base + 8 + i],
+                ch.values[hi_base + 4 + i],
+                ch.values[hi_base + i],
+                br.factor,
+                span,
+            );
+        }
+        // The spec says normalize afterwards: a Hermite blend of unit quaternions
+        // is not itself unit, and a rotation that is not unit shears the mesh.
+        return math.Quat.init(q[0], q[1], q[2], q[3]).normalize();
+    }
     const lo = math.Quat.init(ch.values[br.lo * 4], ch.values[br.lo * 4 + 1], ch.values[br.lo * 4 + 2], ch.values[br.lo * 4 + 3]);
-    if (br.lo == br.hi) return lo;
+    if (br.lo == br.hi or ch.interpolation == .step) return lo;
     const hi = math.Quat.init(ch.values[br.hi * 4], ch.values[br.hi * 4 + 1], ch.values[br.hi * 4 + 2], ch.values[br.hi * 4 + 3]);
     return math.Quat.slerp(lo, hi, br.factor);
 }
@@ -794,7 +867,7 @@ fn decodeAnimation(gpa: std.mem.Allocator, anim: Animation, node: Node) Error!De
         const ch = anim.channel(i);
         if (!ch.targetsNode(node)) continue;
         const path = ch.path() orelse continue; // weights (morph targets): no node type reads one
-        if (ch.interpolation() == null) return error.UnsupportedAsset; // cubic_spline
+        const how = ch.interpolation() orelse return error.UnsupportedAsset;
         const keyframe_count = ch.keyframeCount();
         if (keyframe_count == 0) continue;
 
@@ -802,13 +875,12 @@ fn decodeAnimation(gpa: std.mem.Allocator, anim: Animation, node: Node) Error!De
         errdefer gpa.free(times);
         if (try ch.readTimes(times) != keyframe_count) return error.MalformedAsset;
 
-        const components = ch.componentsPerKeyframe();
-        const values = try gpa.alloc(f32, keyframe_count * components);
+        const values = try gpa.alloc(f32, keyframe_count * ch.floatsPerKeyframe());
         errdefer gpa.free(values);
         if (try ch.readValues(values) != keyframe_count) return error.MalformedAsset;
 
         duration_seconds = @max(duration_seconds, times[keyframe_count - 1]);
-        try channels.append(gpa, .{ .path = path, .times = times, .values = values });
+        try channels.append(gpa, .{ .path = path, .times = times, .values = values, .interpolation = how });
     }
     return .{ .duration_seconds = duration_seconds, .channels = try channels.toOwnedSlice(gpa) };
 }
@@ -1464,6 +1536,75 @@ test "a static mesh decodes with no skin" {
     const model = try decodeModel(t.allocator, glb);
     defer freeDecodedModel(t.allocator, model);
     try t.expect(model.skin == null);
+}
+
+test "a cubic spline channel samples the spec's hermite curve, not its tangents" {
+    // Two keyframes a second apart, the value going 0 to 1, with tangents that make
+    // the curve leave and arrive flat. The middle of a flat-ended hermite span is the
+    // midpoint, and the quarter point is well under it: a linear read would give 0.25.
+    const times = [_]f32{ 0, 1 };
+    // Each keyframe is three xyz groups: in-tangent, value, out-tangent.
+    const values = [_]f32{
+        0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 1, 0, 0, 0, 0, 0,
+    };
+    const ch: DecodedAnimChannel = .{
+        .path = .translation,
+        .times = @constCast(times[0..]),
+        .values = @constCast(values[0..]),
+        .interpolation = .cubic_spline,
+    };
+    try t.expectApproxEqAbs(@as(f32, 0.0), sampleVec3(ch, 0)[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 1.0), sampleVec3(ch, 1)[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0.5), sampleVec3(ch, 0.5)[0], 0.001);
+    // 2t^3 - 3t^2 + ... at a quarter is 0.15625, which is the curve and not the line.
+    try t.expectApproxEqAbs(@as(f32, 0.15625), sampleVec3(ch, 0.25)[0], 0.001);
+
+    // The value read is the middle of each keyframe's three, so a channel whose
+    // tangents are large still starts exactly at its authored value.
+    // Tangents of nine either side, so only the middle group can give 2 and 3.
+    const steep = [_]f32{
+        9, 9, 9, 2, 0, 0, 9, 9, 9,
+        9, 9, 9, 3, 0, 0, 9, 9, 9,
+    };
+    const steep_ch: DecodedAnimChannel = .{
+        .path = .translation,
+        .times = @constCast(times[0..]),
+        .values = @constCast(steep[0..]),
+        .interpolation = .cubic_spline,
+    };
+    try t.expectApproxEqAbs(@as(f32, 2.0), sampleVec3(steep_ch, 0)[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 3.0), sampleVec3(steep_ch, 1)[0], 0.001);
+
+    // A rotation blended by hermite is not unit, and a rotation that is not unit
+    // shears the mesh, so the sampler normalizes as the spec says.
+    const quat_times = [_]f32{ 0, 1 };
+    // Four components per group, three groups per keyframe: identity to a quarter
+    // turn, with zero tangents either side.
+    const quat_values = [_]f32{
+        0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0.7071, 0, 0.7071, 0, 0, 0, 0,
+    };
+    const quat_ch: DecodedAnimChannel = .{
+        .path = .rotation,
+        .times = @constCast(quat_times[0..]),
+        .values = @constCast(quat_values[0..]),
+        .interpolation = .cubic_spline,
+    };
+    const mid = sampleQuat(quat_ch, 0.5);
+    const length = @sqrt(mid.v[0] * mid.v[0] + mid.v[1] * mid.v[1] + mid.v[2] * mid.v[2] + mid.v[3] * mid.v[3]);
+    try t.expectApproxEqAbs(@as(f32, 1.0), length, 0.001);
+
+    // A step channel holds its keyframe rather than sliding to the next one.
+    const step_values = [_]f32{ 0, 0, 0, 5, 0, 0 };
+    const step_ch: DecodedAnimChannel = .{
+        .path = .translation,
+        .times = @constCast(times[0..]),
+        .values = @constCast(step_values[0..]),
+        .interpolation = .step,
+    };
+    try t.expectApproxEqAbs(@as(f32, 0.0), sampleVec3(step_ch, 0.99)[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 5.0), sampleVec3(step_ch, 1.0)[0], 0.001);
 }
 
 test "the animation mixer blends poses by weight" {

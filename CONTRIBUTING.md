@@ -24,7 +24,10 @@ zig build ci                 # tests, source gate, abi, vendor check, provenance
 upstream, so never push and let CI find a failure the local run would have.
 After an intended ABI change run `zig build abi-update`: it regenerates
 `tools/abi-baseline.txt` and stamps `GOSS_ABI_MINOR` in the header from the
-surface, so the version is never bumped by hand. The pre-commit hook runs it
+surface, so the version is never bumped by hand. The surface is the op list and
+every field of every struct that crosses the ABI: a field appended to one of
+those changes what a caller has to allocate, so it moves the version too, and
+the update is refused if the surface moved while the version stood still. The pre-commit hook runs it
 for you when a commit touches the surface; `zig build abi` verifies both match.
 
 ### On Windows
@@ -73,10 +76,21 @@ toolchain decisions are logged in [docs/TOOLCHAIN.md](docs/TOOLCHAIN.md).
 
 ```sh
 zig build harness              # run a lens through the real graph, drawn on screen
+zig build conformance -Doptimize=ReleaseFast   # iterate here: the model proofs dominate
 zig build conformance          # run a reference lens through the ABI twice, proving bit-stable output
 zig build conformance -- --watch  # the same run, holding and labelling each proof's render on screen
 zig build conformance -- --golden # print the cross-target golden signature for lenses/cross-target-golden.txt
 ```
+
+Iterate at `ReleaseFast`. The suite builds `Debug` by default and the model proofs
+dominate it: a depth net that infers in a couple of seconds optimised takes nearly four
+minutes to publish its first value unoptimised. Stay in one mode while iterating, because
+the build cache is per mode and switching rebuilds every vendored library.
+
+One area at a time: write a selector name into `zig-out/conf-only.txt` and the suite runs
+only that group. `model-rail` covers what a detector finds, the published model zoo, the
+ONNX slot and the sizing reads; the others are named in `harness/conformance.zig` beside
+the selector. A failing proof no longer stops the run, so one pass reports every fault.
 
 The harness runs a lens through the real graph and draws it on screen, the same
 pipeline the SDKs drive, the fastest way to see an effect move before a device
@@ -108,6 +122,22 @@ The shader build compiles each pass to Metal, SPIR-V, GLSL ES, and WGSL, so a
 shader that only builds on one backend fails here rather than on a device. The
 bundle format the validator checks against is specified in
 [lenses/SPEC.md](lenses/SPEC.md).
+
+```sh
+zig build lens-zip                    # zip every packaged lens, verify each archive
+```
+
+`lens-zip` runs `tools/lens-zip.sh` over every reference lens and checks what a
+client checks: the sidecar's digest and byte count against the file on disk, and
+`manifest.json` at the archive root. It is part of `ci`.
+
+`tools/look-lut.swift` writes a look's lookup strip through Core Image, so the
+engine's colour for that look is Core Image's by construction. Its output is
+verified where it lands rather than where it is made: a `lut.pass` node's strip must
+carry a `<id>.claim` beside it naming what the look does (`warmer`, `cooler`,
+`brighter`, `darker`), and the validator decodes the strip, finds where neutral maps,
+and holds the pixels to that claim. A missing claim, a claim nothing checks, and a
+claim the pixels contradict all fail the build.
 
 ## Per platform
 
@@ -143,7 +173,7 @@ baseline, the SDKs, and a proof, or it is unfinished.
 6. Update [docs/PARITY.md](docs/PARITY.md) and run `zig build ci` green before
    push.
 
-Two of those steps are now gated rather than remembered. A module under `core/`
+Some of those steps are gated rather than remembered. A module under `core/`
 that nothing imports is refused, however well its own tests pass: that is step 2
 skipped. And a module the build swaps per target must answer every name the tree
 asks of the real one, so a target nobody compiled locally does not break later.

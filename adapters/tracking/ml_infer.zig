@@ -201,6 +201,23 @@ pub fn hasPublished(ml: *MlInfer) bool {
     return ml.core.published;
 }
 
+/// The frame buffer this model reuses and how often it had to grow, read under
+/// the lock that guards the published outputs because the worker thread writes
+/// both at the same moment. Zero before the first publish.
+pub fn planBytes(ml: *MlInfer) usize {
+    const io = ml.io_state.io();
+    ml.out_mutex.lockUncancelable(io);
+    defer ml.out_mutex.unlock(io);
+    return ml.core.plan_bytes;
+}
+
+pub fn planGrowths(ml: *MlInfer) u32 {
+    const io = ml.io_state.io();
+    ml.out_mutex.lockUncancelable(io);
+    defer ml.out_mutex.unlock(io);
+    return ml.core.plan_growths;
+}
+
 /// The element count of an output tensor, for a mask reader sizing its copy.
 pub fn outputLen(ml: *MlInfer, tensor: u32) usize {
     return ml.core.outputLen(tensor);
@@ -393,6 +410,21 @@ pub fn temporalFilled(ti: *const TemporalInfer) u32 {
 
 pub fn temporalLayoutIsNchw(ti: *const TemporalInfer) bool {
     return ti.core.layoutIsNchw();
+}
+
+/// The temporal model's plan, the same pair the single-frame rail answers.
+pub fn temporalPlanBytes(ti: *TemporalInfer) usize {
+    const io = ti.io_state.io();
+    ti.out_mutex.lockUncancelable(io);
+    defer ti.out_mutex.unlock(io);
+    return ti.core.plan_bytes;
+}
+
+pub fn temporalPlanGrowths(ti: *TemporalInfer) u32 {
+    const io = ti.io_state.io();
+    ti.out_mutex.lockUncancelable(io);
+    defer ti.out_mutex.unlock(io);
+    return ti.core.plan_growths;
 }
 
 fn temporalMain(ti: *TemporalInfer) void {

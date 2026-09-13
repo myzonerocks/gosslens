@@ -7,7 +7,7 @@ import PackageDescription
 // XCFramework and needs no Zig.
 
 // The engine links as the static archives `zig build ios` and `ios-simulator` install into
-// zig-out — every one of them. The list used to name vender libs, so a build from
+// zig-out, every one of them. The list used to name vender libs, so a build from
 // source failed to link on the first symbol from an omitted archive (quickjs, jolt, ruy and the
 // rest of the tflite kernels), which only a from-source consumer would ever hit. Naming them here means a build points
 // LIBRARY_SEARCH_PATHS at that directory per slice instead of hand-copying

@@ -36,6 +36,22 @@ export fn Java_com_gosslens_Gosslens_nativeAbiVersion(env: *JniEnv, cls: jobject
     return @bitCast(abi.goss_abi_version());
 }
 
+export fn Java_com_gosslens_Gosslens_nativeAbiCheck(env: *JniEnv, cls: jobject, caller_version: i32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_abi_check(@bitCast(caller_version)));
+}
+
+/// The manifest arrives in a direct buffer, the way every other byte payload does
+/// here, so nothing is copied to ask the question.
+export fn Java_com_gosslens_Gosslens_nativeLensCapabilitiesMissing(env: *JniEnv, cls: jobject, manifest_buffer: jobject, manifest_len: i32) i64 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, manifest_buffer) orelse return -1;
+    var missing: u64 = 0;
+    if (abi.goss_lens_capabilities_missing(bytes, @intCast(@max(manifest_len, 0)), &missing) != .ok) return -1;
+    return @bitCast(missing);
+}
+
 export fn Java_com_gosslens_Gosslens_nativeCapabilities(env: *JniEnv, cls: jobject) i64 {
     _ = env;
     _ = cls;

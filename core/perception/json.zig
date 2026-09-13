@@ -105,6 +105,104 @@ fn writeSection(w: *Out, section: snapshot.Section) void {
             }
             w.raw("]");
         },
+        .segmentation, .depth => {
+            // Both say the same thing in the same shape: whether a mask this build
+            // could produce is live. Read through the declaration so a field added to
+            // either is projected rather than silently dropped.
+            const layout = schema.sectionFor(section.tag).?;
+            w.field("live", readU32(section.payload, layout.offsetOf("live").?));
+        },
+        .world => {
+            const layout = schema.sectionFor(.world).?;
+            w.field("tracking_state", readU32(section.payload, layout.offsetOf("tracking_state").?));
+            w.field("plane_count", readU32(section.payload, layout.offsetOf("plane_count").?));
+            w.field("anchor_count", readU32(section.payload, layout.offsetOf("anchor_count").?));
+        },
+        .scene => {
+            // A count of zero is an answer: the segmenter is not running. The channels
+            // follow it, each with the score that says whether that one is live.
+            const layout = schema.sectionFor(.scene).?;
+            const count = readU32(section.payload, layout.offsetOf("count").?);
+            w.field("count", count);
+            w.raw(",\"channels\":[");
+            const stride = layout.repeatSize();
+            var i: u32 = 0;
+            while (i < count) : (i += 1) {
+                if (i != 0) w.raw(",");
+                const at = layout.headSize() + i * stride;
+                if (at + stride > section.payload.len) break;
+                w.raw("{\"channel\":");
+                w.num(readU32(section.payload, at + layout.repeatOffsetOf("channel").?));
+                w.raw(",\"score\":");
+                w.fnum(readF32(section.payload, at + layout.repeatOffsetOf("score").?));
+                w.raw("}");
+            }
+            w.raw("]");
+        },
+        .detections => {
+            // The answer to "what is in front of me", named rather than counted in
+            // bytes: each box where it is, what it is, and how sure.
+            const layout = schema.sectionFor(.detections).?;
+            const count = readU32(section.payload, layout.offsetOf("count").?);
+            w.field("count", count);
+            w.raw(",\"items\":[");
+            const stride = layout.repeatSize();
+            const head = layout.headSize();
+            var i: u32 = 0;
+            while (i < count) : (i += 1) {
+                const at = head + i * stride;
+                if (at + stride > section.payload.len) break;
+                if (i != 0) w.raw(",");
+                w.raw("{\"label\":");
+                w.num(readU32(section.payload, at + layout.repeatOffsetOf("label").?));
+                w.raw(",\"score\":");
+                w.fnum(readF32(section.payload, at + layout.repeatOffsetOf("score").?));
+                w.raw(",\"x\":");
+                w.fnum(readF32(section.payload, at + layout.repeatOffsetOf("x").?));
+                w.raw(",\"y\":");
+                w.fnum(readF32(section.payload, at + layout.repeatOffsetOf("y").?));
+                w.raw(",\"width\":");
+                w.fnum(readF32(section.payload, at + layout.repeatOffsetOf("width").?));
+                w.raw(",\"height\":");
+                w.fnum(readF32(section.payload, at + layout.repeatOffsetOf("height").?));
+                w.raw("}");
+            }
+            w.raw("]");
+        },
+        .lens => {
+            // The id an agent needs to know which lens is drawing, and every node that
+            // did not come up. A lens whose nodes all came up reports an empty list,
+            // which is an answer; the byte count this used to report was not.
+            const layout = schema.sectionFor(.lens).?;
+            w.field("active", readU32(section.payload, layout.offsetOf("active").?));
+            const count = readU32(section.payload, layout.offsetOf("count").?);
+            const id_len = readU32(section.payload, layout.offsetOf("id_len").?);
+            const stride = layout.repeatSize();
+            const head = layout.headSize();
+            const id_at = head + count * stride;
+            w.raw(",\"id\":");
+            if (id_at + id_len <= section.payload.len) {
+                w.string(section.payload[id_at .. id_at + id_len]);
+            } else {
+                w.raw("\"\"");
+            }
+            w.field("count", count);
+            w.raw(",\"degraded\":[");
+            var i: u32 = 0;
+            while (i < count) : (i += 1) {
+                const at = head + i * stride;
+                if (at + stride > section.payload.len) break;
+                if (i != 0) w.raw(",");
+                w.raw("{\"node_index\":");
+                w.num(readU32(section.payload, at + layout.repeatOffsetOf("node_index").?));
+                w.raw(",\"state\":");
+                w.num(readU32(section.payload, at + layout.repeatOffsetOf("state").?));
+                w.raw(",\"reason\":");
+                w.num(readU32(section.payload, at + layout.repeatOffsetOf("reason").?));
+                w.raw("}");
+            }
+            w.raw("]");
+        },
         .audio => {
             const layout = schema.sectionFor(.audio).?;
             w.raw(",\"level\":");
@@ -150,6 +248,7 @@ fn tagName(tag: snapshot.Tag) []const u8 {
         .faces => "faces",
         .hands => "hands",
         .bodies => "bodies",
+        .detections => "detections",
         .segmentation => "segmentation",
         .world => "world",
         .depth => "depth",
@@ -288,6 +387,90 @@ test "the json form carries the same facts as the record it reads" {
     try t.expect(std.mem.indexOf(u8, text, "\"height\":1080") != null);
     try t.expect(std.mem.indexOf(u8, text, "\"frames_submitted\":12") != null);
     try t.expect(std.mem.indexOf(u8, text, "\"level\":0.250") != null);
+}
+
+test "the sections this build added project their fields, not their byte counts" {
+    var raw: [512]u8 = undefined;
+    var w = snapshot.Writer.init(&raw, 7_000_000);
+    w.beginSection(.segmentation, 1);
+    w.u32v(1);
+    w.endSection();
+    w.beginSection(.world, 1);
+    w.u32v(2);
+    w.u32v(5);
+    w.u32v(9);
+    w.endSection();
+    w.beginSection(.depth, 1);
+    w.u32v(1);
+    w.endSection();
+    w.beginSection(.scene, 1);
+    w.u32v(2);
+    w.u32v(3);
+    w.f32v(0.75);
+    w.u32v(4);
+    w.f32v(0.25);
+    w.endSection();
+    const n = try w.finish();
+
+    var json: [1024]u8 = undefined;
+    const m = try write(raw[0..n], &json);
+    const text = json[0..m];
+    try t.expect(std.mem.indexOf(u8, text, "\"tracking_state\":2") != null);
+    try t.expect(std.mem.indexOf(u8, text, "\"plane_count\":5") != null);
+    try t.expect(std.mem.indexOf(u8, text, "\"anchor_count\":9") != null);
+    try t.expect(std.mem.indexOf(u8, text, "\"count\":2") != null);
+    try t.expect(std.mem.indexOf(u8, text, "\"channel\":3") != null);
+    try t.expect(std.mem.indexOf(u8, text, "\"channel\":4") != null);
+    // The shape nothing could read before: a tag and a length instead of an answer.
+    try t.expect(std.mem.indexOf(u8, text, "\"tag\":5") == null);
+    try t.expect(std.mem.indexOf(u8, text, "\"tag\":6") == null);
+}
+
+test "what the detector found reaches a reader as boxes, not as a byte count" {
+    var raw: [256]u8 = undefined;
+    var w = snapshot.Writer.init(&raw, 2000);
+    w.beginSection(.detections, 1);
+    w.u32v(1);
+    w.u32v(17);
+    w.f32v(0.94);
+    w.f32v(0.25);
+    w.f32v(0.10);
+    w.f32v(0.30);
+    w.f32v(0.60);
+    w.endSection();
+    const n = try w.finish();
+
+    var json: [512]u8 = undefined;
+    const m = try write(raw[0..n], &json);
+    const text = json[0..m];
+    try t.expect(std.mem.indexOf(u8, text, "\"label\":17") != null);
+    try t.expect(std.mem.indexOf(u8, text, "\"score\":0.940") != null);
+    try t.expect(std.mem.indexOf(u8, text, "\"width\":0.300") != null);
+    try t.expect(std.mem.indexOf(u8, text, "\"tag\":14") == null);
+}
+
+test "the lens section names the lens and the nodes that did not come up" {
+    var raw: [256]u8 = undefined;
+    var w = snapshot.Writer.init(&raw, 1000);
+    w.beginSection(.lens, 2);
+    w.u32v(1);
+    w.u32v(1);
+    w.u32v(@intCast("goss.reference.warm-lut".len));
+    w.u32v(7);
+    w.u32v(2);
+    w.u32v(5);
+    w.bytes("goss.reference.warm-lut");
+    w.endSection();
+    const n = try w.finish();
+
+    var json: [512]u8 = undefined;
+    const m = try write(raw[0..n], &json);
+    const text = json[0..m];
+    try t.expect(std.mem.indexOf(u8, text, "\"id\":\"goss.reference.warm-lut\"") != null);
+    try t.expect(std.mem.indexOf(u8, text, "\"node_index\":7") != null);
+    try t.expect(std.mem.indexOf(u8, text, "\"state\":2") != null);
+    try t.expect(std.mem.indexOf(u8, text, "\"reason\":5") != null);
+    try t.expect(std.mem.indexOf(u8, text, "\"tag\":11") == null);
 }
 
 test "a section this build cannot name is reported, never dropped" {
