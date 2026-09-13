@@ -4688,6 +4688,9 @@ fn proveSpatialRail(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
 
+    // Kept before the next call, which writes both of these again when it refuses.
+    const aligned_over = matched;
+    const aligned_rms = rms;
     var few: [2]abi.SharedLandmark = .{ theirs[0], theirs[1] };
     if (abi.goss_session_align_shared(session, &few, few.len, &transform, &rms, &matched) == .ok) {
         std.debug.print("conformance: FAIL two landmarks were taken as fixing a rigid transform\n", .{});
@@ -4740,7 +4743,7 @@ fn proveSpatialRail(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 
     std.debug.print(
         "conformance: PROOF the spatial rail through the real ABI: the floor named, a cup on {d} surfaces ordered by the room each leaves ({d:.3} of the table free, {d:.3} with something on it), 5m measured at {d:.3} sigma and refused as unvouched, two devices a quarter turn apart aligned over {d} landmarks at {d:.5}m, a {d}-point route across scanned ground, and every answer refused once the world left the session's scope\n",
-        .{ found, table_free_before, table_free_after, sigma, matched, rms, routed },
+        .{ found, table_free_before, table_free_after, sigma, aligned_over, aligned_rms, routed },
     );
     return true;
 }

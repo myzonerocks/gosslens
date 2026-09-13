@@ -816,6 +816,7 @@ const Gate = struct {
             if (!std.mem.endsWith(u8, path, ".zig")) continue;
             if (std.mem.startsWith(u8, path, ".vendor/")) continue;
             if (std.mem.startsWith(u8, path, "tools/")) continue;
+            if (std.mem.endsWith(u8, path, "_stub.zig")) continue;
             const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch continue;
             var lines = std.mem.splitScalar(u8, content, '\n');
             var number: usize = 0;
@@ -830,8 +831,6 @@ const Gate = struct {
                 }
                 if (std.mem.indexOf(u8, line, "return .unsupported") == null) continue;
                 if (std.mem.indexOf(u8, line, "unsupported:") != null) continue;
-                // A file whose whole purpose is to refuse says so at the top.
-                if (std.mem.indexOf(u8, content, "//! ") != null and std.mem.indexOf(u8, content[0..@min(content.len, 400)], "refuse") != null) continue;
                 var explained = false;
                 for (prior) |earlier| {
                     for ([_][]const u8{ "comptime", "supported", "is_web", "builtin.os", "builtin.target", "builtin.abi", "have_", "null)", "orelse" }) |token| {
@@ -851,11 +850,14 @@ const Gate = struct {
     // vocabulary is allowed only where the paragraph names one of the four things
     // that may ever wait on the owner, which is a closed list.
     fn checkDeferralProse(g: *Gate, paths: []const []const u8) !void {
+        // Postponement only. An absence with a real reason is legitimate prose, and
+        // a reason that is merely false (the MCP paragraph that started this) is a
+        // premise no check can test: that one is the reader's job at the sweep.
         const phrases = [_][]const u8{
-            "deliberately not a tool",  "not a tool here",    "cannot be built",
-            "will be built",            "in a later wave",    "in a future wave",
-            "the next piece",           "left to the next",   "not yet wired",
-            "not yet implemented",      "not yet supported",
+            "will be built",       "in a later wave",  "in a future wave",
+            "the next piece",      "left to the next", "not yet wired",
+            "not yet implemented", "not yet supported", "once the next",
+            "when the next wave",  "deferred to",
         };
         const allowed = [_][]const u8{
             "physical device", "physical hardware", "physical iPhone", "physical Android",

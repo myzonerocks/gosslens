@@ -16,6 +16,8 @@ const Live = struct {
     /// Rising, because a frame and a world both carry one and a timestamp that
     /// never moves reads as the same submission twice.
     stamp_us: i64 = 0,
+    /// Whether a renderer came up on this host, which is what a frame needs.
+    renderer_up: bool = false,
 
     fn nextTimestamp(live: *Live) i64 {
         live.stamp_us += 33_333;
@@ -24,7 +26,13 @@ const Live = struct {
 
     fn engineOrNull(live: *Live) ?*abi.Engine {
         if (live.engine) |e| return e;
-        live.engine = abi.createEngine(std.heap.smp_allocator, .{ .texture_pool_capacity = 8, .staging_pool_capacity = 8 }) catch return null;
+        const engine = abi.createEngine(std.heap.smp_allocator, .{ .texture_pool_capacity = 8, .staging_pool_capacity = 8 }) catch return null;
+        // A frame becomes a texture, so it needs a renderer. There is no window
+        // here, which bgfx accepts: where the host gives one, every frame tool is
+        // real, and where it does not, the tools that need one say so by name.
+        const desc: abi.RendererDesc = .{ .native_window_handle = null, .width = 64, .height = 64 };
+        live.renderer_up = abi.goss_engine_init_renderer(engine, &desc) == .ok;
+        live.engine = engine;
         return live.engine;
     }
 
@@ -456,6 +464,10 @@ fn submitImage(arena: std.mem.Allocator, live: *Live, arguments: ?std.json.Value
     desc.color_range = 1;
     desc.timestamp_us = live.nextTimestamp();
     const status = abi.goss_session_submit_frame_rgba_copy(s, &desc, rgba.ptr, width * 4);
+    if (status == .renderer_unavailable or !live.renderer_up) {
+        try w.writeAll("this host would not bring up a renderer, and a frame becomes a texture, so nothing that reads a frame will answer here");
+        return true;
+    }
     if (status != .ok) {
         try w.print("the frame was refused: {t}", .{status});
         return true;

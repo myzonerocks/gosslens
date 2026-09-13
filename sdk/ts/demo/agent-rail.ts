@@ -3,7 +3,7 @@
 //! The same five things the MCP server hands a model, driven by hand here so a
 //! reader can watch each one answer on their own camera.
 
-import { shareScreen, type GossAnnotation, type GossScreenShare, type GossSession } from "../src/index.ts";
+import { GossVerb, gossVerbMask, shareScreen, type GossAnnotation, type GossScreenShare, type GossSession } from "../src/index.ts";
 
 /// How wide an embedding the demo remembers. The face carries 478 landmarks;
 /// their first coordinates are a stable enough signature for a demo, and a short
@@ -165,6 +165,27 @@ export function attachAgentRail(host: AgentRailHost): void {
     const centre = host.session.screenPoint(0, 0.5, 0.5);
     const where = centre ? `; the frame's centre is ${centre.desktop[0].toFixed(0)},${centre.desktop[1].toFixed(0)} on the desktop` : "";
     say(`sharing a ${share.surface} at ${share.width}x${share.height}, scale ${share.scale}${where}`);
+  });
+
+  button("agent-scope", () => {
+    // What a narrowed session answers, shown rather than described: everything
+    // except drawing, and then a draw, so the refusal names the verb it needs.
+    const allowed = [
+      GossVerb.Egress, GossVerb.Record, GossVerb.Remember, GossVerb.SearchMemory,
+      GossVerb.OpenClip, GossVerb.CaptureScreen, GossVerb.SubmitFrame,
+      GossVerb.SubmitWorld, GossVerb.SubmitAudio, GossVerb.AudioOut,
+      GossVerb.SealMemory, GossVerb.ActivateLens, GossVerb.LoadModel,
+      GossVerb.EnableTracking, GossVerb.Retouch,
+    ];
+    host.session.setScope(host.session.selectAll(), gossVerbMask(allowed));
+    const name = host.session.verbName(GossVerb.Annotate) ?? "annotate";
+    const drew = host.session.annotate({ id: 1, kind: 0, rect: [0.1, 0.1, 0.2, 0.2] }, "after");
+    say(
+      drew
+        ? `scope narrowed and the box still drew, which should not happen`
+        : `scope narrowed: drawing needs "${name}", which this session no longer carries. ` +
+          `It only ever narrows, so the rest of this panel keeps working and a new session is the way back.`,
+    );
   });
 
   // A shared screen is only a source once its frames are submitted, so the rail

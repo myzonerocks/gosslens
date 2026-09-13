@@ -322,6 +322,44 @@ for (let waited = 0; waited < 300_000; waited += 1000) {
   }
 }
 
+// The agent rail: every button answers, or it is a panel of decoration. Each one
+// is clicked and the readout checked, which is the same bar the controls bar holds.
+let rail = "";
+{
+  const ids = ["agent-read", "agent-says", "agent-box", "agent-remember", "agent-find", "agent-screen", "agent-scope"];
+  const answers: string[] = [];
+  for (const id of ids) {
+    // The screen button opens the browser's own picker, which headless declines,
+    // and a decline is an answer the panel must report rather than hang on.
+    const clicked = (await send("Runtime.evaluate", {
+      expression: `(() => {
+        const out = document.getElementById('agent-out');
+        if (!out) return 'no panel';
+        out.textContent = '';
+        document.getElementById('${id}')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        return 'clicked';
+      })()`,
+      returnByValue: true,
+    })) as { result?: { value?: string } };
+    if (clicked.result?.value !== "clicked") {
+      rail = `FAIL agent rail: ${id} ${clicked.result?.value}`;
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 400));
+    const said = (await send("Runtime.evaluate", {
+      expression: "document.getElementById('agent-out')?.textContent ?? ''",
+      returnByValue: true,
+    })) as { result?: { value?: string } };
+    const text = (said.result?.value ?? "").trim();
+    if (text.length === 0) {
+      rail = `FAIL agent rail: ${id} answered nothing`;
+      break;
+    }
+    answers.push(`${id}: ${text.slice(0, 60).replace(/\s+/g, " ")}`);
+  }
+  if (!rail) rail = `PROOF the agent rail answers every button\n  ${answers.join("\n  ")}`;
+}
+
 const trackingErr = (await send("Runtime.evaluate", {
   expression: "String(window.trackingError ?? '')",
   returnByValue: true,
@@ -354,7 +392,9 @@ if (
   ml &&
   !ml.startsWith("FAIL") &&
   tracking &&
-  !tracking.startsWith("FAIL")
+  !tracking.startsWith("FAIL") &&
+  rail &&
+  !rail.startsWith("FAIL")
 ) {
   console.log(proof);
   console.log(whiten);
@@ -364,6 +404,7 @@ if (
   console.log(lens);
   console.log(ml);
   console.log(tracking);
+  console.log(rail);
   console.log(`status: ${statusResult.result?.value}`);
   process.exit(0);
 }
@@ -387,6 +428,9 @@ if (ml) {
 }
 if (tracking) {
   console.log(tracking);
+}
+if (rail) {
+  console.log(rail);
 }
 console.log(`FAIL no proof line; status: ${statusResult.result?.value}`);
 process.exit(1);

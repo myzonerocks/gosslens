@@ -790,9 +790,9 @@ goss_status goss_session_sprite_transform(goss_session *session, const uint8_t *
 
 /* Graph thread. Copies one ml.infer node's whole published output tensor
  * into caller memory, the element count written to out_len. capacity is in
- * floats and must cover the tensor; a short buffer still reports the needed
- * count, so a detection, embedding, or logits read sizes itself in two
- * calls. GOSS_AGAIN before the model's first publish. */
+ * floats; a short buffer reports the needed count and answers GOSS_AGAIN, the
+ * same sizing answer every other op here gives, so a detection, embedding or
+ * logits read sizes itself in two calls. GOSS_AGAIN before the first publish. */
 goss_status goss_session_ml_output(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint32_t tensor, float *out, size_t capacity, size_t *out_len);
 
 /* Graph thread. Copies one ml.infer node's mask-bound output into caller

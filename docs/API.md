@@ -389,7 +389,7 @@ wasm engine by default) returns `unsupported`, and the web producer path
 | `goss_session_allow_model_digest` / `goss_session_clear_model_allowlist` | `allowModelDigest(digest)` / `clearModelAllowlist()`, allowlist a bring-your-own model by its 32-byte SHA-256 so an unlisted net is refused at enable time and at every lens model loader; none set admits any model | all SDKs |
 | `goss_session_provide_lens_asset` | `provideLensAsset(name, bytes)`, stages one bundle asset's bytes in memory under its manifest name ahead of a JSON activation, so a filesystem-less host runs the whole lens from memory - images, LUTs, sprites, face textures, glTF models and shader binaries (as `shaders/<stem>.<profile>.bin`) as well as the inference nets; empty bytes remove the name | all SDKs |
 | `goss_session_sprite_transform` | `spriteTransform(nodeId)`, reads a placed sprite.2d, text.2d or video.texture node's live rect and its turn in degrees - the authored angle, plus any bound parameter, plus any gesture - so a host can draw selection handles or persist where a sticker was left | all SDKs |
-| `goss_session_ml_output` | `mlOutput(nodeId, tensor)`, one ml.infer node's whole published output tensor into caller memory (a length probe sizes it), so a detection, embedding, or logits vector leaves the engine | all SDKs |
+| `goss_session_ml_output` | `mlOutput(nodeId, tensor)`, one ml.infer node's whole published output tensor into caller memory, GOSS_AGAIN with the size when the buffer is short, so a detection, embedding, or logits vector leaves the engine | all SDKs |
 | `goss_session_ml_mask` | `mlMask(nodeId)`, one ml.infer node's mask-bound output resampled to the fixed segmentation plane; refused when the node binds no mask | all SDKs |
 
 ### Beauty

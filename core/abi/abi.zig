@@ -16801,7 +16801,9 @@ pub export fn goss_session_ml_output(session: ?*Session, node_id: ?[*]const u8, 
         const len = ml_infer.outputLen(mw.worker, tensor);
         if (len == 0) return .invalid_argument;
         ol.* = len;
-        if (capacity < len) return .invalid_argument;
+        // The size, and `again` rather than a refusal: the caller's buffer was
+        // short, which every other sizing op here answers the same way.
+        if (capacity < len) return .again;
         const dst = (out orelse return .invalid_argument)[0..len];
         if (!ml_infer.copyOutput(mw.worker, tensor, dst)) return .again;
         return .ok;
@@ -16826,7 +16828,8 @@ pub export fn goss_session_ml_mask(session: ?*Session, node_id: ?[*]const u8, no
         const mask = mw.mask orelse return .invalid_argument;
         if (mw.mask_src.len == 0 or mw.mask_dst.len < segmentation.mask_len) return .invalid_argument;
         ol.* = segmentation.mask_len;
-        if (capacity < segmentation.mask_len) return .invalid_argument;
+        // The same sizing answer the rest of this surface gives.
+        if (capacity < segmentation.mask_len) return .again;
         const dst = out orelse return .invalid_argument;
         if (!ml_infer.copyOutput(mw.worker, mask.tensor, mw.mask_src)) return .again;
         resampleMask(mw.mask_src, mw.mask_side, mw.mask_dst);
