@@ -15,9 +15,10 @@ and act back into the frame.**
 
 </div>
 
-A camera, a clip or a screen in, one versioned record of what is in it out, and
-whatever you draw composited back, on iOS, Android and the web. Tracking,
-segmentation, retouching and capture ride the same core, compiled, offline.
+Point it at a camera, a clip or a screen and it tells you what is in every frame.
+Draw on what it hands back and it composites your work into the picture. One
+compiled core does the tracking, the segmentation, the retouching and the
+capture, on iOS, Android and the web, and nothing ever leaves the device.
 
 ## Install
 
