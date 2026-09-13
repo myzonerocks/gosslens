@@ -617,19 +617,22 @@ pub fn build(b: *std.Build) void {
     // break in it would have reached a Linux machine before anything here noticed.
     const desktop_cross = b.step("desktop-cross", "Compile the desktop screen backends for the targets they ship to");
     ci_step.dependOn(desktop_cross);
-    const desktop_cross_targets = [_]struct { path: []const u8, query: std.Target.Query }{
-        .{ .path = "adapters/screen/screen_capture_linux.zig", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu } },
-        .{ .path = "adapters/screen/screen_capture_wayland.zig", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu } },
-        .{ .path = "adapters/screen/screen_capture_x11.zig", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu } },
-        .{ .path = "adapters/screen/screen_capture_windows.zig", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu } },
+    const desktop_cross_targets = [_]struct { name: []const u8, query: std.Target.Query }{
+        .{ .name = "linux", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu } },
+        .{ .name = "windows", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu } },
     };
+    // Through the same factory the engine uses, and every declaration referenced: zig
+    // analyses only what is reached, so compiling a backend as a bare root proved almost
+    // nothing and passed over a type error a Linux runner found immediately.
     for (desktop_cross_targets) |entry| {
+        const cross_target = b.resolveTargetQuery(entry.query);
         const obj = b.addObject(.{
-            .name = b.fmt("cross_{s}", .{std.fs.path.stem(entry.path)}),
+            .name = b.fmt("cross_screen_{s}", .{entry.name}),
             .root_module = b.createModule(.{
-                .root_source_file = b.path(entry.path),
-                .target = b.resolveTargetQuery(entry.query),
+                .root_source_file = b.path("tools/cross_ref.zig"),
+                .target = cross_target,
                 .optimize = .Debug,
+                .imports = &.{.{ .name = "screen_capture", .module = screenCaptureModule(b, cross_target, .Debug) }},
             }),
         });
         desktop_cross.dependOn(&obj.step);

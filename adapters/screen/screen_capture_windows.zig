@@ -79,8 +79,20 @@ const srccopy: u32 = 0x00CC0020;
 const dib_rgb_colors: u32 = 0;
 const bi_rgb: u32 = 0;
 
-var user32: ?std.DynLib = null;
-var gdi32: ?std.DynLib = null;
+/// Zig's std carries no dynamic loading for Windows, so the three kernel32 entries
+/// this needs are declared here rather than a backend being unable to build at all.
+const Module = *opaque {};
+extern "kernel32" fn LoadLibraryW(name: [*:0]const u16) callconv(.winapi) ?Module;
+extern "kernel32" fn GetProcAddress(module: Module, name: [*:0]const u8) callconv(.winapi) ?*anyopaque;
+extern "kernel32" fn FreeLibrary(module: Module) callconv(.winapi) i32;
+
+/// The entry point a name resolves to, cast to the signature the table declares.
+fn lookup(comptime T: type, module: Module, comptime name: [:0]const u8) ?T {
+    return @ptrCast(@alignCast(GetProcAddress(module, name.ptr) orelse return null));
+}
+
+var user32: ?Module = null;
+var gdi32: ?Module = null;
 var api: ?Gdi = null;
 var load_failed = false;
 
@@ -93,12 +105,12 @@ var monitor_count: usize = 0;
 fn ready() ?*Gdi {
     if (api) |*a| return a;
     if (load_failed) return null;
-    var u = std.DynLib.open("user32.dll") catch {
+    const u = LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("user32.dll")) orelse {
         load_failed = true;
         return null;
     };
-    var g = std.DynLib.open("gdi32.dll") catch {
-        u.close();
+    const g = LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("gdi32.dll")) orelse {
+        _ = FreeLibrary(u);
         load_failed = true;
         return null;
     };
@@ -119,17 +131,17 @@ fn ready() ?*Gdi {
         .{ "get_di_bits", "GetDIBits" },
     };
     inline for (from_user32) |pair| {
-        @field(resolved, pair[0]) = u.lookup(@TypeOf(@field(resolved, pair[0])), pair[1]) orelse {
-            u.close();
-            g.close();
+        @field(resolved, pair[0]) = lookup(@TypeOf(@field(resolved, pair[0])), u, pair[1]) orelse {
+            _ = FreeLibrary(u);
+            _ = FreeLibrary(g);
             load_failed = true;
             return null;
         };
     }
     inline for (from_gdi32) |pair| {
-        @field(resolved, pair[0]) = g.lookup(@TypeOf(@field(resolved, pair[0])), pair[1]) orelse {
-            u.close();
-            g.close();
+        @field(resolved, pair[0]) = lookup(@TypeOf(@field(resolved, pair[0])), g, pair[1]) orelse {
+            _ = FreeLibrary(u);
+            _ = FreeLibrary(g);
             load_failed = true;
             return null;
         };

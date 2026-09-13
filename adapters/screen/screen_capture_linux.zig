@@ -75,8 +75,14 @@ pub const Capture = struct {
     }
 
     pub fn read(c: *Capture, out_bgra: []u8) Read {
-        const result = switch (c.backend) {
-            .wayland => |*w| w.read(out_bgra),
+        // Two backends declare the same three tags as two distinct enums, so the
+        // wayland answer is named across into this file's own rather than returned.
+        const result: Read = switch (c.backend) {
+            .wayland => |*w| switch (w.read(out_bgra)) {
+                .frame => .frame,
+                .unchanged => .unchanged,
+                .failed => .failed,
+            },
             .x11 => |*x| x.read(out_bgra),
         };
         if (result == .frame) {
