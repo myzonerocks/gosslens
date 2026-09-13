@@ -145,6 +145,10 @@ MCP server all speak. Everything below is new since the last release.
   cuts, so a reader of the release and a reader of `main` see the same words. The gate refuses a
   change that reaches a user without a line under Unreleased.
 
+- `goss_session_submit_location` keeps the stamp it is given. It took one and discarded it, so a
+  fix arriving out of order replaced a newer one and the accuracy gate judged a position it could
+  not date. An older fix is accepted now and leaves the newer one standing.
+
 ## v0.12.0-alpha.3 (2026-09-09)
 
 - A named source takes a page-made texture, so the web ingress is zero-copy like the others.

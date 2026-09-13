@@ -190,6 +190,11 @@ const countable_nouns = [_][]const u8{
     "tests",   "sections", "fields",   "structs",
     "kinds",   "stages",   "entry points",
 };
+const abi_wiring_names = [_][]const u8{
+    "abi_module",  "abi_tracking_module", "abi_conformance_module",
+    "abi_android", "abi_ios",             "abi_wasm",
+    "abi_em",
+};
 const max_pr_title_bytes: usize = 120;
 const max_pr_body_lines: usize = 12;
 const max_pr_body_bytes: usize = 900;
@@ -491,6 +496,58 @@ const Gate = struct {
                 }
             }
         }
+    }
+
+    // The engine's own imports are the only truth about what an abi module needs, and
+    // build.zig wires one per target by hand. Three had fallen behind at once, so android,
+    // ios and emscripten could not compile and only android had a lane that said so.
+    fn checkAbiWirings(g: *Gate) !void {
+        const build_src = Io.Dir.cwd().readFileAlloc(g.io, "build.zig", g.arena, .limited(max_file_scan_bytes)) catch {
+            try g.flag("unreadable: 'build.zig' could not be read, so the abi wirings were compared against nothing", .{});
+            return;
+        };
+        const abi_src = Io.Dir.cwd().readFileAlloc(g.io, "core/abi/abi.zig", g.arena, .limited(max_file_scan_bytes)) catch {
+            try g.flag("unreadable: 'core/abi/abi.zig' could not be read, so the abi wirings were compared against nothing", .{});
+            return;
+        };
+
+        // What the engine imports, taken from the file itself rather than a list here.
+        var needed: std.ArrayList([]const u8) = .empty;
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, abi_src, at, "@import(\"")) |found| {
+            at = found + 9;
+            const end = std.mem.indexOfScalarPos(u8, abi_src, at, '"') orelse break;
+            const name = abi_src[at..end];
+            if (std.mem.endsWith(u8, name, ".zig")) continue;
+            if (std.mem.eql(u8, name, "std") or std.mem.eql(u8, name, "builtin")) continue;
+            var seen = false;
+            for (needed.items) |n| {
+                if (std.mem.eql(u8, n, name)) seen = true;
+            }
+            if (!seen) try needed.append(g.arena, name);
+        }
+
+        for (abi_wiring_names) |wiring| {
+            for (needed.items) |name| {
+                if (wiringHas(build_src, wiring, name)) continue;
+                try g.flag("abi-wiring: build.zig's '{s}' never imports '{s}', which the engine imports unconditionally; that target cannot compile", .{ wiring, name });
+            }
+        }
+    }
+
+    /// Whether one wiring is given a module, by an addImport or at creation.
+    fn wiringHas(build_src: []const u8, wiring: []const u8, name: []const u8) bool {
+        var buf: [256]u8 = undefined;
+        const direct = std.fmt.bufPrint(&buf, "{s}.addImport(\"{s}\"", .{ wiring, name }) catch return true;
+        if (std.mem.indexOf(u8, build_src, direct) != null) return true;
+        // Creation-time imports sit inside the createModule call this wiring is assigned.
+        var decl_buf: [128]u8 = undefined;
+        const decl = std.fmt.bufPrint(&decl_buf, "{s} = b.createModule(", .{wiring}) catch return true;
+        const start = std.mem.indexOf(u8, build_src, decl) orelse return false;
+        const stop = std.mem.indexOfPos(u8, build_src, start, "\n    });") orelse build_src.len;
+        var named_buf: [128]u8 = undefined;
+        const named = std.fmt.bufPrint(&named_buf, ".name = \"{s}\"", .{name}) catch return true;
+        return std.mem.indexOfPos(u8, build_src[0..stop], start, named) != null;
     }
 
     fn checkProseDashes(g: *Gate, paths: []const []const u8) !void {
@@ -845,7 +902,10 @@ const Gate = struct {
     // behind it. Four of seven were like that when the audit started.
     fn checkVerbCoverage(g: *Gate) !void {
         const scope_src = Io.Dir.cwd().readFileAlloc(g.io, "core/perception/scope.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
-        const abi_src = Io.Dir.cwd().readFileAlloc(g.io, "core/abi/abi.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
+        const abi_src = Io.Dir.cwd().readFileAlloc(g.io, "core/abi/abi.zig", g.arena, .limited(max_file_scan_bytes)) catch {
+            try g.flag("unreadable: 'core/abi/abi.zig' could not be read, so this check saw nothing; a check that cannot see its subject is not a check", .{});
+            return;
+        };
 
         const start = std.mem.indexOf(u8, scope_src, "pub const Verb = enum(u5) {") orelse return;
         const end = std.mem.indexOfPos(u8, scope_src, start, "\n};") orelse return;
@@ -944,8 +1004,14 @@ const Gate = struct {
     // sets is a promise nothing keeps. Seven of the former shipped, reported by a
     // call whose own comment said half the engine had been invisible to it.
     fn checkCapabilityCoverage(g: *Gate) !void {
-        const header = Io.Dir.cwd().readFileAlloc(g.io, "include/gosslens.h", g.arena, .limited(max_file_scan_bytes)) catch return;
-        const abi_src = Io.Dir.cwd().readFileAlloc(g.io, "core/abi/abi.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
+        const header = Io.Dir.cwd().readFileAlloc(g.io, "include/gosslens.h", g.arena, .limited(max_file_scan_bytes)) catch {
+            try g.flag("unreadable: 'include/gosslens.h' could not be read, so this check saw nothing; a check that cannot see its subject is not a check", .{});
+            return;
+        };
+        const abi_src = Io.Dir.cwd().readFileAlloc(g.io, "core/abi/abi.zig", g.arena, .limited(max_file_scan_bytes)) catch {
+            try g.flag("unreadable: 'core/abi/abi.zig' could not be read, so this check saw nothing; a check that cannot see its subject is not a check", .{});
+            return;
+        };
 
         var declared: [64]bool = @splat(false);
         var at: usize = 0;
@@ -979,7 +1045,10 @@ const Gate = struct {
     // nothing. Declared and silent is the same defect as a permission that gates
     // nothing, and it was the largest one in this repository.
     fn checkEventCoverage(g: *Gate) !void {
-        const header = Io.Dir.cwd().readFileAlloc(g.io, "include/gosslens.h", g.arena, .limited(max_file_scan_bytes)) catch return;
+        const header = Io.Dir.cwd().readFileAlloc(g.io, "include/gosslens.h", g.arena, .limited(max_file_scan_bytes)) catch {
+            try g.flag("unreadable: 'include/gosslens.h' could not be read, so this check saw nothing; a check that cannot see its subject is not a check", .{});
+            return;
+        };
         const open = std.mem.indexOf(u8, header, "typedef enum goss_event_kind {") orelse return;
         const close = std.mem.indexOfPos(u8, header, open, "} goss_event_kind;") orelse return;
         const body = try stripLineComments(g.arena, header[open..close]);
@@ -1019,8 +1088,14 @@ const Gate = struct {
     // baseline pins nothing. The lens section sat that way with a document describing
     // a third thing. Both directions are checked: declared and unwritten is as bad.
     fn checkRecordSections(g: *Gate) !void {
-        const schema_src = Io.Dir.cwd().readFileAlloc(g.io, "core/perception/schema.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
-        const abi_src = Io.Dir.cwd().readFileAlloc(g.io, "core/abi/abi.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
+        const schema_src = Io.Dir.cwd().readFileAlloc(g.io, "core/perception/schema.zig", g.arena, .limited(max_file_scan_bytes)) catch {
+            try g.flag("unreadable: 'core/perception/schema.zig' could not be read, so this check saw nothing; a check that cannot see its subject is not a check", .{});
+            return;
+        };
+        const abi_src = Io.Dir.cwd().readFileAlloc(g.io, "core/abi/abi.zig", g.arena, .limited(max_file_scan_bytes)) catch {
+            try g.flag("unreadable: 'core/abi/abi.zig' could not be read, so this check saw nothing; a check that cannot see its subject is not a check", .{});
+            return;
+        };
 
         var declared: std.ArrayList([]const u8) = .empty;
         var at: usize = 0;
@@ -1086,7 +1161,10 @@ const Gate = struct {
     // program root and a seam substitute are reached by something other than an
     // import and neither is a mistake.
     fn checkOrphanModules(g: *Gate) !void {
-        const build_zig = Io.Dir.cwd().readFileAlloc(g.io, "build.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
+        const build_zig = Io.Dir.cwd().readFileAlloc(g.io, "build.zig", g.arena, .limited(max_file_scan_bytes)) catch {
+            try g.flag("unreadable: 'build.zig' could not be read, so this check saw nothing; a check that cannot see its subject is not a check", .{});
+            return;
+        };
 
         var roots: std.ArrayList([]const u8) = .empty;
         var at: usize = 0;
@@ -1583,6 +1661,7 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkRecordSections();
         try g.checkEventCoverage();
         try g.checkCapabilityCoverage();
+        try g.checkAbiWirings();
     } else if (std.mem.eql(u8, mode, "--tree")) {
         const paths = try g.trackedPaths();
         const prose_paths = try g.withAuthoredDocs(paths);
@@ -1606,6 +1685,7 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkRecordSections();
         try g.checkEventCoverage();
         try g.checkCapabilityCoverage();
+        try g.checkAbiWirings();
     } else if (std.mem.eql(u8, mode, "--commit-msg")) {
         const file = args.next() orelse {
             std.debug.print("gate: --commit-msg needs a file argument\n", .{});

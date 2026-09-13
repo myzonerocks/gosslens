@@ -282,9 +282,8 @@ jobs:
           # this tag, so a reader of the release and a reader of main see the same
           # words. The checksum a SwiftPM consumer needs follows them.
           notes="$(./tools/changelog-cut.sh "${RELEASE_TAG}")"
-          notes="${notes}
-
-SwiftPM binaryTarget checksum: $(cat dist/apple/GosslensKit.checksum.txt)"
+          checksum="SwiftPM binaryTarget checksum: $(cat dist/apple/GosslensKit.checksum.txt)"
+          notes="${notes}"$'\n\n'"${checksum}"
           assets=(dist/android/gosslens-android-jniLibs.zip dist/apple/GosslensKit.xcframework.zip dist/web/*.tgz)
           [ -f dist/web/gosslens-web-engine.zip ] && assets+=(dist/web/gosslens-web-engine.zip)
           # A version with a pre-release label is a pre-release on GitHub too.
