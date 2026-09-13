@@ -1674,8 +1674,12 @@ export fn Java_com_gosslens_Gosslens_nativeReportInterruption(env: *JniEnv, cls:
 export fn Java_com_gosslens_Gosslens_nativeRecordingReport(env: *JniEnv, cls: jobject, engine: i64, out_buffer: jobject) i32 {
     _ = cls;
     const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
-    const out: *align(1) abi.RecordingReport = @ptrCast(out_bytes);
-    return @intFromEnum(abi.goss_engine_recording_read_report(engineFromHandle(engine), out));
+    // Filled on the stack and copied out as bytes, the way every other report here is:
+    // a direct ByteBuffer's address carries no alignment the type system can see.
+    var report: abi.RecordingReport = undefined;
+    const status = abi.goss_engine_recording_read_report(engineFromHandle(engine), &report);
+    if (status == .ok) @memcpy(out_bytes[0..@sizeOf(abi.RecordingReport)], std.mem.asBytes(&report));
+    return @intFromEnum(status);
 }
 
 export fn Java_com_gosslens_Gosslens_nativeEnableBeauty(env: *JniEnv, cls: jobject, session: i64, path_buffer: jobject, path_len: i32) i32 {
