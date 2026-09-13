@@ -350,13 +350,10 @@ pub const Engine = struct {
         try engine.adoptPlanFrom(counter.high_water);
     }
 
-    /// Allocates the frame buffer from the measuring run's high-water mark and
-    /// switches inference onto it, so nothing after this reaches the general
-    /// allocator.
-    /// Sizes the frame buffer from the most the graph was ever holding at once, with
-    /// room for the free list's own fragmentation: a pool hands back blocks, and a
-    /// later tensor of a different size does not always fit the hole a freed one
-    /// left. A graph that outgrows it still grows the plan, counted.
+    /// Sizes the frame buffer from the most the graph ever held at once, with room for
+    /// the free list's own fragmentation: a later tensor of a different size does not
+    /// always fit the hole a freed one left. Inference runs on it after this, so the
+    /// frame path reaches no general allocator. A graph that outgrows it grows the plan.
     fn adoptPlanFrom(engine: *Engine, peak_live: usize) Error!void {
         const sized = @max(peak_live + peak_live / 2 + 4096, 8192);
         engine.pool_words = engine.gpa.alloc(u64, sized / 8 + 1) catch return error.OutOfMemory;

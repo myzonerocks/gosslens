@@ -3939,14 +3939,10 @@ fn proveColorManagedCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 }
 
 
-/// The real models the ONNX rail is held to, each fetched by digest and never
-/// committed, so a host without them says so and the rest of the suite runs. The
-/// side is measured with model-probe: a resolution-flexible net runs at the
-/// smallest size that still exercises every operator it uses.
-/// Which output and element stands for "this model answered the frame". A classifier
-/// says it in its first logit, and a detector does not: its first output is a box
-/// corner, which is zero for every frame that holds no detection, so reading it asks
-/// a question no frame can answer. A detector says it in its score tensor.
+/// The models the ONNX rail is held to, fetched by digest and never committed, so a host
+/// without them says so and the suite runs on. Each names the output standing for "this
+/// model answered": a classifier its first logit, a detector its score tensor, since a
+/// box corner reads zero on every frame that holds no detection.
 const zoo_models = [_]struct {
     kind: []const u8,
     path: []const u8,
@@ -4923,12 +4919,10 @@ fn runMlInferOnce(engine: *abi.Engine, bundle_path: []const u8, param: []const u
         _ = abi.goss_session_tick_lens(session, 16000, &signals);
         _ = abi.goss_session_parameter_value(session, param.ptr, param.len, &value);
         polls += 1;
-        // A wall clock rather than a poll count: a worker that never publishes
-        // (a model refused at load, say) otherwise spins for as long as it takes
-        // to count to a hundred million, which is not a timeout anybody sees.
-        // Every poll, because a poll is a millisecond now: checking every five
-        // hundred and twelve meant a timeout could overshoot its bound by seconds,
-        // and one of these figures came in above the bound and still passed.
+        // A wall clock rather than a poll count: a worker that never publishes spins
+        // uncountably long otherwise, which is not a timeout anybody sees. Checked every
+        // poll because a poll is a millisecond now: checking every five hundred and
+        // twelfth let a timeout overshoot its bound by seconds and still pass.
         const waited = started.durationTo(std.Io.Timestamp.now(harness_io, .awake)).nanoseconds;
         if (waited > ml_infer_timeout_ns) return error.MlInferTimedOut;
     }
@@ -13631,7 +13625,10 @@ fn proveColorMatchesOnBothPaths(gpa: std.mem.Allocator, engine: *abi.Engine) !bo
     defer gpa.free(y_plane);
     const uv_plane = try gpa.alloc(u8, @as(usize, w) * h / 2);
     defer gpa.free(uv_plane);
-    const read_back = try gpa.alloc(u8, @as(usize, w) * h * 4);
+    // The composited frame is the renderer's size, not this 64 by 64 submission, so the
+    // buffer is grown to whatever the engine says it will write. Sized from w and h it
+    // was refused for being short, and the proof read that as a frame it could not read.
+    var read_back = try gpa.alloc(u8, @as(usize, w) * h * 4);
     defer gpa.free(read_back);
 
     for (cases) |case| {
@@ -13665,8 +13662,14 @@ fn proveColorMatchesOnBothPaths(gpa: std.mem.Allocator, engine: *abi.Engine) !bo
 
         var out_w: u32 = 0;
         var out_h: u32 = 0;
-        if (abi.goss_engine_capture_live_frame(engine, session, 4, read_back.ptr, read_back.len, &out_w, &out_h) != .ok) {
-            std.debug.print("conformance: FAIL the colour proof could not read the composited frame for {s}\n", .{case.name});
+        // The op reports the size it will write before it checks the capacity, so one
+        // short call is how a caller learns what to allocate.
+        _ = abi.goss_engine_capture_live_frame(engine, session, 4, read_back.ptr, 0, &out_w, &out_h);
+        const needed = @as(usize, out_w) * out_h * 4;
+        if (needed > read_back.len) read_back = try gpa.realloc(read_back, needed);
+        const read_status = abi.goss_engine_capture_live_frame(engine, session, 4, read_back.ptr, read_back.len, &out_w, &out_h);
+        if (read_status != .ok) {
+            std.debug.print("conformance: FAIL the colour proof could not read the composited {d}x{d} frame for {s}: {t}\n", .{ out_w, out_h, case.name, read_status });
             return false;
         }
 
@@ -23598,6 +23601,13 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveMlInputContract(gpa, engine)) conformance_failures += 1;
             if (!try proveMlHostRail(gpa, engine)) conformance_failures += 1;
             if (!try proveMlMaskEgress(gpa, engine)) conformance_failures += 1;
+        } else if (std.mem.eql(u8, only, "recording-rail")) {
+            // The recording area in one run: the clip that drives the graph, the colour
+            // on both paths, and the pause that must leave no gap. A fault in any of them
+            // cost a whole suite to see.
+            if (!try proveClipDrivesTheGraph(gpa, engine)) conformance_failures += 1;
+            if (!try proveColorMatchesOnBothPaths(gpa, engine)) conformance_failures += 1;
+            if (!try provePauseLeavesNoGap(gpa, engine)) conformance_failures += 1;
         } else if (std.mem.eql(u8, only, "gpu-forces")) {
             if (!try proveGpuParticles(gpa, engine)) conformance_failures += 1;
             if (!try proveGpuForces(gpa, engine)) conformance_failures += 1;

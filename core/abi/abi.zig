@@ -762,6 +762,8 @@ pub const Engine = struct {
     /// break are placed. recording_last_timestamp is the last OUTPUT stamp
     /// written, and the two differ by every pause taken so far.
     recording_capture_last_us: i64 = 0,
+    /// A resume waiting for the frame that closes the paused span.
+    recording_resume_at_next: bool = false,
     /// Window-binding backends only: the encoder surface the composite
     /// re-presents into, separate from the sampleable frame target.
     recording_window_target: ?render.Renderer.OffscreenTarget = null,
@@ -6023,7 +6025,10 @@ fn finishRecording(e: *Engine) bool {
             _ = r.frame();
         }
         for (0..2) |_| queueRecordingCommit(e, null, 0);
-        rec.finish() catch {
+        rec.finish() catch |err| {
+            // Swallowed, this cost a run to narrow: stop answered one status for a
+            // finalize that failed and said nothing about which way.
+            std.log.info("gosslens: recording finish failed: {t}", .{err});
             ok = false;
         };
     } else {
@@ -6075,6 +6080,16 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
                 // a pause leaves no gap and nothing after it drifts by its length. A
                 // frame arriving while paused has no place in the output.
                 e.recording_capture_last_us = current.desc.timestamp_us;
+                // The paused span closes on the first frame that arrives after the
+                // resume, which is what this op's contract says. Closing it on the
+                // stamp the engine already held subtracted nothing, so the whole pause
+                // reached the writer and it refused data that far ahead of real time.
+                if (e.recording_resume_at_next) {
+                    e.recording_resume_at_next = false;
+                    e.recording_clock.resume_(current.desc.timestamp_us) catch |err| {
+                        std.log.info("gosslens: a resume could not close the pause at {d}: {t}", .{ current.desc.timestamp_us, err });
+                    };
+                }
                 if (e.recording_clock.map(current.desc.timestamp_us)) |out_us| {
                     recording_frame = prepareRecordingFrame(e, r);
                     recording_timestamp = out_us;
@@ -7158,7 +7173,8 @@ pub export fn goss_engine_recording_pause(engine: ?*Engine) Status {
 pub export fn goss_engine_recording_resume(engine: ?*Engine) Status {
     const e = engine orelse return .invalid_argument;
     if (e.recording == null) return .invalid_argument;
-    e.recording_clock.resume_(e.recording_capture_last_us) catch return .invalid_argument;
+    if (!e.recording_clock.isPaused()) return .invalid_argument;
+    e.recording_resume_at_next = true;
     if (e.recording_session) |rs| emit(rs, .recording_resumed, e.recording_clips, 0, 0);
     return .ok;
 }
@@ -7216,10 +7232,6 @@ pub export fn goss_engine_recording_stop(engine: ?*Engine) Status {
     return if (finishRecording(e)) .ok else .invalid_argument;
 }
 
-/// Feeds interleaved f32 PCM into the session: the engine's own level
-/// and beat analysis always consumes it (driving audio.level and
-/// audio.beat triggers), and an active recording of this session muxes
-/// it as the audio track where the backend supports audio.
 /// Writes resampled microphone samples straight into the session's ring, so the resampler needs
 /// no buffer of its own between it and the ring.
 const RingSink = struct {
@@ -7236,6 +7248,10 @@ const RingSink = struct {
     }
 };
 
+/// Feeds interleaved f32 PCM into the session: the engine's own level and beat
+/// analysis always consumes it, driving the audio.level and audio.beat triggers, and
+/// an active recording of this session muxes it as the audio track where the backend
+/// supports audio.
 pub export fn goss_session_submit_audio(session: ?*Session, samples: ?[*]const f32, frame_count: u32, sample_rate: u32, channels: u32, timestamp_us: i64) Status {
     const s = session orelse return .invalid_argument;
     if (!s.scope.allowsVerb(.submit_audio)) return .out_of_scope;
@@ -8758,11 +8774,6 @@ pub export fn goss_session_submit_frame_copy(session: ?*Session, desc: ?*const F
     return .ok;
 }
 
-/// The CPU-copy path for a single-plane BGRA8/RGBA8 frame - a canvas or
-/// video element's own byte buffer, most likely, with no native GPU
-/// handle behind it the way goss_session_submit_frame's zero-copy path
-/// needs. Same shape as goss_session_submit_frame_copy above, just a
-/// single interleaved plane instead of NV12's two.
 /// Decodes a PNG to tightly packed RGBA8. A host holding an encoded image and no
 /// decoder of its own is the ordinary case on a server and in a tool; the engine
 /// already carries the decoder for its own assets. GOSS_AGAIN with the size when
@@ -8791,6 +8802,10 @@ pub export fn goss_engine_decode_png(
     return .ok;
 }
 
+/// The CPU-copy path for a single-plane BGRA8/RGBA8 frame, a canvas or video
+/// element's own byte buffer with no native GPU handle behind it the way
+/// goss_session_submit_frame's zero-copy path needs. Same shape as
+/// goss_session_submit_frame_copy, one interleaved plane instead of NV12's two.
 pub export fn goss_session_submit_frame_rgba_copy(session: ?*Session, desc: ?*const FrameDesc, rgba: ?[*]const u8, stride: u32) Status {
     const s = session orelse return .invalid_argument;
     if (!s.scope.allowsVerb(.submit_frame)) return .out_of_scope;

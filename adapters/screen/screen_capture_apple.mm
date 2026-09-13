@@ -134,6 +134,11 @@ SCShareableContent *shareableContent(void) {
         dispatch_semaphore_signal(done);
     }];
     dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC));
+    // No displays means this process has no window server connection, and the windows
+    // listed beside them are phantoms: building a filter for one asserts inside
+    // SkyLight and takes the whole process down. A session that can capture always
+    // reports a display, so zero of them is nothing to capture rather than a window list.
+    if (result != nil && result.displays.count == 0) result = nil;
     return result;
 }
 
