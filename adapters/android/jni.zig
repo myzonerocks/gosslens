@@ -1684,9 +1684,15 @@ export fn Java_com_gosslens_Gosslens_nativeRecordingReport(env: *JniEnv, cls: jo
 
 export fn Java_com_gosslens_Gosslens_nativeEnableBeauty(env: *JniEnv, cls: jobject, session: i64, path_buffer: jobject, path_len: i32) i32 {
     _ = cls;
-    _ = path_len;
-    const path = getDirectBufferAddress(env, path_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
-    return @intFromEnum(abi.goss_session_enable_beauty(sessionFromHandle(session), @ptrCast(path)));
+    const bytes = getDirectBufferAddress(env, path_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    // The op takes a NUL-terminated string and a direct ByteBuffer is not one, so the
+    // path is copied and terminated rather than read past its end until a zero turns up.
+    const len: usize = @intCast(@max(path_len, 0));
+    if (len == 0 or len >= max_jni_embedding) return @intFromEnum(abi.Status.invalid_argument);
+    var path: [max_jni_embedding]u8 = undefined;
+    @memcpy(path[0..len], bytes[0..len]);
+    path[len] = 0;
+    return @intFromEnum(abi.goss_session_enable_beauty(sessionFromHandle(session), @ptrCast(&path)));
 }
 
 export fn Java_com_gosslens_Gosslens_nativeDisableBeauty(env: *JniEnv, cls: jobject, session: i64) void {

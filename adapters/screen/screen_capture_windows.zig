@@ -79,12 +79,14 @@ const srccopy: u32 = 0x00CC0020;
 const dib_rgb_colors: u32 = 0;
 const bi_rgb: u32 = 0;
 
-/// Zig's std carries no dynamic loading for Windows, so the three kernel32 entries
-/// this needs are declared here rather than a backend being unable to build at all.
+/// Zig's std carries no dynamic loading for Windows, so the three kernel32 entries this
+/// needs are declared here rather than a backend being unable to build at all. The C
+/// convention rather than winapi: they are the same on every Windows this targets, and
+/// winapi names one the host backend cannot even analyse this file under.
 const Module = *opaque {};
-extern "kernel32" fn LoadLibraryW(name: [*:0]const u16) callconv(.winapi) ?Module;
-extern "kernel32" fn GetProcAddress(module: Module, name: [*:0]const u8) callconv(.winapi) ?*anyopaque;
-extern "kernel32" fn FreeLibrary(module: Module) callconv(.winapi) i32;
+extern "kernel32" fn LoadLibraryW(name: [*:0]const u16) callconv(.c) ?Module;
+extern "kernel32" fn GetProcAddress(module: Module, name: [*:0]const u8) callconv(.c) ?*anyopaque;
+extern "kernel32" fn FreeLibrary(module: Module) callconv(.c) i32;
 
 /// The entry point a name resolves to, cast to the signature the table declares.
 fn lookup(comptime T: type, module: Module, comptime name: [:0]const u8) ?T {
