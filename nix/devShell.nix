@@ -2,7 +2,7 @@
   mkShell,
   lib,
   stdenv,
-  zig,
+  callPackage,
   bun,
   jdk21,
   ffmpeg,
@@ -15,10 +15,11 @@
 }:
 mkShell {
   name = "gosslens";
-  # zig is nixpkgs's 0.16.0, the version .zigversion pins; tools/toolchain-sync still serves
-  # a machine without the shell. The Swift SDK builds with the system's Xcode.
+  # zig is the official release binary at the version .zigversion pins, by digest, since
+  # nixpkgs lags a patch release and build.zig refuses any other version; tools/toolchain-sync
+  # still serves a machine without the shell. The Swift SDK builds with the system's Xcode.
   packages = [
-    zig
+    (callPackage ./zig.nix {})
     bun
     jdk21
     ffmpeg

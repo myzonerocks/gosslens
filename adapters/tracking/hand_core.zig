@@ -50,9 +50,7 @@ pub const Core = struct {
     /// below is what makes the value itself safe to read across threads.
     published: std.atomic.Value(u32) = .init(0),
     serial: u64 = 0,
-
 };
-
 
 fn engineInputSide(engine: *const runtime.Engine) ?u32 {
     const tensor = runtime.c.TfLiteInterpreterGetInputTensor(engine.interpreter, 0) orelse return null;
@@ -214,7 +212,6 @@ pub fn readResult(core: *Core, out: *hand.Result) bool {
     out.* = published.value;
     return true;
 }
-
 
 fn score01(raw: f32) f32 {
     return if (raw < 0.0 or raw > 1.0) 1.0 / (1.0 + @exp(-raw)) else raw;

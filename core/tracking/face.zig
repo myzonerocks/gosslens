@@ -90,7 +90,7 @@ pub const Region = enum(u32) {
 
     pub fn fromU32(value: u32) ?Region {
         return switch (value) {
-            0...12 => @enumFromInt(value),
+            0...12 => @fromBackingInt(@intCast(value)),
             else => null,
         };
     }
@@ -116,7 +116,7 @@ const region_landmark = [_]u16{
 
 /// The mesh landmark a region resolves to.
 pub fn regionLandmark(region: Region) u16 {
-    return region_landmark[@intFromEnum(region)];
+    return region_landmark[@backingInt(region)];
 }
 
 /// The outer-lip contour as a closed ring of mesh landmarks, the two corners
@@ -327,7 +327,7 @@ test "every region maps to an in-range landmark and reads its point" {
         landmarks[i * 3 + 2] = @floatFromInt(i * 3);
     }
     inline for (comptime std.meta.tags(Region)) |region| {
-        const idx = region_landmark[@intFromEnum(region)];
+        const idx = region_landmark[@backingInt(region)];
         try t.expect(idx < landmark_count);
         const p = regionPoint(&landmarks, region);
         try t.expectEqual(@as(f32, @floatFromInt(idx)), p[0]);

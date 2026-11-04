@@ -240,8 +240,8 @@ const testing = std.testing;
 test "the frame sampler writes a channel-first square in unit range" {
     // Two by two, one pure channel per pixel.
     const rgba = [_]u8{
-        255, 0,   0,   255, 0, 255, 0,   255,
-        0,   0,   255, 255, 0, 0,   0,   255,
+        255, 0, 0,   255, 0, 255, 0, 255,
+        0,   0, 255, 255, 0, 0,   0, 255,
     };
     var out: [2 * 2 * 3]f32 = undefined;
     sampleSquare(&rgba, 2, 2, 8, &out, 2);

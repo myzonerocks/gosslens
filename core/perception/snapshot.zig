@@ -89,6 +89,7 @@ pub const Select = packed struct(u32) {
             .lens => s.lens,
             .engine => s.engine,
             .embedding => s.embedding,
+            .detections => s.detections,
             _ => false,
         };
     }
@@ -128,7 +129,7 @@ pub const Writer = struct {
     pub fn beginSection(w: *Writer, tag: Tag, version: u16) void {
         std.debug.assert(w.section_at == null);
         w.section_at = w.needed;
-        w.u16v(@intFromEnum(tag));
+        w.u16v(@backingInt(tag));
         w.u16v(version);
         w.u32v(0);
     }
@@ -234,7 +235,7 @@ pub const Reader = struct {
     pub fn next(r: *Reader) Error!?Section {
         if (r.at >= r.record.len) return null;
         if (r.at + section_header_bytes > r.record.len) return error.Malformed;
-        const tag: Tag = @enumFromInt(std.mem.readInt(u16, r.record[r.at..][0..2], .little));
+        const tag: Tag = @fromBackingInt(@intCast(std.mem.readInt(u16, r.record[r.at..][0..2], .little)));
         const version = std.mem.readInt(u16, r.record[r.at + 2 ..][0..2], .little);
         const len = std.mem.readInt(u32, r.record[r.at + 4 ..][0..4], .little);
         const start = r.at + section_header_bytes;
@@ -295,7 +296,7 @@ test "an unknown tag is stepped over by length, not guessed at" {
     var buf: [128]u8 = undefined;
     var w = Writer.init(&buf, 0);
     // A section from a future build this reader has never heard of.
-    w.beginSection(@enumFromInt(9999), 3);
+    w.beginSection(@fromBackingInt(@intCast(9999)), 3);
     w.bytes("payload a reader cannot parse");
     w.endSection();
     w.beginSection(.audio, 1);
@@ -364,7 +365,7 @@ test "selection answers for every tag it knows and refuses one it does not" {
         if (comptime std.mem.eql(u8, name, "_")) continue;
         try t.expect(Select.all.wants(@field(Tag, name)));
     }
-    try t.expect(!Select.all.wants(@enumFromInt(9999)));
+    try t.expect(!Select.all.wants(@fromBackingInt(@intCast(9999))));
 }
 
 test "a string carries its own length, so a zero byte cannot truncate a record" {

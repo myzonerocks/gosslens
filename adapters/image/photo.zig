@@ -20,7 +20,7 @@ extern fn goss_photo_decode(data: [*]const u8, data_len: usize, out_rgba: ?[*]u8
 /// the backend default). out_len always receives the encoded size, so
 /// BufferTooSmall tells the caller exactly what to retry with.
 pub fn encode(rgba: []const u8, width: u32, height: u32, format: Format, quality: u32, out: []u8, out_len: *usize) Error!void {
-    return switch (goss_photo_encode(rgba.ptr, width, height, @intFromEnum(format), quality, out.ptr, out.len, out_len)) {
+    return switch (goss_photo_encode(rgba.ptr, width, height, @backingInt(format), quality, out.ptr, out.len, out_len)) {
         0 => {},
         -2 => error.BufferTooSmall,
         else => error.EncodeFailed,
@@ -30,7 +30,7 @@ pub fn encode(rgba: []const u8, width: u32, height: u32, format: Format, quality
 /// Reports the encoded size without producing output.
 pub fn encodedSize(rgba: []const u8, width: u32, height: u32, format: Format, quality: u32) Error!usize {
     var needed: usize = 0;
-    return switch (goss_photo_encode(rgba.ptr, width, height, @intFromEnum(format), quality, null, 0, &needed)) {
+    return switch (goss_photo_encode(rgba.ptr, width, height, @backingInt(format), quality, null, 0, &needed)) {
         -2 => needed,
         0 => needed,
         else => error.EncodeFailed,

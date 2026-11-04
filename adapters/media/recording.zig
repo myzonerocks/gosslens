@@ -74,7 +74,7 @@ pub const Recording = struct {
     committed: u32 = 0,
 
     pub fn start(path: []const u8, config: Config) Error!Recording {
-        const handle = goss_recording_open(path.ptr, path.len, config.width, config.height, config.bitrate_bps, @intFromEnum(config.codec)) orelse return error.OpenFailed;
+        const handle = goss_recording_open(path.ptr, path.len, config.width, config.height, config.bitrate_bps, @backingInt(config.codec)) orelse return error.OpenFailed;
         return .{ .handle = handle, .config = config };
     }
 

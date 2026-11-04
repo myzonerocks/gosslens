@@ -260,7 +260,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8) !Decoded {
                 pending_delay = try r.word();
                 const t_index = try r.byte();
                 _ = try r.byte(); // terminator
-                disposal = @enumFromInt((gce >> 2) & 0x07);
+                disposal = @fromBackingInt(@intCast((gce >> 2) & 0x07));
                 transparent = if (gce & 0x01 != 0) @as(i32, t_index) else -1;
             } else {
                 try r.skipSubBlocks(); // application/comment/plain-text

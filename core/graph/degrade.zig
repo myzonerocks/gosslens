@@ -17,12 +17,12 @@ pub const Level = enum(u8) {
 
     pub fn moreDegraded(level: Level) ?Level {
         if (level == .passthrough) return null;
-        return @enumFromInt(@intFromEnum(level) + 1);
+        return @fromBackingInt(@intCast(@backingInt(level) + 1));
     }
 
     pub fn lessDegraded(level: Level) ?Level {
         if (level == .full) return null;
-        return @enumFromInt(@intFromEnum(level) - 1);
+        return @fromBackingInt(@intCast(@backingInt(level) - 1));
     }
 };
 

@@ -196,10 +196,9 @@ fn engineReport(live: *Live, w: *std.Io.Writer) !bool {
     try w.print(
         "renderer backend {d}; textures {d} of {d} live, peak {d}, {d} exhausted; staging {d} of {d} live, peak {d}; vendor heap {d} bytes",
         .{
-            report.renderer_backend,      report.texture_pool_live, report.texture_pool_capacity,
-            report.texture_pool_peak,     report.texture_pool_exhausted,
-            report.staging_pool_live,     report.staging_pool_capacity, report.staging_pool_peak,
-            report.bgfx_live_bytes,
+            report.renderer_backend,      report.texture_pool_live,      report.texture_pool_capacity,
+            report.texture_pool_peak,     report.texture_pool_exhausted, report.staging_pool_live,
+            report.staging_pool_capacity, report.staging_pool_peak,      report.bgfx_live_bytes,
         },
     );
     if (live.session) |s| {

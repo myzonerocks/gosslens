@@ -42,7 +42,20 @@ pub fn enumerate(out: []CSurface) usize {
         var theirs: [1]wayland.CSurface = undefined;
         const count = wayland.enumerate(theirs[0..@min(out.len, 1)]);
         if (count == 0) return 0;
-        out[0] = @bitCast(theirs[0]);
+        // The two backends declare the same surface independently, so this is a copy
+        // the compiler checks rather than a reinterpret: a field added to one of them
+        // fails here instead of silently reading the wrong offset on a Wayland host.
+        out[0] = .{
+            .id = theirs[0].id,
+            .kind = theirs[0].kind,
+            .logical_width = theirs[0].logical_width,
+            .logical_height = theirs[0].logical_height,
+            .origin_x = theirs[0].origin_x,
+            .origin_y = theirs[0].origin_y,
+            .scale = theirs[0].scale,
+            .title_len = theirs[0].title_len,
+            .title = theirs[0].title,
+        };
         return 1;
     }
     return x11.enumerate(out);

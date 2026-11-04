@@ -5,6 +5,24 @@ A release moves that section under its tag with the date, and the release notes 
 
 ## Unreleased
 
+- The pinned toolchain is Zig 0.17.1. Building the engine, or anything that links it, needs that
+  compiler: `tools/toolchain-sync` installs it, and the nix shell takes the same release binary
+  by its published digest rather than whichever build nixpkgs happens to carry. 0.17.0 is
+  skipped; its standard library could not compile a mutex for an apple embedded target.
+
+- A vendored tree that arrives between two builds is picked up. The build system keeps the module
+  graph it worked out last time, so every disk read that shapes that graph is declared to it; a
+  `zig build vendor-sync` followed by a build used to reuse the graph that had no vendors and fail
+  naming the vendor it had just fetched.
+
+- The web build's segmentation mask upload compiles. Both exported functions that take a mask
+  returned nothing where the C ABI promises a status, and the only target that compiles them is
+  the emscripten one, whose build had quietly switched itself off after failing to find node.
+  A caller that uploads a mask with no renderer up is now told so rather than reaching a trap.
+
+- A selection that asks for the detections section is answered. The section mask had no case for
+  it since the section landed, so a caller that selected detections was told it had not.
+
 ## v0.13.0 (2026-09-13)
 
 The engine reaches an agent rail: a camera, a clip or a screen in, one versioned record of what is

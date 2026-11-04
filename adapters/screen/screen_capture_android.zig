@@ -57,7 +57,7 @@ const Frame = struct {
 pub fn setGranted(width: f32, height: f32, density_scale: f32, label: []const u8) void {
     var surface: CSurface = .{
         .id = 1,
-        .kind = @intFromEnum(Kind.display),
+        .kind = @backingInt(Kind.display),
         .logical_width = width,
         .logical_height = height,
         .origin_x = 0,
@@ -133,7 +133,7 @@ pub const Capture = struct {
         // No native handle to own: the projection lives on the Java side and this
         // reads what the JNI offers, so the handle is a marker the type needs.
         return .{
-            .handle = @ptrFromInt(@intFromEnum(Kind.display) + 1),
+            .handle = @ptrFromInt(@backingInt(Kind.display) + 1),
             .width = width,
             .height = height,
             .last_width = width,

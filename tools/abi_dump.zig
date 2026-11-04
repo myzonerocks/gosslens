@@ -16,18 +16,18 @@ const abi_types = abi.abi_surface_types;
 /// compiles against that spelling and most but not all of them are the zig name
 /// in snake case.
 const header_names = [abi_types.len][]const u8{
-    "goss_frame_desc",     "goss_landmarks",       "goss_engine_config",
-    "goss_session_config", "goss_renderer_desc",   "goss_frame_planes",
-    "goss_face_result",    "goss_hand_result",     "goss_pose_result",
-    "goss_lens_signals",   "goss_camera_controls", "goss_recording_policy",
-    "goss_capture_ui",     "goss_caption_segment", "goss_capture_guidance",
-    "goss_node_report",    "goss_engine_report",   "goss_session_report",
-    "goss_annotation", "goss_capture_config", "goss_clip_info",
-    "goss_egress_config", "goss_egress_decision", "goss_event",
-    "goss_footprint", "goss_media_capabilities", "goss_occupant",
-    "goss_placement", "goss_recording_config", "goss_recording_report",
-    "goss_screen_surface", "goss_shared_landmark", "goss_text_entry",
-    "goss_world_anchor", "goss_world_light", "goss_world_plane",
+    "goss_frame_desc",     "goss_landmarks",          "goss_engine_config",
+    "goss_session_config", "goss_renderer_desc",      "goss_frame_planes",
+    "goss_face_result",    "goss_hand_result",        "goss_pose_result",
+    "goss_lens_signals",   "goss_camera_controls",    "goss_recording_policy",
+    "goss_capture_ui",     "goss_caption_segment",    "goss_capture_guidance",
+    "goss_node_report",    "goss_engine_report",      "goss_session_report",
+    "goss_annotation",     "goss_capture_config",     "goss_clip_info",
+    "goss_egress_config",  "goss_egress_decision",    "goss_event",
+    "goss_footprint",      "goss_media_capabilities", "goss_occupant",
+    "goss_placement",      "goss_recording_config",   "goss_recording_report",
+    "goss_screen_surface", "goss_shared_landmark",    "goss_text_entry",
+    "goss_world_anchor",   "goss_world_light",        "goss_world_plane",
     "goss_world_state",
 };
 

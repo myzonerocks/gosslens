@@ -256,7 +256,7 @@ pub const Rotation = enum(c_int) { none = 0, cw90 = 90, half = 180, cw270 = 270 
 /// no allocation. A half turn is the both-axes flip the live upload paths
 /// need to match a backend that samples the last texel as (0,0).
 pub fn argbRotate(src: [*]const u8, src_stride: u32, dst: [*]u8, dst_stride: u32, width: u32, height: u32, rotation: Rotation) ConvertError!void {
-    if (ARGBRotate(src, @intCast(src_stride), dst, @intCast(dst_stride), @intCast(width), @intCast(height), @intFromEnum(rotation)) != 0) return error.ConversionFailed;
+    if (ARGBRotate(src, @intCast(src_stride), dst, @intCast(dst_stride), @intCast(width), @intCast(height), @backingInt(rotation)) != 0) return error.ConversionFailed;
 }
 
 /// Mirrors a packed 4-byte-per-pixel image horizontally into dst.

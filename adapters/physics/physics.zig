@@ -64,7 +64,7 @@ pub const World = struct {
 
     /// Half extents size a box; a sphere reads its radius from size[0].
     pub fn addBody(world: World, shape: Shape, position: [3]f32, size: [3]f32, motion: Motion) !u32 {
-        const id = goss_physics_body_add(world.handle, @intFromEnum(shape), &position, &size, @intFromEnum(motion));
+        const id = goss_physics_body_add(world.handle, @backingInt(shape), &position, &size, @backingInt(motion));
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
     }
@@ -72,7 +72,7 @@ pub const World = struct {
     /// Adds a body rotated by a quaternion (x, y, z, w), so an elongated
     /// shape can lie on its side or a static collider can tilt.
     pub fn addBodyOriented(world: World, shape: Shape, position: [3]f32, size: [3]f32, rotation: [4]f32, motion: Motion) !u32 {
-        const id = goss_physics_body_add_oriented(world.handle, @intFromEnum(shape), &position, &size, &rotation, @intFromEnum(motion));
+        const id = goss_physics_body_add_oriented(world.handle, @backingInt(shape), &position, &size, &rotation, @backingInt(motion));
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
     }
@@ -81,7 +81,7 @@ pub const World = struct {
     /// ~1 grippy) and restitution (0 dead, 1 bouncy). `planar` confines it to
     /// the z = 0 plane (x/y translation and z spin only) for a 2D world.
     pub fn addBodyMaterial(world: World, shape: Shape, position: [3]f32, size: [3]f32, rotation: [4]f32, friction: f32, restitution: f32, motion: Motion, planar: bool) !u32 {
-        const id = goss_physics_body_add_material(world.handle, @intFromEnum(shape), &position, &size, &rotation, friction, restitution, @intFromEnum(motion), @intFromBool(planar));
+        const id = goss_physics_body_add_material(world.handle, @backingInt(shape), &position, &size, &rotation, friction, restitution, @backingInt(motion), @intFromBool(planar));
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
     }
@@ -90,7 +90,7 @@ pub const World = struct {
     /// an arbitrary faceted collider. Needs at least four points.
     pub fn addBodyHull(world: World, points: []const [3]f32, position: [3]f32, rotation: [4]f32, friction: f32, restitution: f32, motion: Motion, planar: bool) !u32 {
         const flat: [*]const f32 = @ptrCast(points.ptr);
-        const id = goss_physics_body_add_hull(world.handle, flat, @intCast(points.len), &position, &rotation, friction, restitution, @intFromEnum(motion), @intFromBool(planar));
+        const id = goss_physics_body_add_hull(world.handle, flat, @intCast(points.len), &position, &rotation, friction, restitution, @backingInt(motion), @intFromBool(planar));
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
     }
@@ -154,7 +154,7 @@ pub const World = struct {
     /// a kinematic drag, then released back to dynamic so it flies off with
     /// the velocity the drag imparted.
     pub fn setBodyMotion(world: World, body: u32, motion: Motion) void {
-        goss_physics_body_set_motion(world.handle, body, @intFromEnum(motion));
+        goss_physics_body_set_motion(world.handle, body, @backingInt(motion));
     }
 
     /// Removes a body from the world and destroys it - an erased live collider.

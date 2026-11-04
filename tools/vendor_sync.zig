@@ -168,7 +168,18 @@ const Sync = struct {
     fn loadPin(s: *Sync, name: []const u8) !Pin {
         const path = try std.fmt.allocPrint(s.arena, "third_party/{s}/pin.zon", .{name});
         const source = try Io.Dir.cwd().readFileAllocOptions(s.io, path, s.arena, .limited(1 << 16), .of(u8), 0);
-        return std.zon.parse.fromSliceAlloc(Pin, s.arena, source, null, .{});
+        // The parser names the line and the reason; without printing them a bad pin
+        // reaches the caller as the word ParseZon and nothing else.
+        var diagnostics: std.zon.parse.Diagnostics = .{ .errors = &.{} };
+        return std.zon.parse.fromSlice(Pin, .{
+            .gpa = s.arena,
+            .arena = s.arena,
+            .source = source,
+            .diagnostics = &diagnostics,
+        }) catch |err| {
+            if (diagnostics.errors.len != 0) std.debug.print("{f}\n", .{diagnostics.fmt(path)});
+            return err;
+        };
     }
 
     fn vendorSynced(s: *Sync, pin: Pin) bool {

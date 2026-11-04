@@ -36,8 +36,8 @@ const max_custom_ops = 4;
 
 /// The reporter callback type exactly as the C API declares it on this
 /// target, so the va_list parameter keeps the platform's own ABI shape.
-const ReporterFn = @typeInfo(@TypeOf(c.TfLiteModelCreateWithErrorReporter)).@"fn".params[2].type.?;
-const VaListArg = @typeInfo(std.meta.Child(std.meta.Child(ReporterFn))).@"fn".params[2].type.?;
+const ReporterFn = @typeInfo(@TypeOf(c.TfLiteModelCreateWithErrorReporter)).@"fn".param_types[2].?;
+const VaListArg = @typeInfo(std.meta.Child(std.meta.Child(ReporterFn))).@"fn".param_types[2].?;
 
 /// Routes every model and interpreter diagnostic to stderr; without a
 /// reporter the runtime discards the vendor's reason for each failure.

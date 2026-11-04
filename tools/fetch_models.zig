@@ -109,7 +109,18 @@ pub fn main(init: std.process.Init) !u8 {
     var f: Fetch = .{ .arena = arena, .io = init.io, .check_only = check_only };
 
     const source = try Io.Dir.cwd().readFileAllocOptions(f.io, "third_party/models.lock", arena, .limited(1 << 16), .of(u8), 0);
-    const lock = try std.zon.parse.fromSliceAlloc(Lock, arena, source, null, .{});
+    // The parser names the line and the reason; without printing them a bad lock file
+    // reaches the caller as the word ParseZon and nothing else.
+    var diagnostics: std.zon.parse.Diagnostics = .{ .errors = &.{} };
+    const lock = std.zon.parse.fromSlice(Lock, .{
+        .gpa = arena,
+        .arena = arena,
+        .source = source,
+        .diagnostics = &diagnostics,
+    }) catch |err| {
+        if (diagnostics.errors.len != 0) std.debug.print("{f}\n", .{diagnostics.fmt("third_party/models.lock")});
+        return err;
+    };
 
     if (!check_only) Io.Dir.cwd().createDirPath(f.io, ".models") catch {}; // failure ignored: the write below reports a path that truly cannot be made
     for (lock.models) |model| try f.syncOne(model);

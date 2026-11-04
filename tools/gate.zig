@@ -52,12 +52,12 @@ const forbidden_segments = [_][]const u8{
 
 // Artifact classes that are fetched or built, never tracked.
 const forbidden_extensions = [_][]const u8{
-    ".task", ".gguf",   ".tflite", ".onnx", ".safetensors",
-    ".zip",  ".tar",    ".tgz",    ".xz",   ".gz",
-    ".7z",   ".a",      ".so",     ".dylib", ".dll",
-    ".o",    ".jar",    ".aar",    ".apk",  ".ipa",
-    ".wasm", ".ptau",   ".pt",     ".h5",   ".out",
-    ".jpg",  ".jpeg",   ".png",    ".webp", ".bmp",
+    ".task", ".gguf", ".tflite", ".onnx",  ".safetensors",
+    ".zip",  ".tar",  ".tgz",    ".xz",    ".gz",
+    ".7z",   ".a",    ".so",     ".dylib", ".dll",
+    ".o",    ".jar",  ".aar",    ".apk",   ".ipa",
+    ".wasm", ".ptau", ".pt",     ".h5",    ".out",
+    ".jpg",  ".jpeg", ".png",    ".webp",  ".bmp",
 };
 
 // Ignored-by-design prefixes that are skipped before the foreign-layer check;
@@ -177,18 +177,18 @@ const platform_acquire_release = [_]struct { acquire: []const u8, release: []con
 // nothing about how the change was proven out. Modeled on how ghostty's
 // own PRs read - three sentences, no headers, no checklist.
 const counted_numbers = [_][]const u8{
-    "two",      "three",     "four",      "five",     "six",
-    "seven",    "eight",     "nine",      "ten",      "eleven",
-    "twelve",   "thirteen",  "fourteen",  "fifteen",  "sixteen",
-    "seventeen", "eighteen", "nineteen",  "twenty",   "thirty",
+    "two",       "three",    "four",     "five",    "six",
+    "seven",     "eight",    "nine",     "ten",     "eleven",
+    "twelve",    "thirteen", "fourteen", "fifteen", "sixteen",
+    "seventeen", "eighteen", "nineteen", "twenty",  "thirty",
 };
 // Sets that grow. A platform or a backend count is the shape of the world
 // rather than a tally, so neither is here.
 const countable_nouns = [_][]const u8{
-    "tools",   "ops",    "operations", "verbs",  "operators",
-    "SDKs",    "proofs", "checks",     "shapes", "models",
-    "tests",   "sections", "fields",   "structs",
-    "kinds",   "stages",   "entry points",
+    "tools",  "ops",          "operations", "verbs",   "operators",
+    "SDKs",   "proofs",       "checks",     "shapes",  "models",
+    "tests",  "sections",     "fields",     "structs", "kinds",
+    "stages", "entry points",
 };
 const abi_wiring_names = [_][]const u8{
     "abi_module",  "abi_tracking_module", "abi_conformance_module",
@@ -200,9 +200,9 @@ const max_pr_body_lines: usize = 12;
 const max_pr_body_bytes: usize = 900;
 
 const banned_pr_body_headers = [_][]const u8{
-    "summary",     "test plan",  "testing",   "changes",
-    "overview",    "background", "motivation", "what changed",
-    "how tested",  "verification",
+    "summary",    "test plan",    "testing",    "changes",
+    "overview",   "background",   "motivation", "what changed",
+    "how tested", "verification",
 };
 
 const Seam = struct {
@@ -971,13 +971,13 @@ const Gate = struct {
         // a reason that is merely false (the MCP paragraph that started this) is a
         // premise no check can test: that one is the reader's job at the sweep.
         const phrases = [_][]const u8{
-            "will be built",       "in a later wave",  "in a future wave",
-            "the next piece",      "left to the next", "not yet wired",
+            "will be built",       "in a later wave",   "in a future wave",
+            "the next piece",      "left to the next",  "not yet wired",
             "not yet implemented", "not yet supported", "once the next",
             "when the next wave",  "deferred to",
         };
         const allowed = [_][]const u8{
-            "physical device", "physical hardware", "physical iPhone", "physical Android",
+            "physical device", "physical hardware", "physical iPhone",  "physical Android",
             "billing",         "credential",        "signing identity", "owner",
             "device lab",      "hardware the lab",
         };

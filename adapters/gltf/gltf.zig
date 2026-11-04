@@ -1582,7 +1582,7 @@ test "a cubic spline channel samples the spec's hermite curve, not its tangents"
     // Four components per group, three groups per keyframe: identity to a quarter
     // turn, with zero tangents either side.
     const quat_values = [_]f32{
-        0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0,      0, 1,      0, 0, 0, 0,
         0, 0, 0, 0, 0, 0.7071, 0, 0.7071, 0, 0, 0, 0,
     };
     const quat_ch: DecodedAnimChannel = .{

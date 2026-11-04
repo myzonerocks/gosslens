@@ -230,7 +230,7 @@ fn writeSection(w: *Out, section: snapshot.Section) void {
             // dropped, so a newer engine's record stays readable and says what it
             // is carrying.
             w.raw(",\"tag\":");
-            w.num(@intFromEnum(section.tag));
+            w.num(@backingInt(section.tag));
             w.raw(",\"bytes\":");
             w.unum(section.payload.len);
         },
@@ -476,7 +476,7 @@ test "the lens section names the lens and the nodes that did not come up" {
 test "a section this build cannot name is reported, never dropped" {
     var raw: [256]u8 = undefined;
     var w = snapshot.Writer.init(&raw, 0);
-    w.beginSection(@enumFromInt(4242), 9);
+    w.beginSection(@fromBackingInt(@intCast(4242)), 9);
     w.bytes("from a newer engine");
     w.endSection();
     const n = try w.finish();
