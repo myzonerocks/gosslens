@@ -36,6 +36,12 @@ binary by the digest the download index publishes, the same bytes
 means adding that version's digests there, and a version with none fails
 the shell rather than falling back.
 
+Because zig is fetched that way, the nixpkgs pin itself stays where it is. A
+binary built inside the shell links the shell's glibc and then runs against the
+host's loader, so a nixpkgs whose glibc is newer than the CI runner's leaves
+every Linux test binary refusing to start. Bumping it is a deliberate change
+with the runner's glibc checked first, not a side effect of wanting a tool.
+
 ## 2026-08-14
 
 Pinned Zig 0.16.0, the then current stable release. Code is written against
