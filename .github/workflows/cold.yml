@@ -118,12 +118,8 @@ jobs:
           echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
       - name: vendor sync
         run: zig build vendor-sync
-      # One job per core put the 16 GB runner into the kernel's reaper on every
-      # attempt, which arrives as a bare "shutdown signal"; three ABIs of the
-      # vendored C++ do not fit four at a time.
-      # One compiler process peaks near 15 GB on these targets, which is the
-      # whole runner; the build finished with 103 MB to spare and all of the
-      # stock swap used, so give it somewhere to go before it starts.
+      # One compiler process peaks near 15 GB here, which is the whole runner,
+      # and the kernel's reaper arrives as a bare "shutdown signal".
       - name: swap headroom
         run: |
           # The runner already keeps a swapfile at /swapfile and holds it open,
@@ -176,11 +172,8 @@ jobs:
           echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
       - name: vendor sync
         run: zig build vendor-sync
-      # Each test binary is its own zig process with its own thread pool, and
-      # four of them together is more memory than the runner has.
-      # One compiler process peaks near 15 GB on these targets, which is the
-      # whole runner; the build finished with 103 MB to spare and all of the
-      # stock swap used, so give it somewhere to go before it starts.
+      # Each test binary is its own compiler process, and one of those peaks
+      # near 15 GB, which is the whole runner.
       - name: swap headroom
         run: |
           # The runner already keeps a swapfile at /swapfile and holds it open,
