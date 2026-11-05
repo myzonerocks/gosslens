@@ -142,7 +142,16 @@ jobs:
           echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
       - name: vendor sync
         run: zig build vendor-sync
+      # Each test binary is its own zig process with its own thread pool, and
+      # four of them together is more memory than the runner has.
       - name: lens validator shader tests
-        run: zig build test -Dlens-shaders=true
+        run: |
+          ( while :; do
+              echo "RES $(date -u +%H:%M:%S) avail=$(free -m | awk '/^Mem:/{print $7}')MB swap=$(free -m | awk '/^Swap:/{print $3}')MB root_free=$(df -m / | awk 'NR==2{print $4}')MB top=$(ps -eo rss=,comm= --sort=-rss 2>/dev/null | head -3 | awk '{printf "%s:%dMB ", $2, $1/1024}' || true)"
+              sleep 3
+            done ) &
+          res_pid=$!
+          trap 'kill $res_pid 2>/dev/null || true' EXIT
+          zig build test -Dlens-shaders=true -j1
       - name: validate reference lenses
         run: zig build lens-validate-reference
