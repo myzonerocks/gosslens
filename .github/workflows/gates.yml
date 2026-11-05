@@ -15,6 +15,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Which areas a change touches, so the long lanes are not paid for a docs
+  # edit. Unknown or unreadable base: every area reads true, so a gate is
+  # skipped only when the diff positively says it is untouched.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      engine: ${{ steps.areas.outputs.engine }}
+      ts: ${{ steps.areas.outputs.ts }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: areas
+        id: areas
+        run: |
+          set -euo pipefail
+          all() { printf 'engine=true\nts=true\n' >> "$GITHUB_OUTPUT"; }
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          case "$base" in
+            ""|0000000000000000000000000000000000000000) echo "no base to diff; every gate runs"; all; exit 0 ;;
+          esac
+          git cat-file -e "${base}^{commit}" 2>/dev/null || { echo "base $base is not here; every gate runs"; all; exit 0; }
+          files=$(git diff --name-only "$base" HEAD)
+          echo "changed:"; echo "$files" | sed 's/^/  /'
+          # A workflow edit reruns everything: the lanes themselves changed.
+          if echo "$files" | grep -qE '^\.github/workflows/'; then echo "workflows touched; every gate runs"; all; exit 0; fi
+          engine=false; ts=false
+          if echo "$files" | grep -qE '^(core|adapters|lenses|include|tools|third_party|nix|harness)/|^(build\.zig|build\.zig\.zon|\.zigversion|flake\.nix|flake\.lock)$'; then engine=true; fi
+          if echo "$files" | grep -qE '^sdk/ts/'; then ts=true; fi
+          echo "engine=$engine" >> "$GITHUB_OUTPUT"
+          echo "ts=$ts" >> "$GITHUB_OUTPUT"
+          echo "engine=$engine ts=$ts"
+
   gates:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -161,6 +199,8 @@ jobs:
   # queued and was dropped without running, and the setup is the same anyway.
   macos-build:
     runs-on: macos-latest
+    needs: changes
+    if: needs.changes.outputs.engine == 'true'
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
@@ -227,6 +267,8 @@ jobs:
 
   android:
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.engine == 'true'
     timeout-minutes: 140
     steps:
       - uses: actions/checkout@v4
@@ -297,6 +339,8 @@ jobs:
 
   web:
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.ts == 'true'
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -313,6 +357,8 @@ jobs:
 
   lens-shaders:
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.engine == 'true'
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
