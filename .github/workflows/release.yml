@@ -340,7 +340,14 @@ jobs:
           # A pre-release publishes under the next tag, so latest keeps pointing at the last release.
           tag=latest
           case "${RELEASE_TAG#v}" in *-*) tag=next ;; esac
-          npm publish --access public --provenance --tag "$tag" dist/web/*.tgz
+          # A release can be rebuilt, and the registry refuses a version it already
+          # carries, so publishing twice must not fail the steps behind this one.
+          name=$(node -p "require('./sdk/ts/package.json').name")
+          if npm view "${name}@${RELEASE_TAG#v}" version >/dev/null 2>&1; then
+            echo "npm already carries ${name}@${RELEASE_TAG#v}, leaving it as it is"
+          else
+            npm publish --access public --provenance --tag "$tag" dist/web/*.tgz
+          fi
       # Registry pushes need credentials, so they run only when the secrets are
       # set. Without them the Release still carries every installable binary.
       - name: set up jdk 21 for gradle
