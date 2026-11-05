@@ -42,10 +42,17 @@ jobs:
       # stock swap used, so give it somewhere to go before it starts.
       - name: swap headroom
         run: |
-          sudo fallocate -l 12G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          # The runner already keeps a swapfile at /swapfile and holds it open,
+          # so the extra one takes its own name. Headroom is not a gate: if the
+          # box refuses it, say so and let the build answer for itself.
+          if sudo fallocate -l 12G /swap-extra 2>&1 \
+            && sudo chmod 600 /swap-extra \
+            && sudo mkswap /swap-extra >/dev/null \
+            && sudo swapon /swap-extra; then
+            echo "swap headroom: 12G added"
+          else
+            echo "swap headroom: unavailable, continuing on the stock amount"
+          fi
           free -m
       - name: gate suite, cold
         run: |
@@ -119,10 +126,17 @@ jobs:
       # stock swap used, so give it somewhere to go before it starts.
       - name: swap headroom
         run: |
-          sudo fallocate -l 12G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          # The runner already keeps a swapfile at /swapfile and holds it open,
+          # so the extra one takes its own name. Headroom is not a gate: if the
+          # box refuses it, say so and let the build answer for itself.
+          if sudo fallocate -l 12G /swap-extra 2>&1 \
+            && sudo chmod 600 /swap-extra \
+            && sudo mkswap /swap-extra >/dev/null \
+            && sudo swapon /swap-extra; then
+            echo "swap headroom: 12G added"
+          else
+            echo "swap headroom: unavailable, continuing on the stock amount"
+          fi
           free -m
       - name: android library
         run: |
@@ -169,10 +183,17 @@ jobs:
       # stock swap used, so give it somewhere to go before it starts.
       - name: swap headroom
         run: |
-          sudo fallocate -l 12G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          # The runner already keeps a swapfile at /swapfile and holds it open,
+          # so the extra one takes its own name. Headroom is not a gate: if the
+          # box refuses it, say so and let the build answer for itself.
+          if sudo fallocate -l 12G /swap-extra 2>&1 \
+            && sudo chmod 600 /swap-extra \
+            && sudo mkswap /swap-extra >/dev/null \
+            && sudo swapon /swap-extra; then
+            echo "swap headroom: 12G added"
+          else
+            echo "swap headroom: unavailable, continuing on the stock amount"
+          fi
           free -m
       - name: lens validator shader tests
         run: |
