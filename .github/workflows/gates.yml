@@ -157,9 +157,11 @@ jobs:
             echo "cache health: vendor=${{ steps.vendor.outputs.cache-hit || 'miss' }} models=${{ steps.models.outputs.cache-hit || 'miss' }} zigcache=${{ steps.zigcache.outputs.cache-matched-key || 'miss' }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Both macos gates share one runner: a second macos job spent fifteen minutes
+  # queued and was dropped without running, and the setup is the same anyway.
   macos-build:
     runs-on: macos-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       # The runner uses the repository's flake, so it builds with the zig 0.17.1 a developer's
@@ -199,6 +201,14 @@ jobs:
       # leak proof in the test step runs here.
       - name: build and test
         run: nix develop -c zig build test --summary all
+        env:
+          GOSS_PROBES: "1"
+      # The pixel conformance suite renders through bgfx/Metal, which a
+      # macos runner has and a Linux runner does not, moving the render
+      # proofs off the local-only bar. A headless runner that cannot
+      # present surfaces the gap here rather than hiding it.
+      - name: conformance
+        run: nix develop -c zig build conformance
         env:
           GOSS_PROBES: "1"
       - uses: actions/cache/save@v4
@@ -373,36 +383,3 @@ jobs:
             echo "cache health: vendor=${{ steps.vendor.outputs.cache-hit || 'miss' }} models=${{ steps.models.outputs.cache-hit || 'miss' }} zigcache=${{ steps.zigcache.outputs.cache-matched-key || 'miss' }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  macos-conformance:
-    runs-on: macos-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      # The runner uses the repository's flake, so it builds with the zig 0.17.1 a developer's
-      # shell has, pinned by flake.lock.
-      - name: set up nix
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-        with:
-          nix_path: nixpkgs=channel:nixos-unstable
-      - uses: actions/cache@v4
-        with:
-          path: |
-            .vendor
-            .vendor-archives
-          key: vendor-${{ hashFiles('third_party/**/pin.zon') }}
-      - name: vendor sync
-        run: nix develop -c zig build vendor-sync
-      - uses: actions/cache@v4
-        with:
-          path: .models
-          key: models-${{ hashFiles('third_party/models.lock') }}
-      - name: fetch models
-        run: nix develop -c zig build fetch-models
-      # The pixel conformance suite renders through bgfx/Metal, which a
-      # macos runner has and a Linux runner does not, moving the render
-      # proofs off the local-only bar. A headless runner that cannot
-      # present surfaces the gap here rather than hiding it.
-      - name: conformance
-        run: nix develop -c zig build conformance
-        env:
-          GOSS_PROBES: "1"
