@@ -227,8 +227,16 @@ jobs:
           key: zigcache-android-${{ runner.os }}-${{ hashFiles('.zigversion') }}-${{ github.sha }}
           restore-keys: |
             zigcache-android-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
+      # See cold.yml: one job per core is what the reaper kills.
       - name: android library
-        run: nix develop -c zig build android
+        run: |
+          ( while :; do
+              echo "RES $(date -u +%H:%M:%S) avail=$(free -m | awk '/^Mem:/{print $7}')MB swap=$(free -m | awk '/^Swap:/{print $3}')MB root_free=$(df -m / | awk 'NR==2{print $4}')MB"
+              sleep 15
+            done ) &
+          res_pid=$!
+          trap 'kill $res_pid 2>/dev/null || true' EXIT
+          nix develop -c zig build android -j2
       - uses: actions/cache/save@v4
         if: github.ref == 'refs/heads/main'
         with:

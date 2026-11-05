@@ -38,7 +38,14 @@ jobs:
       - name: fetch models
         run: zig build fetch-models
       - name: gate suite, cold
-        run: zig build ci
+        run: |
+          ( while :; do
+              echo "RES $(date -u +%H:%M:%S) avail=$(free -m | awk '/^Mem:/{print $7}')MB swap=$(free -m | awk '/^Swap:/{print $3}')MB root_free=$(df -m / | awk 'NR==2{print $4}')MB"
+              sleep 15
+            done ) &
+          res_pid=$!
+          trap 'kill $res_pid 2>/dev/null || true' EXIT
+          zig build ci
       - name: divergence note
         if: failure()
         run: echo "cold diverged from warm on ${{ github.sha }}; a derived cache key omitted an input. Treat as an incident." >> "$GITHUB_STEP_SUMMARY"
@@ -94,8 +101,18 @@ jobs:
           echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
       - name: vendor sync
         run: zig build vendor-sync
+      # One job per core put the 16 GB runner into the kernel's reaper on every
+      # attempt, which arrives as a bare "shutdown signal"; three ABIs of the
+      # vendored C++ do not fit four at a time.
       - name: android library
-        run: zig build android
+        run: |
+          ( while :; do
+              echo "RES $(date -u +%H:%M:%S) avail=$(free -m | awk '/^Mem:/{print $7}')MB swap=$(free -m | awk '/^Swap:/{print $3}')MB root_free=$(df -m / | awk 'NR==2{print $4}')MB"
+              sleep 15
+            done ) &
+          res_pid=$!
+          trap 'kill $res_pid 2>/dev/null || true' EXIT
+          zig build android -j2
 
   web:
     runs-on: ubuntu-latest
