@@ -330,6 +330,17 @@ jobs:
           git commit -m "release ${RELEASE_TAG}: pin the swift xcframework binary target"
           git tag -f "${RELEASE_TAG}" HEAD
           git push -f origin "refs/tags/${RELEASE_TAG}"
+      - name: publish to npm
+        if: ${{ env.HAS_NPM == 'true' }}
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+          # A pre-release publishes under the next tag, so latest keeps pointing at the last release.
+          tag=latest
+          case "${RELEASE_TAG#v}" in *-*) tag=next ;; esac
+          npm publish --access public --provenance --tag "$tag" dist/web/*.tgz
       # Registry pushes need credentials, so they run only when the secrets are
       # set. Without them the Release still carries every installable binary.
       - name: set up jdk 21 for gradle
@@ -357,17 +368,6 @@ jobs:
           unzip -o dist/android/gosslens-android-jniLibs.zip -d zig-out/android
           cd sdk/kotlin
           ./gradlew publishAndReleaseToMavenCentral --no-configuration-cache -PVERSION_NAME="${RELEASE_TAG#v}"
-      - name: publish to npm
-        if: ${{ env.HAS_NPM == 'true' }}
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
-          # A pre-release publishes under the next tag, so latest keeps pointing at the last release.
-          tag=latest
-          case "${RELEASE_TAG#v}" in *-*) tag=next ;; esac
-          npm publish --access public --provenance --tag "$tag" dist/web/*.tgz
       # Carry the same pin onto main so a `branch: "main"` consumer and the next
       # release start from the current binary. Last, after the registry pushes: it
       # checks main out, and a publish built after it would ship main's SDK. Best
