@@ -1995,13 +1995,19 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     // arm64-v8a covers every current device and an arm64 emulator; x86_64
     // covers an Intel-host emulator. Each abi installs its own libgosslens.so
     // under its jniLibs directory.
+    // One slice at a time: linking a slice holds the whole vendored tree at
+    // once, and two of those together is more memory than a 16 GB runner has.
+    var earlier: ?*std.Build.Step = null;
     for ([_]AndroidAbi{
         .{ .cpu = .aarch64, .dir = "arm64-v8a" },
         .{ .cpu = .x86_64, .dir = "x86_64" },
     }) |abi_target| {
         const so = addAndroidSlice(b, abi_target, sysroot, optimize, shaderc_tool, flatc_exe);
         stripShipped(so.root_module, optimize);
-        android_step.dependOn(&b.addInstallArtifact(so, .{ .dest_dir = .{ .override = .{ .custom = b.fmt("android/{s}", .{abi_target.dir}) } } }).step);
+        if (earlier) |prior| so.step.dependOn(prior);
+        const install = b.addInstallArtifact(so, .{ .dest_dir = .{ .override = .{ .custom = b.fmt("android/{s}", .{abi_target.dir}) } } });
+        earlier = &install.step;
+        android_step.dependOn(&install.step);
     }
 }
 

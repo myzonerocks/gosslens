@@ -200,7 +200,7 @@ jobs:
 
   android:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 140
     steps:
       - uses: actions/checkout@v4
       # The runner uses the repository's flake, so it builds with the zig 0.17.1 a developer's
@@ -231,12 +231,12 @@ jobs:
       - name: android library
         run: |
           ( while :; do
-              echo "RES $(date -u +%H:%M:%S) avail=$(free -m | awk '/^Mem:/{print $7}')MB swap=$(free -m | awk '/^Swap:/{print $3}')MB root_free=$(df -m / | awk 'NR==2{print $4}')MB"
-              sleep 15
+              echo "RES $(date -u +%H:%M:%S) avail=$(free -m | awk '/^Mem:/{print $7}')MB swap=$(free -m | awk '/^Swap:/{print $3}')MB root_free=$(df -m / | awk 'NR==2{print $4}')MB top=$(ps -eo rss=,comm= --sort=-rss 2>/dev/null | head -3 | awk '{printf "%s:%dMB ", $2, $1/1024}' || true)"
+              sleep 3
             done ) &
           res_pid=$!
           trap 'kill $res_pid 2>/dev/null || true' EXIT
-          nix develop -c zig build android -j2
+          nix develop -c zig build android
       - uses: actions/cache/save@v4
         if: github.ref == 'refs/heads/main'
         with:
