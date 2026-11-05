@@ -5,6 +5,8 @@ A release moves that section under its tag with the date, and the release notes 
 
 ## Unreleased
 
+## v0.14.0 (2026-11-05)
+
 - The pinned toolchain is Zig 0.17.1. Building the engine, or anything that links it, needs that
   compiler: `tools/toolchain-sync` installs it, and the nix shell takes the same release binary
   by its published digest rather than whichever build nixpkgs happens to carry. 0.17.0 is
