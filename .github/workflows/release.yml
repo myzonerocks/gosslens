@@ -64,6 +64,18 @@ jobs:
           echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
       - name: vendor sync
         run: zig build vendor-sync
+      # One compiler process peaks near 15 GB here, which is the whole runner.
+      - name: swap headroom
+        run: |
+          if sudo fallocate -l 12G /swap-extra 2>&1 \
+            && sudo chmod 600 /swap-extra \
+            && sudo mkswap /swap-extra >/dev/null \
+            && sudo swapon /swap-extra; then
+            echo "swap headroom: 12G added"
+          else
+            echo "swap headroom: unavailable, continuing on the stock amount"
+          fi
+          free -m
       - name: build android libraries
         run: zig build android
       # 16 KB page alignment is a hard Play gate: an unaligned .so fails to mmap
@@ -223,6 +235,18 @@ jobs:
           bun install
           bun run build
           bun pm pack --destination "$GITHUB_WORKSPACE"
+      # One compiler process peaks near 15 GB here, which is the whole runner.
+      - name: swap headroom
+        run: |
+          if sudo fallocate -l 12G /swap-extra 2>&1 \
+            && sudo chmod 600 /swap-extra \
+            && sudo mkswap /swap-extra >/dev/null \
+            && sudo swapon /swap-extra; then
+            echo "swap headroom: 12G added"
+          else
+            echo "swap headroom: unavailable, continuing on the stock amount"
+          fi
+          free -m
       # The web engine the wrapper drives is the emscripten build a consumer
       # hosts next to their app. Best effort: it needs the emscripten SDK, so a
       # missing EMSDK never blocks the wrapper publish or the rest of the release.
