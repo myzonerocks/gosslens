@@ -312,7 +312,14 @@ jobs:
           [ -f dist/web/gosslens-web-engine.zip ] && assets+=(dist/web/gosslens-web-engine.zip)
           # A version with a pre-release label is a pre-release on GitHub too.
           case "${RELEASE_TAG#v}" in *-*) target+=(--prerelease) ;; esac
-          gh release create "${RELEASE_TAG}" "${target[@]}" "${assets[@]}" --title "${RELEASE_TAG}" --notes "$notes"
+          # A release that already exists is not a failure: put this run's assets
+          # on it rather than refusing to publish at all.
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "release ${RELEASE_TAG} already exists, uploading this run's assets to it"
+            gh release upload "${RELEASE_TAG}" "${assets[@]}" --clobber
+          else
+            gh release create "${RELEASE_TAG}" "${target[@]}" "${assets[@]}" --title "${RELEASE_TAG}" --notes "$notes"
+          fi
       # A SwiftPM consumer resolves the version tag, so the pin lives in the
       # commit the tag points at: rebuild the tag on a commit carrying the
       # pinned Package.swift. Tags sit outside the branch rule, so the built-in
@@ -340,7 +347,14 @@ jobs:
           # A pre-release publishes under the next tag, so latest keeps pointing at the last release.
           tag=latest
           case "${RELEASE_TAG#v}" in *-*) tag=next ;; esac
-          npm publish --access public --provenance --tag "$tag" dist/web/*.tgz
+          # A release can be rebuilt, and the registry refuses a version it already
+          # carries, so publishing twice must not fail the steps behind this one.
+          name=$(node -p "require('./sdk/ts/package.json').name")
+          if npm view "${name}@${RELEASE_TAG#v}" version >/dev/null 2>&1; then
+            echo "npm already carries ${name}@${RELEASE_TAG#v}, leaving it as it is"
+          else
+            npm publish --access public --provenance --tag "$tag" dist/web/*.tgz
+          fi
       # Registry pushes need credentials, so they run only when the secrets are
       # set. Without them the Release still carries every installable binary.
       - name: set up jdk 21 for gradle
@@ -367,6 +381,12 @@ jobs:
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
         run: |
           set -euo pipefail
+          # Maven Central never replaces a version, so one already there is done.
+          pom="https://repo1.maven.org/maven2/io/github/avosa/gosslens/${RELEASE_TAG#v}/gosslens-${RELEASE_TAG#v}.pom"
+          if curl -fsI "$pom" >/dev/null 2>&1; then
+            echo "maven central already carries ${RELEASE_TAG#v}, leaving it as it is"
+            exit 0
+          fi
           # Restore the CI-built .so where gradle's jniLibs srcDir expects it, so
           # the published AAR carries the prebuilt binary. The fresh checkout has
           # no zig-out, so create it before unzipping into it.
