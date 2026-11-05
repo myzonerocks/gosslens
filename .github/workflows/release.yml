@@ -370,7 +370,7 @@ jobs:
         if: ${{ env.HAS_MAVEN == 'true' }}
         uses: android-actions/setup-android@v3
         with:
-          packages: platform-tools platforms;android-36 platforms;android-37
+          packages: platform-tools platforms;android-36
           log-accepted-android-sdk-licenses: false
       - name: publish to maven central
         if: ${{ env.HAS_MAVEN == 'true' }}
