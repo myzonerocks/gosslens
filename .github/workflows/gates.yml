@@ -201,14 +201,14 @@ jobs:
       # leak proof in the test step runs here.
       - name: build and test
         run: nix develop -c zig build test --summary all
+        env:
+          GOSS_PROBES: "1"
       # The pixel conformance suite renders through bgfx/Metal, which a
       # macos runner has and a Linux runner does not, moving the render
       # proofs off the local-only bar. A headless runner that cannot
       # present surfaces the gap here rather than hiding it.
       - name: conformance
         run: nix develop -c zig build conformance
-        env:
-          GOSS_PROBES: "1"
         env:
           GOSS_PROBES: "1"
       - uses: actions/cache/save@v4
