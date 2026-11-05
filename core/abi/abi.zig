@@ -411,7 +411,7 @@ const abi_surface_fields_at_floor = 233;
 /// engine writes into, so it moves the version exactly as a new op does, once.
 const abi_surface_fields: usize = blk: {
     var total: usize = 0;
-    for (abi_surface_types) |T| total += std.meta.fields(T).len;
+    for (abi_surface_types) |T| total += @typeInfo(T).@"struct".field_names.len;
     break :blk total;
 };
 pub const abi_minor: u16 = abi_minor_floor +
@@ -2417,7 +2417,7 @@ fn chainHasOccluder(s: *const Session) bool {
 fn tieredBeautyAmount(tier: graph.DegradePlan.Beauty, slot: usize, amount: f32) f32 {
     return switch (tier) {
         .full => amount,
-        .core => if (slot == @intFromEnum(beauty.Effect.smooth) or slot == @intFromEnum(beauty.Effect.whiten)) amount else 0.0,
+        .core => if (slot == @backingInt(beauty.Effect.smooth) or slot == @backingInt(beauty.Effect.whiten)) amount else 0.0,
         .off => 0.0,
     };
 }
@@ -2429,7 +2429,7 @@ fn pushBeautyAmounts(s: *Session) void {
     const chain = s.beauty_chain orelse return;
     const tier = graph.degrade.planFor(s.frame_level).beauty;
     for (s.beauty_amounts, 0..) |amount, slot| {
-        beauty.set(chain, @enumFromInt(@as(i32, @intCast(slot))), tieredBeautyAmount(tier, slot, amount));
+        beauty.set(chain, @fromBackingInt(@intCast(@as(i32, @intCast(slot)))), tieredBeautyAmount(tier, slot, amount));
     }
     s.beauty_tier_pushed = tier;
 }
@@ -2437,7 +2437,7 @@ fn pushBeautyAmounts(s: *Session) void {
 /// The web chain reads its amounts straight out of the session every frame,
 /// so the tier is applied at the read instead of at a push.
 fn webBeautyAmount(s: *const Session, slot: runtime.EffectSlot) f32 {
-    const at = @intFromEnum(slot);
+    const at = @backingInt(slot);
     return tieredBeautyAmount(graph.degrade.planFor(s.frame_level).beauty, at, s.web_beauty_amounts[at]);
 }
 
@@ -6674,7 +6674,7 @@ pub export fn goss_session_plane_kind(session: ?*Session, plane_id: u64, out_kin
     for (s.world.planes[0..s.world.plane_count]) |plane| {
         if (plane.id != plane_id) continue;
         const kind = spatialKind(plane.classification);
-        kind_out.* = @intFromEnum(kind);
+        kind_out.* = @backingInt(kind);
         if (out_bearing) |b| b.* = if (kind.bearing()) 1 else 0;
         return .ok;
     }
@@ -7199,7 +7199,7 @@ pub export fn goss_session_report_interruption(session: ?*Session, kind: c_int) 
     e.recording_clock.note(which, e.recording_capture_last_us);
     e.recording_interruptions += 1;
     if (which == .pause) e.recording_clips += 1;
-    emit(s, .interruption, @intFromEnum(which), e.recording_interruptions, 0);
+    emit(s, .interruption, @backingInt(which), e.recording_interruptions, 0);
     return .ok;
 }
 
@@ -9226,7 +9226,7 @@ pub export fn goss_session_perception_snapshot(session: ?*Session, select: u32, 
 
     if (want.engine) {
         w.beginSection(.engine, 1);
-        w.u32v(@intFromEnum(s.controller.level));
+        w.u32v(@backingInt(s.controller.level));
         w.u32v(s.degrade_transitions);
         w.u64v(s.frames_rendered);
         w.u32v(s.script_faults);
@@ -9248,9 +9248,9 @@ pub export fn goss_session_perception_snapshot(session: ?*Session, select: u32, 
                 w.f32v(corner.y);
             }
             w.f32v(e.confidence);
-            w.u32v(@intFromEnum(e.origin));
-            w.u32v(@intFromEnum(e.script));
-            w.u32v(@intFromEnum(e.direction));
+            w.u32v(@backingInt(e.origin));
+            w.u32v(@backingInt(e.script));
+            w.u32v(@backingInt(e.direction));
             w.u32v(e.track_id);
             w.u32v(e.line);
             w.u32v(e.paragraph);
@@ -9454,7 +9454,7 @@ pub export fn goss_session_egress_decide(session: ?*Session, out_decision: ?*Egr
 
     out.* = .{
         .send = if (decision.send) 1 else 0,
-        .reason = @intFromEnum(decision.reason),
+        .reason = @backingInt(decision.reason),
         .change_score = decision.change_score,
         .since_last_us = decision.since_last_us,
         .sent_total = policy.sent,
@@ -9511,16 +9511,16 @@ pub export fn goss_engine_media_capabilities(engine: ?*Engine, out_caps: ?*Media
     var max_depth: u32 = 0;
     var any_hdr = false;
     for (backend.video) |profile| {
-        video_bits |= @as(u32, 1) << @intCast(@intFromEnum(profile.codec));
+        video_bits |= @as(u32, 1) << @intCast(@backingInt(profile.codec));
         if (profile.max_width > max_w) max_w = profile.max_width;
         if (profile.max_height > max_h) max_h = profile.max_height;
         if (profile.max_bit_depth > max_depth) max_depth = profile.max_bit_depth;
         if (profile.hdr) any_hdr = true;
     }
     var audio_bits: u32 = 0;
-    for (backend.audio) |codec| audio_bits |= @as(u32, 1) << @intCast(@intFromEnum(codec));
+    for (backend.audio) |codec| audio_bits |= @as(u32, 1) << @intCast(@backingInt(codec));
     var container_bits: u32 = 0;
-    for (backend.containers) |kind| container_bits |= @as(u32, 1) << @intCast(@intFromEnum(kind));
+    for (backend.containers) |kind| container_bits |= @as(u32, 1) << @intCast(@backingInt(kind));
     out.* = .{
         .video_codecs = video_bits,
         .audio_codecs = audio_bits,
@@ -9750,17 +9750,17 @@ fn noteNode(s: *Session, graph_index: graph.NodeIndex, state: NodeState, reason:
     const index: u32 = graph_index;
     for (s.node_reports.items) |*existing| {
         if (existing.node_index != index) continue;
-        if (@intFromEnum(state) > existing.state) {
-            existing.state = @intFromEnum(state);
-            existing.reason = @intFromEnum(reason);
+        if (@backingInt(state) > existing.state) {
+            existing.state = @backingInt(state);
+            existing.reason = @backingInt(reason);
         }
         return;
     }
-    emit(s, if (state == .failed) .lens_node_failed else .lens_node_degraded, index, @intFromEnum(reason), 0);
+    emit(s, if (state == .failed) .lens_node_failed else .lens_node_degraded, index, @backingInt(reason), 0);
     s.node_reports.append(s.engine.gpa, .{
         .node_index = index,
-        .state = @intFromEnum(state),
-        .reason = @intFromEnum(reason),
+        .state = @backingInt(state),
+        .reason = @backingInt(reason),
     }) catch {
         // Even the diagnostic could not be stored. Counting that is the
         // difference between a report that is clean and one that is incomplete.
@@ -9774,7 +9774,7 @@ fn noteNode(s: *Session, graph_index: graph.NodeIndex, state: NodeState, reason:
 /// records a failed node too and that is not an activation result.
 fn activationStatus(s: *Session) Status {
     for (s.node_reports.items) |report| {
-        if (report.state == @intFromEnum(NodeState.failed)) return .lens_node_failed;
+        if (report.state == @backingInt(NodeState.failed)) return .lens_node_failed;
     }
     return .ok;
 }
@@ -9865,9 +9865,9 @@ pub export fn goss_session_report_frame(session: ?*Session, frame_time_us: u32, 
         .resource_pressure = pressure,
     })) |moved| {
         s.degrade_transitions +|= 1;
-        emit(s, .degrade_level_changed, @intFromEnum(moved.from), @intFromEnum(moved.to), 0);
+        emit(s, .degrade_level_changed, @backingInt(moved.from), @backingInt(moved.to), 0);
     }
-    return @intFromEnum(s.controller.level);
+    return @backingInt(s.controller.level);
 }
 
 /// Whether a model's bytes may be loaded: true when the session allowlists no
@@ -9908,7 +9908,7 @@ pub export fn goss_session_clear_model_allowlist(session: ?*Session) Status {
 
 pub export fn goss_session_degrade_level(session: ?*const Session) c_int {
     const s = session orelse return 0;
-    return @intFromEnum(s.controller.level);
+    return @backingInt(s.controller.level);
 }
 
 /// Stands the face tracking worker up from a model bundle. The bundle
@@ -10849,9 +10849,9 @@ pub export fn goss_session_text_at(session: ?*Session, index: u32, out_entry: ?*
             e.quad.corners[3].x, e.quad.corners[3].y,
         },
         .confidence = e.confidence,
-        .origin = @intFromEnum(e.origin),
-        .script = @intFromEnum(e.script),
-        .direction = @intFromEnum(e.direction),
+        .origin = @backingInt(e.origin),
+        .script = @backingInt(e.script),
+        .direction = @backingInt(e.direction),
         .track_id = e.track_id,
         .line = e.line,
         .paragraph = e.paragraph,
@@ -10911,7 +10911,7 @@ pub export fn goss_engine_screen_at(engine: ?*Engine, index: u32, out_surface: ?
     const s = screen_capture.view(&e.screen_surfaces[index]);
     out.* = .{
         .id = s.id,
-        .kind = @intFromEnum(s.kind),
+        .kind = @backingInt(s.kind),
         .logical_width = s.logical_width,
         .logical_height = s.logical_height,
         .origin_x = s.origin_x,
@@ -11072,7 +11072,7 @@ pub export fn goss_session_set_scope(session: ?*Session, sections: u32, verbs: u
 pub export fn goss_scope_verb_name(verb: u32, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
     const len_out = out_len orelse return .invalid_argument;
     if (verb >= perception_mod.scope.verb_count) return .invalid_argument;
-    const name = perception_mod.scope.verbName(@enumFromInt(verb));
+    const name = perception_mod.scope.verbName(@fromBackingInt(@intCast(verb)));
     len_out.* = name.len;
     if (name.len > capacity) return .again;
     const dst = out orelse return .invalid_argument;
@@ -11311,7 +11311,7 @@ pub export fn goss_session_read_report(session: ?*Session, out_report: ?*Session
     out.* = .{
         .frames_submitted = s.frames_submitted,
         .frames_rendered = s.frames_rendered,
-        .degrade_level = @intFromEnum(s.controller.level),
+        .degrade_level = @backingInt(s.controller.level),
         .degrade_transitions = s.degrade_transitions,
         .face_analysis = s.analysis_submits.face,
         .hand_analysis = s.analysis_submits.hand,
@@ -12027,7 +12027,7 @@ pub export fn goss_session_set_beauty(session: ?*Session, effect: i32, value: f3
     const clamped = std.math.clamp(value, 0.0, 1.0);
     s.beauty_amounts[@intCast(effect)] = clamped;
     const tier = graph.degrade.planFor(s.frame_level).beauty;
-    beauty.set(chain, @enumFromInt(effect), tieredBeautyAmount(tier, @intCast(effect), clamped));
+    beauty.set(chain, @fromBackingInt(@intCast(effect)), tieredBeautyAmount(tier, @intCast(effect), clamped));
     return .ok;
 }
 
@@ -12067,8 +12067,8 @@ pub export fn goss_session_set_beauty_makeup_texture(session: ?*Session, effect:
     const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
     const texture = render.Renderer.createStaticTexture(@intCast(width), @intCast(height), bytes[0 .. @as(usize, width) * height * 4]);
     const slot = switch (effect) {
-        @intFromEnum(runtime.EffectSlot.lipstick) => &s.web_beauty_lipstick_texture,
-        @intFromEnum(runtime.EffectSlot.blush) => &s.web_beauty_blush_texture,
+        @backingInt(runtime.EffectSlot.lipstick) => &s.web_beauty_lipstick_texture,
+        @backingInt(runtime.EffectSlot.blush) => &s.web_beauty_blush_texture,
         else => {
             r.destroyTexture(texture);
             return .invalid_argument;
@@ -12118,7 +12118,8 @@ pub export fn goss_session_set_segmentation_mask(session: ?*Session, mask: ?[*]c
     if (mask_len == 0) return .ok;
     if (mask_len != segmentation.mask_len) return .invalid_argument;
     const m = mask orelse return .invalid_argument;
-    s.segmentation_texture = uploadMaskFromF32(sessionRenderer(s) orelse return, &s.seg_tex, @ptrCast(m));
+    const r = sessionRenderer(s) orelse return .renderer_unavailable;
+    s.segmentation_texture = uploadMaskFromF32(r, &s.seg_tex, @ptrCast(m));
     return .ok;
 }
 
@@ -12146,7 +12147,8 @@ pub export fn goss_session_set_segmentation_class_mask(session: ?*Session, chann
     if (mask_len == 0) return .ok;
     if (mask_len != segmentation.mask_len) return .invalid_argument;
     const m = mask orelse return .invalid_argument;
-    s.segmentation_class_textures[channel] = uploadMaskFromF32(sessionRenderer(s) orelse return, &s.class_tex[channel], @ptrCast(m));
+    const r = sessionRenderer(s) orelse return .renderer_unavailable;
+    s.segmentation_class_textures[channel] = uploadMaskFromF32(r, &s.class_tex[channel], @ptrCast(m));
     return .ok;
 }
 
@@ -12188,7 +12190,7 @@ fn toTriggerSignals(s: *const LensSignals) trigger.Signals {
 
 fn applyLensEffects(session: *Session, effects: []const runtime.AppliedEffect) void {
     if (is_web) {
-        for (effects) |applied| session.web_beauty_amounts[@intFromEnum(applied.effect)] = std.math.clamp(applied.value, 0.0, 1.0);
+        for (effects) |applied| session.web_beauty_amounts[@backingInt(applied.effect)] = std.math.clamp(applied.value, 0.0, 1.0);
         return;
     }
     const chain = session.beauty_chain orelse return;
@@ -12196,8 +12198,8 @@ fn applyLensEffects(session: *Session, effects: []const runtime.AppliedEffect) v
     // they pass through the tier here and never join the host's stored six.
     const tier = graph.degrade.planFor(session.frame_level).beauty;
     for (effects) |applied| {
-        const slot = @intFromEnum(applied.effect);
-        beauty.set(chain, @enumFromInt(@as(i32, @intCast(slot))), tieredBeautyAmount(tier, slot, applied.value));
+        const slot = @backingInt(applied.effect);
+        beauty.set(chain, @fromBackingInt(@intCast(@as(i32, @intCast(slot)))), tieredBeautyAmount(tier, slot, applied.value));
     }
 }
 
@@ -13131,13 +13133,12 @@ const script_signal_names = blk: {
     break :blk arr;
 };
 
-/// Fills the script's signal-value array from the live signals, or zeroes it
-/// when there are none (a lifecycle event fires outside a tick).
 fn dupeZ(gpa: std.mem.Allocator, text: []const u8) ![:0]u8 {
-    if (@hasDecl(std.mem.Allocator, "dupeZ")) return gpa.dupeZ(u8, text);
     return gpa.dupeSentinel(u8, text, 0);
 }
 
+/// Fills the script's signal-value array from the live signals, or zeroes it
+/// when there are none (a lifecycle event fires outside a tick).
 fn fillScriptSignals(out: *[script_signal_names.len]f64, signals: ?*const trigger.Signals) void {
     const sig = signals orelse {
         @memset(out, 0);
@@ -13317,7 +13318,7 @@ pub export fn goss_session_pull_haptic(session: ?*Session, out_style: ?*u32, out
     if (s.haptic_read >= s.haptic_count) return .again;
     const ev = s.haptic_queue[s.haptic_read];
     s.haptic_read += 1;
-    if (out_style) |o| o.* = @intFromEnum(ev.style);
+    if (out_style) |o| o.* = @backingInt(ev.style);
     if (out_intensity) |o| o.* = ev.intensity;
     return .ok;
 }
@@ -19065,7 +19066,7 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     if (g.tap) live_signals.tap = true;
     live_signals.touch_double_tap = g.double_tap;
     live_signals.touch_long_press = g.long_press;
-    live_signals.touch_swipe = @intFromEnum(g.swipe);
+    live_signals.touch_swipe = @backingInt(g.swipe);
     live_signals.touch_drag = g.dragging;
     live_signals.touch_pinch = g.pinch_scale;
     live_signals.touch_rotate = g.rotate;

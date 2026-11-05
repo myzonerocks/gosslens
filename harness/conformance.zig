@@ -52,7 +52,6 @@ extern fn goss_bgfx_sites_overflowed() usize;
 /// bgfx.cpp:61 is a 24-byte node per distinct texture binding set, the memo
 /// EncoderImpl::begin clears and refills every frame. bgfx.cpp:4723 is the
 /// 32-byte Memory header every upload needs, since no call takes raw bytes.
-
 /// Those two are the whole allowance. Anything else allocating on the frame path
 /// is ours, and the gate names it rather than absorbing it into a total.
 const BgfxFrameSite = struct { file: []const u8, line: u32, why: []const u8 };
@@ -3938,7 +3937,6 @@ fn proveColorManagedCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
-
 /// The models the ONNX rail is held to, fetched by digest and never committed, so a host
 /// without them says so and the suite runs on. Each names the output standing for "this
 /// model answered": a classifier its first logit, a detector its score tensor, since a
@@ -4078,7 +4076,6 @@ fn proveModelZoo(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     }
     return true;
 }
-
 
 /// The text rail's models, fetched by digest like every other and never
 /// committed. The detector alone is enough to prove where text is; the
@@ -4252,7 +4249,6 @@ fn proveTextRail(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
-
 /// The memory plane through the real ABI: remember, search, replace, forget,
 /// save, load. Recall is asserted against the exact answer on the same corpus,
 /// because an approximate index nobody measured is a guess, and the saved file
@@ -4423,7 +4419,6 @@ fn normalizeVector(v: []f32) void {
     for (v) |*x| x.* *= inv;
 }
 
-
 /// Scope through the real ABI: every verb gates the ops it names, a refusal says
 /// it is a permission rather than an absence, and a narrowed session cannot widen
 /// itself, which is what makes the whole mechanism more than advice.
@@ -4474,7 +4469,7 @@ fn proveScope(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
             2 => abi.goss_engine_recording_start(engine, session, "zig-out/scope-record.mp4", "zig-out/scope-record.mp4".len, null),
             7 => blk: {
                 const desc: abi.FrameDesc = .{ .width = 2, .height = 2, .pixel_format = 4, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1 };
-                const rgba = [_]u8{255} ** 16;
+                const rgba: [16]u8 = @splat(255);
                 break :blk abi.goss_session_submit_frame_rgba_copy(session, &desc, &rgba, 8);
             },
             8 => blk: {
@@ -4507,7 +4502,7 @@ fn proveScope(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
         defer abi.destroySession(session);
         const desc: abi.FrameDesc = .{ .width = 2, .height = 2, .pixel_format = 4, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1 };
-        const rgba = [_]u8{255} ** 16;
+        const rgba: [16]u8 = @splat(255);
         const status = abi.goss_session_submit_frame_rgba_copy(session, &desc, &rgba, 8);
         if (status == .out_of_scope) {
             std.debug.print("conformance: FAIL a permissive session refused a frame as out of scope\n", .{});
@@ -4885,7 +4880,7 @@ fn writeMlInferLens(dir: []const u8, model: []const u8) !void {
 /// stalled: a bound to catch one that never publishes, not a speed claim. It depends on
 /// the build mode because this suite runs at Debug, where folding and planning a large
 /// graph costs minutes, and one bound for both modes failed honest work.
-const ml_infer_timeout_ns: u64 = if (@import("builtin").mode == .Debug)
+const ml_infer_timeout_ns: u64 = if (@import("builtin").mode == .debug)
     600 * std.time.ns_per_s
 else
     120 * std.time.ns_per_s;
@@ -17619,7 +17614,6 @@ fn proveSecondLifecycle(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *C
     return true;
 }
 
-
 /// Proves the ladder is wired to something, not just reported: the analysis
 /// counts follow the rung's strides, the chain stops drawing at the bottom rung
 /// so the picture falls back to the plain camera, and every rung still presents.
@@ -17731,7 +17725,6 @@ fn proveDegradationActuates(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
-
 /// Proves a lens's render targets go when the lens does. These used to be freed
 /// only with the session, so browsing lenses accumulated one full-size target
 /// per capability touched. The proof walks several lenses through one session and
@@ -17823,7 +17816,6 @@ fn proveLensTargetsRelease(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
-
 /// Best effort is the lens's claim, not the engine's assumption: a node that loses
 /// a resource it cannot draw without fails the activation, unless the manifest
 /// marked it optional, in which case the lens is ready and the node degraded.
@@ -17857,7 +17849,7 @@ fn proveOptionalNodeDeclaresBestEffort(gpa: std.mem.Allocator, engine: *abi.Engi
         std.debug.print("conformance: FAIL a required node with no shader activated {t}, not lens_node_failed\n", .{required.status});
         return false;
     }
-    if (required.first_state != @intFromEnum(abi.NodeState.failed) or required.first_reason != @intFromEnum(abi.NodeReason.shader_missing)) {
+    if (required.first_state != @backingInt(abi.NodeState.failed) or required.first_reason != @backingInt(abi.NodeReason.shader_missing)) {
         std.debug.print("conformance: FAIL the report said state {d} reason {d}, wanted failed and shader_missing\n", .{ required.first_state, required.first_reason });
         return false;
     }
@@ -21736,9 +21728,9 @@ fn checkDeterminism(gpa: std.mem.Allocator, engine: *abi.Engine, lens_name: []co
     var bundle_buf: [256]u8 = undefined;
     const bundle_path = try std.fmt.bufPrint(&bundle_buf, ".lens-packages/{s}", .{lens_name});
     var out_a_buf: [256:0]u8 = undefined;
-    const out_a = try std.fmt.bufPrintZ(&out_a_buf, "zig-out/conformance-{s}-a", .{lens_name});
+    const out_a = try std.mem.printSentinel(&out_a_buf, "zig-out/conformance-{s}-a", .{lens_name}, 0);
     var out_b_buf: [256:0]u8 = undefined;
-    const out_b = try std.fmt.bufPrintZ(&out_b_buf, "zig-out/conformance-{s}-b", .{lens_name});
+    const out_b = try std.mem.printSentinel(&out_b_buf, "zig-out/conformance-{s}-b", .{lens_name}, 0);
 
     try renderOnce(gpa, engine, bundle_path, out_a, segmentation_model);
     settle(engine);

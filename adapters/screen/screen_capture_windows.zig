@@ -207,7 +207,7 @@ pub fn enumerate(out: []CSurface) usize {
         const r = monitors[i];
         var entry: CSurface = std.mem.zeroes(CSurface);
         entry.id = i + 1;
-        entry.kind = @intFromEnum(Kind.display);
+        entry.kind = @backingInt(Kind.display);
         entry.logical_width = @floatFromInt(r.right - r.left);
         entry.logical_height = @floatFromInt(r.bottom - r.top);
         // Desktop coordinates, which is what a point sent back maps onto.
@@ -319,7 +319,7 @@ const t = std.testing;
 test "a surface view borrows its title and keeps its desktop origin" {
     var raw: CSurface = std.mem.zeroes(CSurface);
     raw.id = 2;
-    raw.kind = @intFromEnum(Kind.display);
+    raw.kind = @backingInt(Kind.display);
     raw.logical_width = 1920;
     raw.logical_height = 1080;
     raw.origin_x = -1920;

@@ -53,7 +53,7 @@ pub fn seal(
     var header: Header = .{
         .magic = magic.*,
         .version = version,
-        .content = @intFromEnum(content),
+        .content = @backingInt(content),
         .nonce = nonce,
         .plaintext_len = plaintext.len,
     };
@@ -72,7 +72,7 @@ pub fn open(key: [key_length]u8, expect: Content, sealed: []const u8, out: []u8)
     @memcpy(std.mem.asBytes(&header), sealed[0..@sizeOf(Header)]);
     if (!std.mem.eql(u8, &header.magic, magic)) return error.Corrupt;
     if (header.version != version) return error.Corrupt;
-    if (header.content != @intFromEnum(expect)) return error.Corrupt;
+    if (header.content != @backingInt(expect)) return error.Corrupt;
     const body = sealed[@sizeOf(Header)..];
     if (body.len < tag_length) return error.Corrupt;
     const plaintext_len = body.len - tag_length;
@@ -129,7 +129,7 @@ test "a relabelled, tampered or truncated file fails rather than reading as some
     // rather than quietly changing what the file claims to be.
     const relabelled = try testing.allocator.dupe(u8, buffer);
     defer testing.allocator.free(relabelled);
-    relabelled[12] = @intFromEnum(Content.index);
+    relabelled[12] = @backingInt(Content.index);
     try testing.expect(open(key, .index, relabelled, out) == error.AuthenticationFailed or
         open(key, .index, relabelled, out) == error.Corrupt);
 

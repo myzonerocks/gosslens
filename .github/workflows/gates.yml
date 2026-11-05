@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # The runner uses the repository's flake, so it builds with the zig 0.16.0 a developer's
+      # The runner uses the repository's flake, so it builds with the zig 0.17.1 a developer's
       # shell has, pinned by flake.lock.
       - name: set up nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
@@ -70,6 +70,23 @@ jobs:
           key: zigcache-${{ runner.os }}-${{ hashFiles('.zigversion') }}-${{ github.sha }}
           restore-keys: |
             zigcache-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
+      # One compiler process peaks near 15 GB on these targets, which is the
+      # whole runner; the build finished with 103 MB to spare and all of the
+      # stock swap used, so give it somewhere to go before it starts.
+      - name: swap headroom
+        run: |
+          # The runner already keeps a swapfile at /swapfile and holds it open,
+          # so the extra one takes its own name. Headroom is not a gate: if the
+          # box refuses it, say so and let the build answer for itself.
+          if sudo fallocate -l 12G /swap-extra 2>&1 \
+            && sudo chmod 600 /swap-extra \
+            && sudo mkswap /swap-extra >/dev/null \
+            && sudo swapon /swap-extra; then
+            echo "swap headroom: 12G added"
+          else
+            echo "swap headroom: unavailable, continuing on the stock amount"
+          fi
+          free -m
       - name: gate suite
         run: nix develop -c zig build ci
         env:
@@ -93,7 +110,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      # The runner uses the repository's flake, so it builds with the zig 0.16.0 a developer's
+      # The runner uses the repository's flake, so it builds with the zig 0.17.1 a developer's
       # shell has, pinned by flake.lock.
       - name: set up nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
@@ -145,7 +162,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      # The runner uses the repository's flake, so it builds with the zig 0.16.0 a developer's
+      # The runner uses the repository's flake, so it builds with the zig 0.17.1 a developer's
       # shell has, pinned by flake.lock.
       - name: set up nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
@@ -200,10 +217,10 @@ jobs:
 
   android:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 140
     steps:
       - uses: actions/checkout@v4
-      # The runner uses the repository's flake, so it builds with the zig 0.16.0 a developer's
+      # The runner uses the repository's flake, so it builds with the zig 0.17.1 a developer's
       # shell has, pinned by flake.lock.
       - name: set up nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
@@ -227,8 +244,33 @@ jobs:
           key: zigcache-android-${{ runner.os }}-${{ hashFiles('.zigversion') }}-${{ github.sha }}
           restore-keys: |
             zigcache-android-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
+      # See cold.yml: one job per core is what the reaper kills.
+      # One compiler process peaks near 15 GB on these targets, which is the
+      # whole runner; the build finished with 103 MB to spare and all of the
+      # stock swap used, so give it somewhere to go before it starts.
+      - name: swap headroom
+        run: |
+          # The runner already keeps a swapfile at /swapfile and holds it open,
+          # so the extra one takes its own name. Headroom is not a gate: if the
+          # box refuses it, say so and let the build answer for itself.
+          if sudo fallocate -l 12G /swap-extra 2>&1 \
+            && sudo chmod 600 /swap-extra \
+            && sudo mkswap /swap-extra >/dev/null \
+            && sudo swapon /swap-extra; then
+            echo "swap headroom: 12G added"
+          else
+            echo "swap headroom: unavailable, continuing on the stock amount"
+          fi
+          free -m
       - name: android library
-        run: nix develop -c zig build android
+        run: |
+          ( while :; do
+              echo "RES $(date -u +%H:%M:%S) avail=$(free -m | awk '/^Mem:/{print $7}')MB swap=$(free -m | awk '/^Swap:/{print $3}')MB root_free=$(df -m / | awk 'NR==2{print $4}')MB top=$(ps -eo rss=,comm= --sort=-rss 2>/dev/null | head -3 | awk '{printf "%s:%dMB ", $2, $1/1024}' || true)"
+              sleep 3
+            done ) &
+          res_pid=$!
+          trap 'kill $res_pid 2>/dev/null || true' EXIT
+          nix develop -c zig build android
       - uses: actions/cache/save@v4
         if: github.ref == 'refs/heads/main'
         with:
@@ -261,10 +303,10 @@ jobs:
 
   lens-shaders:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-      # The runner uses the repository's flake, so it builds with the zig 0.16.0 a developer's
+      # The runner uses the repository's flake, so it builds with the zig 0.17.1 a developer's
       # shell has, pinned by flake.lock.
       - name: set up nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
@@ -288,8 +330,33 @@ jobs:
           key: zigcache-lens-shaders-${{ runner.os }}-${{ hashFiles('.zigversion') }}-${{ github.sha }}
           restore-keys: |
             zigcache-lens-shaders-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
+      # See cold.yml: concurrent test binaries, each its own zig process.
+      # One compiler process peaks near 15 GB on these targets, which is the
+      # whole runner; the build finished with 103 MB to spare and all of the
+      # stock swap used, so give it somewhere to go before it starts.
+      - name: swap headroom
+        run: |
+          # The runner already keeps a swapfile at /swapfile and holds it open,
+          # so the extra one takes its own name. Headroom is not a gate: if the
+          # box refuses it, say so and let the build answer for itself.
+          if sudo fallocate -l 12G /swap-extra 2>&1 \
+            && sudo chmod 600 /swap-extra \
+            && sudo mkswap /swap-extra >/dev/null \
+            && sudo swapon /swap-extra; then
+            echo "swap headroom: 12G added"
+          else
+            echo "swap headroom: unavailable, continuing on the stock amount"
+          fi
+          free -m
       - name: lens validator shader tests
-        run: nix develop -c zig build test -Dlens-shaders=true
+        run: |
+          ( while :; do
+              echo "RES $(date -u +%H:%M:%S) avail=$(free -m | awk '/^Mem:/{print $7}')MB swap=$(free -m | awk '/^Swap:/{print $3}')MB root_free=$(df -m / | awk 'NR==2{print $4}')MB top=$(ps -eo rss=,comm= --sort=-rss 2>/dev/null | head -3 | awk '{printf "%s:%dMB ", $2, $1/1024}' || true)"
+              sleep 3
+            done ) &
+          res_pid=$!
+          trap 'kill $res_pid 2>/dev/null || true' EXIT
+          nix develop -c zig build test -Dlens-shaders=true -j1
       - name: validate reference lenses
         run: nix develop -c zig build lens-validate-reference
       - uses: actions/cache/save@v4
@@ -311,7 +378,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      # The runner uses the repository's flake, so it builds with the zig 0.16.0 a developer's
+      # The runner uses the repository's flake, so it builds with the zig 0.17.1 a developer's
       # shell has, pinned by flake.lock.
       - name: set up nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1

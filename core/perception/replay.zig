@@ -143,10 +143,10 @@ const t = std.testing;
 
 fn buildLog(buf: []u8, drift: bool) Error!usize {
     var l = Log.init(buf);
-    l.append(.{ .kind = @intFromEnum(Kind.frame_in), .detail = 0, .sequence = 1, .timestamp_us = 33_333, .hash = 0xAA, .a = 1920, .b = 1080 });
-    l.append(.{ .kind = @intFromEnum(Kind.event_out), .detail = 3, .sequence = 2, .timestamp_us = 33_333, .hash = 0, .a = 0, .b = 1 });
+    l.append(.{ .kind = @backingInt(Kind.frame_in), .detail = 0, .sequence = 1, .timestamp_us = 33_333, .hash = 0xAA, .a = 1920, .b = 1080 });
+    l.append(.{ .kind = @backingInt(Kind.event_out), .detail = 3, .sequence = 2, .timestamp_us = 33_333, .hash = 0, .a = 0, .b = 1 });
     l.append(.{
-        .kind = @intFromEnum(Kind.frame_in),
+        .kind = @backingInt(Kind.frame_in),
         .detail = 0,
         .sequence = 3,
         .timestamp_us = 66_666,
@@ -186,7 +186,7 @@ test "a log that ran longer diverges at the first extra entry" {
     const nb = try lb.finish();
     const d = (try diverges(a[0..na], b[0..nb])) orelse return error.NoDivergence;
     try t.expectEqual(@as(usize, 1), d.at);
-    try t.expectEqual(@as(u16, @intFromEnum(Kind.event_out)), d.expected.kind);
+    try t.expectEqual(@as(u16, @backingInt(Kind.event_out)), d.expected.kind);
     try t.expectEqual(@as(u16, 0), d.actual.kind);
 }
 
@@ -194,14 +194,14 @@ test "the order between an input and an output is part of what is checked" {
     var a: [512]u8 = undefined;
     var b: [512]u8 = undefined;
     var la = Log.init(&a);
-    la.append(.{ .kind = @intFromEnum(Kind.frame_in), .detail = 0, .sequence = 1, .timestamp_us = 0, .hash = 1, .a = 0, .b = 0 });
-    la.append(.{ .kind = @intFromEnum(Kind.event_out), .detail = 0, .sequence = 2, .timestamp_us = 0, .hash = 0, .a = 0, .b = 0 });
+    la.append(.{ .kind = @backingInt(Kind.frame_in), .detail = 0, .sequence = 1, .timestamp_us = 0, .hash = 1, .a = 0, .b = 0 });
+    la.append(.{ .kind = @backingInt(Kind.event_out), .detail = 0, .sequence = 2, .timestamp_us = 0, .hash = 0, .a = 0, .b = 0 });
     const na = try la.finish();
     // The same two entries, swapped: an event that used to arrive before a frame
     // and now arrives after it is a real difference, not a reordering to forgive.
     var lb = Log.init(&b);
-    lb.append(.{ .kind = @intFromEnum(Kind.event_out), .detail = 0, .sequence = 2, .timestamp_us = 0, .hash = 0, .a = 0, .b = 0 });
-    lb.append(.{ .kind = @intFromEnum(Kind.frame_in), .detail = 0, .sequence = 1, .timestamp_us = 0, .hash = 1, .a = 0, .b = 0 });
+    lb.append(.{ .kind = @backingInt(Kind.event_out), .detail = 0, .sequence = 2, .timestamp_us = 0, .hash = 0, .a = 0, .b = 0 });
+    lb.append(.{ .kind = @backingInt(Kind.frame_in), .detail = 0, .sequence = 1, .timestamp_us = 0, .hash = 1, .a = 0, .b = 0 });
     const nb = try lb.finish();
     const d = (try diverges(a[0..na], b[0..nb])) orelse return error.NoDivergence;
     try t.expectEqual(@as(usize, 0), d.at);

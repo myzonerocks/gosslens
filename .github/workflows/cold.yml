@@ -37,8 +37,32 @@ jobs:
         run: zig build vendor-sync
       - name: fetch models
         run: zig build fetch-models
+      # One compiler process peaks near 15 GB on these targets, which is the
+      # whole runner; the build finished with 103 MB to spare and all of the
+      # stock swap used, so give it somewhere to go before it starts.
+      - name: swap headroom
+        run: |
+          # The runner already keeps a swapfile at /swapfile and holds it open,
+          # so the extra one takes its own name. Headroom is not a gate: if the
+          # box refuses it, say so and let the build answer for itself.
+          if sudo fallocate -l 12G /swap-extra 2>&1 \
+            && sudo chmod 600 /swap-extra \
+            && sudo mkswap /swap-extra >/dev/null \
+            && sudo swapon /swap-extra; then
+            echo "swap headroom: 12G added"
+          else
+            echo "swap headroom: unavailable, continuing on the stock amount"
+          fi
+          free -m
       - name: gate suite, cold
-        run: zig build ci
+        run: |
+          ( while :; do
+              echo "RES $(date -u +%H:%M:%S) avail=$(free -m | awk '/^Mem:/{print $7}')MB swap=$(free -m | awk '/^Swap:/{print $3}')MB root_free=$(df -m / | awk 'NR==2{print $4}')MB top=$(ps -eo rss=,comm= --sort=-rss 2>/dev/null | head -3 | awk '{printf "%s:%dMB ", $2, $1/1024}' || true)"
+              sleep 3
+            done ) &
+          res_pid=$!
+          trap 'kill $res_pid 2>/dev/null || true' EXIT
+          zig build ci
       - name: divergence note
         if: failure()
         run: echo "cold diverged from warm on ${{ github.sha }}; a derived cache key omitted an input. Treat as an incident." >> "$GITHUB_STEP_SUMMARY"
@@ -94,8 +118,31 @@ jobs:
           echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
       - name: vendor sync
         run: zig build vendor-sync
+      # One compiler process peaks near 15 GB here, which is the whole runner,
+      # and the kernel's reaper arrives as a bare "shutdown signal".
+      - name: swap headroom
+        run: |
+          # The runner already keeps a swapfile at /swapfile and holds it open,
+          # so the extra one takes its own name. Headroom is not a gate: if the
+          # box refuses it, say so and let the build answer for itself.
+          if sudo fallocate -l 12G /swap-extra 2>&1 \
+            && sudo chmod 600 /swap-extra \
+            && sudo mkswap /swap-extra >/dev/null \
+            && sudo swapon /swap-extra; then
+            echo "swap headroom: 12G added"
+          else
+            echo "swap headroom: unavailable, continuing on the stock amount"
+          fi
+          free -m
       - name: android library
-        run: zig build android
+        run: |
+          ( while :; do
+              echo "RES $(date -u +%H:%M:%S) avail=$(free -m | awk '/^Mem:/{print $7}')MB swap=$(free -m | awk '/^Swap:/{print $3}')MB root_free=$(df -m / | awk 'NR==2{print $4}')MB top=$(ps -eo rss=,comm= --sort=-rss 2>/dev/null | head -3 | awk '{printf "%s:%dMB ", $2, $1/1024}' || true)"
+              sleep 3
+            done ) &
+          res_pid=$!
+          trap 'kill $res_pid 2>/dev/null || true' EXIT
+          zig build android
 
   web:
     runs-on: ubuntu-latest
@@ -125,7 +172,30 @@ jobs:
           echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
       - name: vendor sync
         run: zig build vendor-sync
+      # Each test binary is its own compiler process, and one of those peaks
+      # near 15 GB, which is the whole runner.
+      - name: swap headroom
+        run: |
+          # The runner already keeps a swapfile at /swapfile and holds it open,
+          # so the extra one takes its own name. Headroom is not a gate: if the
+          # box refuses it, say so and let the build answer for itself.
+          if sudo fallocate -l 12G /swap-extra 2>&1 \
+            && sudo chmod 600 /swap-extra \
+            && sudo mkswap /swap-extra >/dev/null \
+            && sudo swapon /swap-extra; then
+            echo "swap headroom: 12G added"
+          else
+            echo "swap headroom: unavailable, continuing on the stock amount"
+          fi
+          free -m
       - name: lens validator shader tests
-        run: zig build test -Dlens-shaders=true
+        run: |
+          ( while :; do
+              echo "RES $(date -u +%H:%M:%S) avail=$(free -m | awk '/^Mem:/{print $7}')MB swap=$(free -m | awk '/^Swap:/{print $3}')MB root_free=$(df -m / | awk 'NR==2{print $4}')MB top=$(ps -eo rss=,comm= --sort=-rss 2>/dev/null | head -3 | awk '{printf "%s:%dMB ", $2, $1/1024}' || true)"
+              sleep 3
+            done ) &
+          res_pid=$!
+          trap 'kill $res_pid 2>/dev/null || true' EXIT
+          zig build test -Dlens-shaders=true -j1
       - name: validate reference lenses
         run: zig build lens-validate-reference

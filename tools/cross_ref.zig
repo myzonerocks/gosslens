@@ -12,8 +12,8 @@ comptime {
 /// std itself and fails on platforms this backend never asked about.
 fn refAll(comptime T: type, comptime depth: u8) void {
     if (depth == 0) return;
-    inline for (std.meta.declarations(T)) |decl| {
-        const field = @field(T, decl.name);
+    inline for (std.meta.declarations(T)) |decl_name| {
+        const field = @field(T, decl_name);
         if (@TypeOf(field) == type) {
             switch (@typeInfo(field)) {
                 .@"struct", .@"enum", .@"union", .@"opaque" => refAll(field, depth - 1),

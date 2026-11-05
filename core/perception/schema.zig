@@ -237,7 +237,7 @@ pub fn write(w: anytype) !void {
     try w.print("snapshot schema {d}\n", .{snapshot.schema_version});
     for (sections) |s| {
         try w.print("section {s} tag={d} version={d} head={d} repeat={d}\n", .{
-            @tagName(s.tag), @intFromEnum(s.tag), s.version, s.headSize(), s.repeatSize(),
+            @tagName(s.tag), @backingInt(s.tag), s.version, s.headSize(), s.repeatSize(),
         });
         for (s.head) |f| {
             try w.print("  head {s} {s} offset={d}\n", .{ f.name, @tagName(f.type), s.offsetOf(f.name).? });
@@ -284,7 +284,7 @@ test "a repeated field's offset comes from the declaration, not from counting" {
 
 test "every declared section names a tag the record can carry" {
     for (sections) |s| {
-        try testing.expect(@intFromEnum(s.tag) != 0);
+        try testing.expect(@backingInt(s.tag) != 0);
         try testing.expect(s.head.len != 0);
         // A repeated field list with no count to drive it is a layout nothing
         // can read, so a section with repeats must declare a count or a dim.

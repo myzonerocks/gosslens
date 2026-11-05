@@ -106,7 +106,7 @@ pub const Ring = struct {
         }
         const at: usize = @intCast(r.published % r.slots.len);
         r.slots[at] = .{
-            .kind = @intFromEnum(kind),
+            .kind = @backingInt(kind),
             .sequence = r.next_sequence,
             .timestamp_us = timestamp_us,
             .a = a,
@@ -146,7 +146,7 @@ test "events drain in order with their sequence numbers" {
     var dropped: u64 = 0;
     try t.expectEqual(@as(usize, 2), ring.drain(&out, &dropped));
     try t.expectEqual(@as(u64, 0), dropped);
-    try t.expectEqual(@as(u32, @intFromEnum(Kind.face_appeared)), out[0].kind);
+    try t.expectEqual(@as(u32, @backingInt(Kind.face_appeared)), out[0].kind);
     try t.expectEqual(@as(u64, 1), out[0].sequence);
     try t.expectEqual(@as(u64, 2), out[1].sequence);
     try t.expectEqual(@as(f32, 0.9), out[1].value);

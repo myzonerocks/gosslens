@@ -27,7 +27,7 @@ const animation = @import("animation");
 /// The beauty engine's six settable effects, named independently of
 /// adapters/beauty.zig's own Effect enum - core/lens has no adapter
 /// dependency - but numerically identical to it by construction; the
-/// caller @enumFromInt's one into the other when dispatching.
+/// caller @fromBackingInt's one into the other when dispatching.
 pub const EffectSlot = enum(u3) {
     smooth = 0,
     whiten = 1,
@@ -1344,7 +1344,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .tint_pass) continue;
             const tf = node.tint orelse manifest.TintField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .color = .{ tf.r, tf.g, tf.b }, .opacity = tf.opacity, .mask_channel = tf.mask_channel, .from_reference = tf.from_reference, .blend = @intFromEnum(tf.blend), .finish = @intFromEnum(tf.finish) });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .color = .{ tf.r, tf.g, tf.b }, .opacity = tf.opacity, .mask_channel = tf.mask_channel, .from_reference = tf.from_reference, .blend = @backingInt(tf.blend), .finish = @backingInt(tf.finish) });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1374,7 +1374,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .retouch_pass) continue;
             const rf = node.retouch orelse manifest.RetouchField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ @floatFromInt(@intFromEnum(rf.mode)), rf.amount }, .mask_channel = rf.mask_channel });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ @floatFromInt(@backingInt(rf.mode)), rf.amount }, .mask_channel = rf.mask_channel });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1421,7 +1421,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .stylize_pass) continue;
             const yf = node.stylize orelse manifest.StylizeField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ @floatFromInt(@intFromEnum(yf.mode)), yf.strength, yf.threshold, yf.levels } });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ @floatFromInt(@backingInt(yf.mode)), yf.strength, yf.threshold, yf.levels } });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1437,7 +1437,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .edge_pass) continue;
             const ef = node.edge orelse manifest.EdgeField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ @floatFromInt(@intFromEnum(ef.mode)), ef.low_threshold, ef.high_threshold, ef.blur_radius, ef.strength, if (ef.invert) 1 else 0 } });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ @floatFromInt(@backingInt(ef.mode)), ef.low_threshold, ef.high_threshold, ef.blur_radius, ef.strength, if (ef.invert) 1 else 0 } });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1454,7 +1454,7 @@ pub const Lens = struct {
             if (node.node_type != .warp_pass) continue;
             const wf = node.warp orelse manifest.WarpField{};
             var params: [manifest.warp_params_len]f32 = @splat(0);
-            params[0] = @floatFromInt(@intFromEnum(wf.mode));
+            params[0] = @floatFromInt(@backingInt(wf.mode));
             params[1] = wf.center_x;
             params[2] = wf.center_y;
             params[3] = wf.radius;
@@ -1624,7 +1624,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .paint_face) continue;
             const pf = node.paint orelse manifest.PaintField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .texture_stem = node.asset_stem.?, .mask_channel = pf.mask_channel, .opacity = pf.opacity, .blend = @intFromEnum(pf.blend) });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .texture_stem = node.asset_stem.?, .mask_channel = pf.mask_channel, .opacity = pf.opacity, .blend = @backingInt(pf.blend) });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -2018,7 +2018,7 @@ pub const Lens = struct {
                 .literal => |v| v,
                 .parameter => |idx| self.param_values[idx],
             };
-            try out.append(gpa, .{ .effect = @enumFromInt(i), .value = value });
+            try out.append(gpa, .{ .effect = @fromBackingInt(@intCast(i)), .value = value });
         }
     }
 };
@@ -2199,7 +2199,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         for (node.params) |p| {
             for (slots) |slot| {
                 if (!std.mem.eql(u8, p.name, slot.name)) continue;
-                nodes[node_at].bindings[@intFromEnum(slot.effect)] = switch (p.binding) {
+                nodes[node_at].bindings[@backingInt(slot.effect)] = switch (p.binding) {
                     .literal_float => |v| .{ .literal = v },
                     .literal_bool => |v| .{ .literal = if (v) 1 else 0 },
                     .literal_int => |v| .{ .literal = @floatFromInt(v) },
@@ -2521,7 +2521,7 @@ pub fn tick(lens: *Lens, real_dt_us: u32, signals: trigger.Signals) []const Appl
         for (node.bindings, 0..) |binding, slot| {
             const source = binding orelse continue;
             if (source != .parameter or !touched_params[source.parameter]) continue;
-            lens.tick_applied[count] = .{ .effect = @enumFromInt(slot), .value = lens.param_values[source.parameter] };
+            lens.tick_applied[count] = .{ .effect = @fromBackingInt(@intCast(slot)), .value = lens.param_values[source.parameter] };
             count += 1;
         }
     }

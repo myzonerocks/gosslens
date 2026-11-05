@@ -191,13 +191,20 @@ fn compileShaderProfiles(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Di
         defer argv.deinit(gpa);
         try argv.appendSlice(gpa, &.{
             build_options.shaderc_path,
-            "-f",           disk_path,
-            "-o",           out_path,
-            "--type",       "fragment",
-            "--platform",   profile.platform,
-            "-p",           profile.profile,
-            "--varyingdef", build_options.varyingdef_path,
-            "-i",           build_options.shader_include_dir,
+            "-f",
+            disk_path,
+            "-o",
+            out_path,
+            "--type",
+            "fragment",
+            "--platform",
+            profile.platform,
+            "-p",
+            profile.profile,
+            "--varyingdef",
+            build_options.varyingdef_path,
+            "-i",
+            build_options.shader_include_dir,
         });
         const result = std.process.run(gpa, io, .{ .argv = argv.items }) catch |err| {
             ok = false;

@@ -320,7 +320,7 @@ test "a frame copies row by row at the producer's own stride" {
     const width: u32 = 2;
     const height: u32 = 2;
     const stride: usize = 16;
-    var source = [_]u8{0} ** (stride * height);
+    var source: [stride * height]u8 = @splat(0);
     // Row 0 visible bytes, then padding the copy must skip.
     @memcpy(source[0..8], &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 });
     @memcpy(source[stride .. stride + 8], &[_]u8{ 9, 10, 11, 12, 13, 14, 15, 16 });
@@ -337,7 +337,7 @@ test "a frame copies row by row at the producer's own stride" {
     var spa: SpaBuffer = .{ .n_metas = 0, .n_datas = 1, .metas = null, .datas = &datas };
     var buffer: Buffer = .{ .buffer = &spa, .user_data = null, .size = 0, .requested = 0 };
 
-    var out = [_]u8{0} ** (4 * 2 * 2);
+    var out: [4 * 2 * 2]u8 = @splat(0);
     try t.expect(copyFrame(&buffer, width, height, &out));
     try t.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 }, out[0..8]);
     try t.expectEqualSlices(u8, &[_]u8{ 9, 10, 11, 12, 13, 14, 15, 16 }, out[8..16]);
@@ -346,6 +346,6 @@ test "a frame copies row by row at the producer's own stride" {
 test "a buffer with nothing in it is not a frame" {
     var spa: SpaBuffer = .{ .n_metas = 0, .n_datas = 0, .metas = null, .datas = null };
     var buffer: Buffer = .{ .buffer = &spa, .user_data = null, .size = 0, .requested = 0 };
-    var out = [_]u8{0} ** 16;
+    var out: [16]u8 = @splat(0);
     try t.expect(!copyFrame(&buffer, 2, 2, &out));
 }

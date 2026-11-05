@@ -126,7 +126,7 @@ pub fn Store(comptime max_anchors: usize, comptime label_bytes: usize) type {
                 var entry: Entry = .{
                     .id = a.id,
                     .pose = a.pose,
-                    .purpose = @intFromEnum(a.purpose),
+                    .purpose = @backingInt(a.purpose),
                     .label_len = @intCast(a.label.len),
                     .created_us = a.created_us,
                     .last_seen_us = a.last_seen_us,
@@ -272,7 +272,7 @@ test "the same id refines rather than duplicating, and a bad file is refused" {
 
     var broken: Store(4, 64) = .{};
     try testing.expectError(error.Corrupt, broken.load(&[_]u8{ 1, 2, 3 }));
-    var header = [_]u8{0} ** 16;
+    var header: [16]u8 = @splat(0);
     @memcpy(header[0..8], magic);
     header[8] = 9;
     try testing.expectError(error.Corrupt, broken.load(&header));
@@ -455,7 +455,6 @@ pub const shared = struct {
             m[2] * v[0] + m[6] * v[1] + m[10] * v[2],
         };
     }
-
 };
 
 const shared_testing = std.testing;

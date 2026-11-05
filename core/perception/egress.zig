@@ -267,7 +267,7 @@ test "no trigger at all holds every frame and says so" {
 }
 
 test "the change score sees a moved subject a mean alone would miss" {
-    const still = [_]u8{128} ** 64;
+    const still: [64]u8 = @splat(128);
     var same = still;
     try t.expectEqual(@as(f32, 0.0), changeScore(&still, &same));
 
@@ -283,8 +283,8 @@ test "the change score sees a moved subject a mean alone would miss" {
 }
 
 test "a wholly different frame scores at the ceiling" {
-    const black = [_]u8{0} ** 64;
-    const white = [_]u8{255} ** 64;
+    const black: [64]u8 = @splat(0);
+    const white: [64]u8 = @splat(255);
     try t.expectEqual(@as(f32, 1.0), changeScore(&black, &white));
 }
 

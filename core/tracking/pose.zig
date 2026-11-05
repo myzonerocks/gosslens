@@ -70,7 +70,7 @@ pub const Joint = enum(u32) {
 
     pub fn fromU32(value: u32) ?Joint {
         return switch (value) {
-            0...12 => @enumFromInt(value),
+            0...12 => @fromBackingInt(@intCast(value)),
             else => null,
         };
     }
@@ -83,7 +83,7 @@ const joint_landmark = [_]u16{ 0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28
 /// scale, read straight from the pose landmarks (the flat [count*3] array a
 /// pose result carries).
 pub fn jointPoint(landmarks: *const [landmark_count * 3]f32, joint: Joint) [3]f32 {
-    const base = @as(usize, joint_landmark[@intFromEnum(joint)]) * 3;
+    const base = @as(usize, joint_landmark[@backingInt(joint)]) * 3;
     return .{ landmarks[base], landmarks[base + 1], landmarks[base + 2] };
 }
 
@@ -102,7 +102,7 @@ pub const Bone = enum(u8) {
 
     pub fn fromU8(value: u8) ?Bone {
         return switch (value) {
-            0...7 => @enumFromInt(value),
+            0...7 => @fromBackingInt(@intCast(value)),
             else => null,
         };
     }
@@ -144,7 +144,7 @@ fn landmarkPoint(landmarks: *const [landmark_count * 3]f32, index: u16) [3]f32 {
 /// The bend angle at a bone's vertex, in radians [0, pi]. A degenerate limb
 /// with a zero-length segment reads zero rather than a NaN.
 pub fn boneAngle(landmarks: *const [landmark_count * 3]f32, bone: Bone) f32 {
-    const j = bone_joints[@intFromEnum(bone)];
+    const j = bone_joints[@backingInt(bone)];
     const a = landmarkPoint(landmarks, j[0]);
     const v = landmarkPoint(landmarks, j[1]);
     const b = landmarkPoint(landmarks, j[2]);
@@ -162,7 +162,7 @@ pub fn boneAngle(landmarks: *const [landmark_count * 3]f32, bone: Bone) f32 {
 pub fn fillBoneAngles(landmarks: *const [landmark_count * 3]f32, out: *[bone_count]f32) void {
     var i: u8 = 0;
     while (i < bone_count) : (i += 1) {
-        out[i] = boneAngle(landmarks, @enumFromInt(i));
+        out[i] = boneAngle(landmarks, @fromBackingInt(@intCast(i)));
     }
 }
 
@@ -248,7 +248,7 @@ test "every body joint maps to an in-range landmark and reads its point" {
         landmarks[i * 3 + 2] = @floatFromInt(i * 3);
     }
     inline for (comptime std.meta.tags(Joint)) |joint| {
-        const idx = joint_landmark[@intFromEnum(joint)];
+        const idx = joint_landmark[@backingInt(joint)];
         try t.expect(idx < landmark_count);
         const p = jointPoint(&landmarks, joint);
         try t.expectEqual(@as(f32, @floatFromInt(idx)), p[0]);

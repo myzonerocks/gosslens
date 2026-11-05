@@ -127,7 +127,7 @@ pub const Joint = enum(u32) {
 
     pub fn fromU32(value: u32) ?Joint {
         return switch (value) {
-            0...6 => @enumFromInt(value),
+            0...6 => @fromBackingInt(@intCast(value)),
             else => null,
         };
     }
@@ -141,7 +141,7 @@ const joint_landmark = [_]u16{ 0, 4, 8, 12, 16, 20, 9 };
 /// scale, read straight from the hand landmarks (the flat [count*3] array a
 /// hand result carries).
 pub fn jointPoint(landmarks: *const [landmark_count * 3]f32, joint: Joint) [3]f32 {
-    const base = @as(usize, joint_landmark[@intFromEnum(joint)]) * 3;
+    const base = @as(usize, joint_landmark[@backingInt(joint)]) * 3;
     return .{ landmarks[base], landmarks[base + 1], landmarks[base + 2] };
 }
 
@@ -153,7 +153,7 @@ test "every hand joint maps to an in-range landmark and reads its point" {
         landmarks[i * 3 + 2] = @floatFromInt(i * 3);
     }
     inline for (comptime std.meta.tags(Joint)) |joint| {
-        const idx = joint_landmark[@intFromEnum(joint)];
+        const idx = joint_landmark[@backingInt(joint)];
         try t.expect(idx < landmark_count);
         const p = jointPoint(&landmarks, joint);
         try t.expectEqual(@as(f32, @floatFromInt(idx)), p[0]);

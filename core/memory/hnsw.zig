@@ -401,7 +401,7 @@ pub fn save(index: *const Index, out: []u8) usize {
         .dim = @intCast(index.dim),
         .connections = @intCast(index.opts.connections),
         .max_elements = @intCast(index.opts.max_elements),
-        .metric = @intFromEnum(index.opts.metric),
+        .metric = @backingInt(index.opts.metric),
         .node_count = @intCast(nodes),
         .live_count = @intCast(index.live_count),
         .top_layer = index.top_layer,

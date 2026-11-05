@@ -150,7 +150,7 @@ pub fn enumerate(out: []CSurface) usize {
         // The screen index is the id: X has no stable display identifier of its
         // own, and a screen's index is what every later call takes.
         entry.id = i + 1;
-        entry.kind = @intFromEnum(Kind.display);
+        entry.kind = @backingInt(Kind.display);
         entry.logical_width = @floatFromInt(@max(width, 0));
         entry.logical_height = @floatFromInt(@max(height, 0));
         // X reports pixels, so the logical size is the pixel size and the scale is
@@ -266,7 +266,7 @@ const t = std.testing;
 test "a surface view borrows its title and carries its geometry" {
     var raw: CSurface = std.mem.zeroes(CSurface);
     raw.id = 1;
-    raw.kind = @intFromEnum(Kind.display);
+    raw.kind = @backingInt(Kind.display);
     raw.logical_width = 2560;
     raw.logical_height = 1440;
     raw.scale = 1;

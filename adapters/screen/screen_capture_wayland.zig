@@ -162,7 +162,7 @@ fn request() ?*Granted {
 
 fn selectSources(bus: *dbus.Bus, api: *dbus.Api, session: []const u8) bool {
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}", .{session}) catch return false;
+    const path = std.mem.printSentinel(&path_buf, "{s}", .{session}, 0) catch return false;
     var call = dbus.Call.init(api, portal_name, portal_path, screencast_iface, "SelectSources") catch return false;
     defer call.deinit();
     call.appendString(path);
@@ -194,7 +194,7 @@ fn firstCodeIsOk(api: *dbus.Api, msg: *anyopaque) bool {
 /// dictionary with the size the compositor chose.
 fn startStream(bus: *dbus.Bus, api: *dbus.Api, session: []const u8) ?u32 {
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}", .{session}) catch return null;
+    const path = std.mem.printSentinel(&path_buf, "{s}", .{session}, 0) catch return null;
     var call = dbus.Call.init(api, portal_name, portal_path, screencast_iface, "Start") catch return null;
     defer call.deinit();
     call.appendString(path);
@@ -270,7 +270,7 @@ pub fn enumerate(out: []CSurface) usize {
     // frame arrives, and zero reads as "not yet" rather than as a lie.
     var entry: CSurface = std.mem.zeroes(CSurface);
     entry.id = 1;
-    entry.kind = @intFromEnum(Kind.display);
+    entry.kind = @backingInt(Kind.display);
     entry.logical_width = @floatFromInt(g.width);
     entry.logical_height = @floatFromInt(g.height);
     entry.scale = 1;

@@ -2,7 +2,6 @@
 //! one process with every subsystem that needs no GPU surface brought up, used
 //! and torn down. A renderer needs a window, so the pixel paths stay with the
 //! conformance harness and everything here runs with no display.
-
 //! The scenario asserts its own preconditions. A model that will not load, or a
 //! subsystem answering with an unexpected status, fails the run rather than
 //! quietly shrinking what the gate covers, and the coverage it did reach is
@@ -331,8 +330,8 @@ fn round(gpa: std.mem.Allocator, io: std.Io, engine: *abi.Engine, out: *Coverage
         var found: u32 = 0;
         _ = abi.goss_engine_media_search(engine, &corpus, 128, 8, query.ptr, 4, &out_idx, &out_scores, &found);
 
-        const key = [_]u8{0xA5} ** 32;
-        const nonce = [_]u8{0x5A} ** 12;
+        const key: [32]u8 = @splat(0xA5);
+        const nonce: [12]u8 = @splat(0x5A);
         const plaintext = "a captured moment";
         const aad = "lifecycle";
         var sealed: [128]u8 = undefined;

@@ -46,7 +46,6 @@ pub const Verb = enum(u5) {
 /// pure function over pixels or samples the caller already holds, so a permission
 /// there would gate nothing, and a verb that gates nothing is the defect this list
 /// was audited to remove.
-
 /// Every verb's name, for a host showing a person what an agent asked for and an
 /// agent told which permission it is missing. A bitmask is not an explanation.
 pub fn verbName(verb: Verb) []const u8 {
@@ -72,7 +71,7 @@ pub fn verbName(verb: Verb) []const u8 {
 
 /// How many verbs this build knows, so a caller can walk them by index rather
 /// than hard-coding a count that goes stale.
-pub const verb_count: u32 = @typeInfo(Verb).@"enum".fields.len;
+pub const verb_count: u32 = @typeInfo(Verb).@"enum".field_names.len;
 
 /// A scope, small enough to pass by value and to cross the ABI as two words.
 pub const Scope = packed struct(u64) {
@@ -94,7 +93,7 @@ pub const Scope = packed struct(u64) {
     }
 
     pub fn allowsVerb(s: Scope, verb: Verb) bool {
-        return s.verbs & (@as(u32, 1) << @intFromEnum(verb)) != 0;
+        return s.verbs & (@as(u32, 1) << @backingInt(verb)) != 0;
     }
 
     /// The sections a caller asked for, narrowed to what it may have. A request
@@ -121,7 +120,7 @@ pub const Scope = packed struct(u64) {
     }
 
     pub fn withVerb(s: Scope, verb: Verb, allowed: bool) Scope {
-        const bit = @as(u32, 1) << @intFromEnum(verb);
+        const bit = @as(u32, 1) << @backingInt(verb);
         var out = s;
         out.verbs = if (allowed) s.verbs | bit else s.verbs & ~bit;
         return out;
@@ -138,7 +137,7 @@ fn bitFor(tag: snapshot.Tag) ?u32 {
     inline for (names, 0..) |name, i| {
         if (comptime std.mem.startsWith(u8, name, "_")) continue;
         if (!comptime @hasField(snapshot.Tag, name)) continue;
-        if (@intFromEnum(tag) == @intFromEnum(@field(snapshot.Tag, name))) return @as(u32, 1) << @intCast(i);
+        if (@backingInt(tag) == @backingInt(@field(snapshot.Tag, name))) return @as(u32, 1) << @intCast(i);
     }
     return null;
 }
@@ -193,8 +192,8 @@ test "a verb can be withheld on its own, and every verb has its own bit" {
 test "every section a scope can name is one the record carries" {
     // A tag with no bit is readable under no scope, so a newer engine's section
     // cannot be granted by an older one that does not know it.
-    try testing.expect(bitFor(@enumFromInt(9999)) == null);
-    try testing.expect(!Scope.all.allows(@enumFromInt(9999)));
+    try testing.expect(bitFor(@fromBackingInt(@intCast(9999))) == null);
+    try testing.expect(!Scope.all.allows(@fromBackingInt(@intCast(9999))));
     // And every tag this build declares does have one.
     inline for (comptime std.meta.fieldNames(snapshot.Tag)) |name| {
         if (comptime std.mem.eql(u8, name, "_")) continue;

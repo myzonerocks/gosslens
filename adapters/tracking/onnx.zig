@@ -53,7 +53,7 @@ const Reader = struct {
     fn readTag(r: *Reader) Error!Tag {
         const raw = try r.readVarint();
         const field = std.math.cast(u32, raw >> 3) orelse return error.ModelRejected;
-        return .{ .field = field, .wire = @enumFromInt(@as(u3, @truncate(raw))) };
+        return .{ .field = field, .wire = @fromBackingInt(@intCast(@as(u3, @truncate(raw)))) };
     }
 
     fn readLen(r: *Reader) Error![]const u8 {
@@ -745,7 +745,7 @@ fn parseInitializerTensor(arena: std.mem.Allocator, bytes: []const u8) Error!Ten
             } else try r.skip(tag.wire),
             2 => if (tag.wire == .varint) {
                 const raw_dtype = std.math.cast(i32, try r.readVarint()) orelse return error.ModelRejected;
-                dtype = @enumFromInt(raw_dtype);
+                dtype = @fromBackingInt(@intCast(raw_dtype));
             } else try r.skip(tag.wire),
             // TensorProto field 5 is int32_data and 6 is string_data; the reader
             // had them one apart, so a quantized weight written there was skipped
@@ -2958,7 +2958,7 @@ test "onnx reduces along declared axes and keeps or drops the axis as asked" {
     const a = arena.allocator();
 
     const spec: GraphSpec = .{
-        .nodes = &.{nodeProto(a, .{ .op = "ReduceMean", .inputs = &.{"x"}, .outputs = &.{"y"}, .attrs = &.{.{ .name = "axes", .ints = &.{1} }, .{ .name = "keepdims", .i = 0 }} })},
+        .nodes = &.{nodeProto(a, .{ .op = "ReduceMean", .inputs = &.{"x"}, .outputs = &.{"y"}, .attrs = &.{ .{ .name = "axes", .ints = &.{1} }, .{ .name = "keepdims", .i = 0 } } })},
         .inits = &.{},
         .inputs = &.{valueInfo(a, "x", &.{ 2, 3 })},
         .outputs = &.{valueInfo(a, "y", &.{2})},
@@ -3066,7 +3066,7 @@ test "onnx topk and argmax agree on the winner and argmax is an index" {
     try testing.expectEqualSlices(f32, &.{ 1, 3 }, try engine.outputFloats(1));
 
     const arg: GraphSpec = .{
-        .nodes = &.{nodeProto(a, .{ .op = "ArgMax", .inputs = &.{"x"}, .outputs = &.{"y"}, .attrs = &.{.{ .name = "axis", .i = 1 }, .{ .name = "keepdims", .i = 0 }} })},
+        .nodes = &.{nodeProto(a, .{ .op = "ArgMax", .inputs = &.{"x"}, .outputs = &.{"y"}, .attrs = &.{ .{ .name = "axis", .i = 1 }, .{ .name = "keepdims", .i = 0 } } })},
         .inits = &.{},
         .inputs = &.{valueInfo(a, "x", &.{ 1, 5 })},
         .outputs = &.{valueInfo(a, "y", &.{1})},
@@ -3369,8 +3369,8 @@ test "onnx decodes a detector head into suppressed boxes without allocating" {
     // Two boxes on the same object and one elsewhere, in centre-size form with
     // an objectness column and two classes.
     const raw = [_]f32{
-        0.5, 0.5, 0.2, 0.2, 0.9, 0.8, 0.1,
-        0.5, 0.5, 0.2, 0.2, 0.8, 0.7, 0.1,
+        0.5, 0.5, 0.2, 0.2, 0.9,  0.8, 0.1,
+        0.5, 0.5, 0.2, 0.2, 0.8,  0.7, 0.1,
         0.1, 0.1, 0.1, 0.1, 0.95, 0.1, 0.9,
     };
     var scratch: [8]detect.Scratch = undefined;

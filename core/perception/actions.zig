@@ -376,7 +376,8 @@ test "text is copied, so an annotation never points at a freed string" {
 
 test "the text arena is reclaimed rather than run out by updates" {
     var s: TestStore = .{};
-    const long = "a" ** 200;
+    const long_text: [200]u8 = @splat('a');
+    const long: []const u8 = &long_text;
     const label: Annotation = .{ .id = 1, .kind = .label, .space = .screen, .text = long };
     try s.put(label, 0, 0);
     // Updating the same label many times must not exhaust a 256-byte arena.

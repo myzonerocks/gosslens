@@ -101,7 +101,7 @@ pub fn destroy(gpa: std.mem.Allocator, beauty: *Beauty) void {
 }
 
 pub fn set(beauty: *Beauty, effect: Effect, value: f32) void {
-    goss_beauty_set(beauty.handle, @intFromEnum(effect), std.math.clamp(value, 0.0, 1.0));
+    goss_beauty_set(beauty.handle, @backingInt(effect), std.math.clamp(value, 0.0, 1.0));
 }
 
 /// Fills contour from a tracked face result's landmarks, or returns
