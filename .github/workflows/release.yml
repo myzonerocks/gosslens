@@ -426,7 +426,10 @@ jobs:
             # The release token opens it while its own permissions allow; the job
             # token is the fallback, so a token that loses pull-request write
             # strands a branch instead of the pin.
-            if gh pr view "${branch}" --json number >/dev/null 2>&1; then
+            # Scoped to open ones: `gh pr view` matches a merged request of the
+            # same branch name from the release before, and skipping on that
+            # strands the pin on a branch nobody is watching.
+            if [ -n "$(gh pr list --head "${branch}" --state open --json number --jq '.[].number')" ]; then
               echo "pin PR already open for ${branch}"
             elif GH_TOKEN="${RELEASE_PAT}" gh pr create --base main --head "${branch}" --title "${title}" --body "${body}"; then
               echo "pin PR opened by the release token"
