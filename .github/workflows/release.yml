@@ -349,9 +349,15 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      # The action's default package list still asks for "tools", which current
+      # sdkmanager cannot find, so it exits 1 before gradle ever runs. Name what
+      # the library actually compiles against instead.
       - name: set up the android sdk for gradle
         if: ${{ env.HAS_MAVEN == 'true' }}
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-36 platforms;android-37
+          log-accepted-android-sdk-licenses: false
       - name: publish to maven central
         if: ${{ env.HAS_MAVEN == 'true' }}
         env:
