@@ -72,12 +72,14 @@ const Fetch = struct {
             return;
         }
         std.debug.print("fetch-models: fetching {s}\n", .{model.url});
-        // A dropped connection is the common case over twenty-odd models, and an HTTP/2
-        // PROTOCOL_ERROR is not one of the transient codes curl retries on its own.
+        // The host drops connections and answers 504 often enough over twenty-odd
+        // models to lose a whole lane, and neither is a code curl retries on its
+        // own, so retry everything and wait long enough to outlast a short outage.
         const res = try std.process.run(f.arena, f.io, .{ .argv = &.{
             "curl",               "-fsSL",
-            "--retry",            "3",
-            "--retry-delay",      "2",
+            "--retry",            "5",
+            "--retry-delay",      "5",
+            "--retry-max-time",   "180",
             "--retry-all-errors", model.url,
             "-o",                 path,
         } });
