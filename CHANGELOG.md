@@ -5,6 +5,10 @@ A release moves that section under its tag with the date, and the release notes 
 
 ## Unreleased
 
+- The kotlin demo app builds. It asked for an api level Google's repository does not carry, so no
+  machine could install the platform it named and nothing outside a developer's own tree had ever
+  compiled it. It compiles against the same level the library does now.
+
 ## v0.14.0 (2026-11-05)
 
 - The pinned toolchain is Zig 0.17.1. Building the engine, or anything that links it, needs that
