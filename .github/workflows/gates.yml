@@ -70,6 +70,16 @@ jobs:
           key: zigcache-${{ runner.os }}-${{ hashFiles('.zigversion') }}-${{ github.sha }}
           restore-keys: |
             zigcache-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
+      # One compiler process peaks near 15 GB on these targets, which is the
+      # whole runner; the build finished with 103 MB to spare and all of the
+      # stock swap used, so give it somewhere to go before it starts.
+      - name: swap headroom
+        run: |
+          sudo fallocate -l 12G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -m
       - name: gate suite
         run: nix develop -c zig build ci
         env:
@@ -228,6 +238,16 @@ jobs:
           restore-keys: |
             zigcache-android-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
       # See cold.yml: one job per core is what the reaper kills.
+      # One compiler process peaks near 15 GB on these targets, which is the
+      # whole runner; the build finished with 103 MB to spare and all of the
+      # stock swap used, so give it somewhere to go before it starts.
+      - name: swap headroom
+        run: |
+          sudo fallocate -l 12G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -m
       - name: android library
         run: |
           ( while :; do
@@ -297,6 +317,16 @@ jobs:
           restore-keys: |
             zigcache-lens-shaders-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
       # See cold.yml: concurrent test binaries, each its own zig process.
+      # One compiler process peaks near 15 GB on these targets, which is the
+      # whole runner; the build finished with 103 MB to spare and all of the
+      # stock swap used, so give it somewhere to go before it starts.
+      - name: swap headroom
+        run: |
+          sudo fallocate -l 12G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -m
       - name: lens validator shader tests
         run: |
           ( while :; do

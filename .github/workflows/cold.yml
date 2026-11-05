@@ -37,6 +37,16 @@ jobs:
         run: zig build vendor-sync
       - name: fetch models
         run: zig build fetch-models
+      # One compiler process peaks near 15 GB on these targets, which is the
+      # whole runner; the build finished with 103 MB to spare and all of the
+      # stock swap used, so give it somewhere to go before it starts.
+      - name: swap headroom
+        run: |
+          sudo fallocate -l 12G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -m
       - name: gate suite, cold
         run: |
           ( while :; do
@@ -104,6 +114,16 @@ jobs:
       # One job per core put the 16 GB runner into the kernel's reaper on every
       # attempt, which arrives as a bare "shutdown signal"; three ABIs of the
       # vendored C++ do not fit four at a time.
+      # One compiler process peaks near 15 GB on these targets, which is the
+      # whole runner; the build finished with 103 MB to spare and all of the
+      # stock swap used, so give it somewhere to go before it starts.
+      - name: swap headroom
+        run: |
+          sudo fallocate -l 12G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -m
       - name: android library
         run: |
           ( while :; do
@@ -144,6 +164,16 @@ jobs:
         run: zig build vendor-sync
       # Each test binary is its own zig process with its own thread pool, and
       # four of them together is more memory than the runner has.
+      # One compiler process peaks near 15 GB on these targets, which is the
+      # whole runner; the build finished with 103 MB to spare and all of the
+      # stock swap used, so give it somewhere to go before it starts.
+      - name: swap headroom
+        run: |
+          sudo fallocate -l 12G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -m
       - name: lens validator shader tests
         run: |
           ( while :; do
