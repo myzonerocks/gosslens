@@ -72,7 +72,15 @@ const Fetch = struct {
             return;
         }
         std.debug.print("fetch-models: fetching {s}\n", .{model.url});
-        const res = try std.process.run(f.arena, f.io, .{ .argv = &.{ "curl", "-fsSL", model.url, "-o", path } });
+        // A dropped connection is the common case over twenty-odd models, and an HTTP/2
+        // PROTOCOL_ERROR is not one of the transient codes curl retries on its own.
+        const res = try std.process.run(f.arena, f.io, .{ .argv = &.{
+            "curl",               "-fsSL",
+            "--retry",            "3",
+            "--retry-delay",      "2",
+            "--retry-all-errors", model.url,
+            "-o",                 path,
+        } });
         switch (res.term) {
             .exited => |code| if (code != 0) {
                 f.fail("{s}: download failed: {s}", .{ model.name, res.stderr });
