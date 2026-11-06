@@ -376,7 +376,7 @@ jobs:
       # name the platform the library and its demo module compile against.
       - uses: android-actions/setup-android@v3
         with:
-          packages: platform-tools platforms;android-36
+          packages: platform-tools platforms;android-36 platforms;android-37.0
           log-accepted-android-sdk-licenses: false
       - uses: actions/cache@v4
         with:
