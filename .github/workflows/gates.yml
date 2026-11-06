@@ -384,8 +384,20 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
           key: gradle-${{ hashFiles('sdk/kotlin/**/*.gradle.kts', 'sdk/kotlin/gradle/wrapper/gradle-wrapper.properties') }}
-      # assemble covers the demo app as well as the library, which is where the
-      # unbuildable compileSdk was hiding. The .so is only packaged, never read.
+      # ktlint's gradle plugin waits for the standalone kotlin plugin, which
+      # cannot be applied beside the one AGP registers, so it only ever reached
+      # the build scripts. The cli reads the sources, by digest.
+      - name: ktlint the kotlin sources
+        run: |
+          set -euo pipefail
+          jar="$RUNNER_TEMP/ktlint.jar"
+          curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+            "https://repo1.maven.org/maven2/com/pinterest/ktlint/ktlint-cli/1.8.0/ktlint-cli-1.8.0-all.jar" -o "$jar"
+          echo "369ad2b789f95a011f807e1fcb690ccef80bd7cd014fd139e73ae82dcc0baeab  $jar" | sha256sum -c -
+          cd sdk/kotlin
+          java -jar "$jar" --baseline=ktlint-baseline.xml "src/**/*.kt" "demo/src/**/*.kt"
+      # assemble covers the demo app too, which is where the unbuildable
+      # compileSdk was hiding. The .so is only packaged, never read.
       - name: lint, test and build the kotlin sdk
         run: cd sdk/kotlin && ./gradlew --no-daemon ktlintCheck test assemble
 
