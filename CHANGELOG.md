@@ -5,9 +5,14 @@ A release moves that section under its tag with the date, and the release notes 
 
 ## Unreleased
 
-- The kotlin demo app builds. It asked for an api level Google's repository does not carry, so no
-  machine could install the platform it named and nothing outside a developer's own tree had ever
-  compiled it. It compiles against the same level the library does now.
+- The kotlin demo app builds where it is not a developer's own machine. Android 17 numbers its
+  platform with a minor version, so the package is android-37.0 and the name without it resolves
+  to nothing; every machine that had not already installed the platform asked for the wrong one.
+
+- The kotlin sources are read by a linter and answer it cleanly. The one wired up reached only the
+  build scripts, because it waits for a plugin that cannot be applied beside the one the android
+  plugin brings. Three files now carry the name of the class inside them, and the doc comments
+  that had come adrift from the event, report and lens calls sit on them again.
 
 ## v0.14.0 (2026-11-05)
 

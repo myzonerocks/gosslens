@@ -13,7 +13,9 @@ import com.gosslens.GossSession
 /** Draws the latest tracking result over the preview. Landmarks arrive in
  * sensor pixels; the view rotates them by the frame's quarter turns and
  * scales into its own bounds, the same mapping the preview quad uses. */
-class FaceOverlayView(context: Context) : View(context) {
+class FaceOverlayView(
+    context: Context,
+) : View(context) {
     private val result = GossFaceResult()
     private var hasResult = false
     private var lastSerial = 0L
@@ -43,11 +45,12 @@ class FaceOverlayView(context: Context) : View(context) {
     private var rotationDegrees = 0
     private var mirrored = false
 
-    private val pointPaint = Paint().apply {
-        color = Color.WHITE
-        strokeWidth = 3f
-        strokeCap = Paint.Cap.ROUND
-    }
+    private val pointPaint =
+        Paint().apply {
+            color = Color.WHITE
+            strokeWidth = 3f
+            strokeCap = Paint.Cap.ROUND
+        }
     private val points = FloatArray(com.gosslens.Gosslens.FACE_LANDMARK_COUNT * 2)
     private val handPoints = FloatArray(com.gosslens.Gosslens.HAND_MAX * com.gosslens.Gosslens.HAND_LANDMARK_COUNT * 2)
     private val posePoints = FloatArray(com.gosslens.Gosslens.POSE_LANDMARK_COUNT * 2)
@@ -56,13 +59,19 @@ class FaceOverlayView(context: Context) : View(context) {
     // landmarks, so the demo exercises the face-region readout.
     private var noseRegion: FloatArray? = null
     private val regionPoint = FloatArray(2)
-    private val regionPaint = Paint().apply {
-        color = Color.CYAN
-        strokeWidth = 12f
-        strokeCap = Paint.Cap.ROUND
-    }
+    private val regionPaint =
+        Paint().apply {
+            color = Color.CYAN
+            strokeWidth = 12f
+            strokeCap = Paint.Cap.ROUND
+        }
 
-    fun frameGeometry(width: Int, height: Int, rotation: Int, mirror: Boolean) {
+    fun frameGeometry(
+        width: Int,
+        height: Int,
+        rotation: Int,
+        mirror: Boolean,
+    ) {
         frameWidth = width
         frameHeight = height
         rotationDegrees = rotation
@@ -89,14 +98,37 @@ class FaceOverlayView(context: Context) : View(context) {
         if (fresh) postInvalidateOnAnimation()
     }
 
-    private fun mapPoint(x: Float, y: Float, quarterTurns: Int, scaleX: Float, scaleY: Float, out: FloatArray, write: Int) {
+    private fun mapPoint(
+        x: Float,
+        y: Float,
+        quarterTurns: Int,
+        scaleX: Float,
+        scaleY: Float,
+        out: FloatArray,
+        write: Int,
+    ) {
         val rotatedX: Float
         val rotatedY: Float
         when (quarterTurns) {
-            1 -> { rotatedX = frameHeight - y; rotatedY = x }
-            2 -> { rotatedX = frameWidth - x; rotatedY = frameHeight - y }
-            3 -> { rotatedX = y; rotatedY = frameWidth - x }
-            else -> { rotatedX = x; rotatedY = y }
+            1 -> {
+                rotatedX = frameHeight - y
+                rotatedY = x
+            }
+
+            2 -> {
+                rotatedX = frameWidth - x
+                rotatedY = frameHeight - y
+            }
+
+            3 -> {
+                rotatedX = y
+                rotatedY = frameWidth - x
+            }
+
+            else -> {
+                rotatedX = x
+                rotatedY = y
+            }
         }
         // Landmarks are raw sensor space; a mirrored preview flips its
         // horizontal axis, so the overlay flips with it.

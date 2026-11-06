@@ -12,7 +12,9 @@ import java.nio.ByteOrder
  * only, so [pump] runs in the frame loop and fills a ring a writer
  * thread drains into a streaming [AudioTrack]; underrun plays silence.
  */
-class GossAudioOutput(private val session: GossSession) {
+class GossAudioOutput(
+    private val session: GossSession,
+) {
     /** The state the writer thread and the drop safety net share. It holds
      * no reference to the wrapper: a running thread is a GC root, so a
      * thread capturing the wrapper would pin it (and its session) forever
@@ -25,6 +27,7 @@ class GossAudioOutput(private val session: GossSession) {
         val chunk = ShortArray(CHUNK_FRAMES)
         var track: AudioTrack? = null
         var writer: Thread? = null
+
         @Volatile var running = false
 
         fun stop() {
@@ -40,6 +43,7 @@ class GossAudioOutput(private val session: GossSession) {
     private val playback = Playback()
     private val pullBuffer: ByteBuffer =
         ByteBuffer.allocateDirect(PULL_FRAMES * 2).order(ByteOrder.nativeOrder())
+
     // One view over the pull buffer, created once so pump() allocates
     // nothing per frame.
     private val pullShorts = pullBuffer.asShortBuffer()
@@ -49,54 +53,65 @@ class GossAudioOutput(private val session: GossSession) {
     private val cleanable: Any? =
         if (Build.VERSION.SDK_INT >= 33) NativeCleaner.register(this, PlaybackStopper(playback)) else null
 
-    private class PlaybackStopper(private val playback: Playback) : Runnable {
+    private class PlaybackStopper(
+        private val playback: Playback,
+    ) : Runnable {
         override fun run() = playback.stop()
     }
 
     /** Starts the platform track and its writer thread. */
     fun start() {
         if (playback.track != null) return
-        val minBytes = AudioTrack.getMinBufferSize(
-            SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT,
-        )
-        val t = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build(),
+        val minBytes =
+            AudioTrack.getMinBufferSize(
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_OUT_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
             )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(SAMPLE_RATE)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                    .build(),
-            )
-            .setBufferSizeInBytes(maxOf(minBytes, CHUNK_FRAMES * 4))
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .build()
+        val t =
+            AudioTrack
+                .Builder()
+                .setAudioAttributes(
+                    AudioAttributes
+                        .Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build(),
+                ).setAudioFormat(
+                    AudioFormat
+                        .Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(SAMPLE_RATE)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build(),
+                ).setBufferSizeInBytes(maxOf(minBytes, CHUNK_FRAMES * 4))
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
         t.play()
         val p = playback
         p.track = t
         p.running = true
-        p.writer = Thread {
-            while (p.running) {
-                var filled = 0
-                synchronized(p.lock) {
-                    while (filled < p.chunk.size && p.readIndex != p.writeIndex) {
-                        p.chunk[filled] = p.ring[p.readIndex]
-                        p.readIndex = (p.readIndex + 1) % RING_FRAMES
+        p.writer =
+            Thread {
+                while (p.running) {
+                    var filled = 0
+                    synchronized(p.lock) {
+                        while (filled < p.chunk.size && p.readIndex != p.writeIndex) {
+                            p.chunk[filled] = p.ring[p.readIndex]
+                            p.readIndex = (p.readIndex + 1) % RING_FRAMES
+                            filled += 1
+                        }
+                    }
+                    while (filled < p.chunk.size) {
+                        p.chunk[filled] = 0
                         filled += 1
                     }
+                    t.write(p.chunk, 0, p.chunk.size)
                 }
-                while (filled < p.chunk.size) {
-                    p.chunk[filled] = 0
-                    filled += 1
-                }
-                t.write(p.chunk, 0, p.chunk.size)
+            }.also {
+                it.name = "goss-audio-out"
+                it.start()
             }
-        }.also { it.name = "goss-audio-out"; it.start() }
     }
 
     /**

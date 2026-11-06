@@ -24,6 +24,7 @@ jobs:
     outputs:
       engine: ${{ steps.areas.outputs.engine }}
       ts: ${{ steps.areas.outputs.ts }}
+      kotlin: ${{ steps.areas.outputs.kotlin }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,7 +33,7 @@ jobs:
         id: areas
         run: |
           set -euo pipefail
-          all() { printf 'engine=true\nts=true\n' >> "$GITHUB_OUTPUT"; }
+          all() { printf 'engine=true\nts=true\nkotlin=true\n' >> "$GITHUB_OUTPUT"; }
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             base="${{ github.event.pull_request.base.sha }}"
           else
@@ -46,12 +47,14 @@ jobs:
           echo "changed:"; echo "$files" | sed 's/^/  /'
           # A workflow edit reruns everything: the lanes themselves changed.
           if echo "$files" | grep -qE '^\.github/workflows/'; then echo "workflows touched; every gate runs"; all; exit 0; fi
-          engine=false; ts=false
+          engine=false; ts=false; kotlin=false
           if echo "$files" | grep -qE '^(core|adapters|lenses|include|tools|third_party|nix|harness)/|^(build\.zig|build\.zig\.zon|\.zigversion|flake\.nix|flake\.lock)$'; then engine=true; fi
           if echo "$files" | grep -qE '^sdk/ts/'; then ts=true; fi
+          if echo "$files" | grep -qE '^sdk/kotlin/'; then kotlin=true; fi
           echo "engine=$engine" >> "$GITHUB_OUTPUT"
           echo "ts=$ts" >> "$GITHUB_OUTPUT"
-          echo "engine=$engine ts=$ts"
+          echo "kotlin=$kotlin" >> "$GITHUB_OUTPUT"
+          echo "engine=$engine ts=$ts kotlin=$kotlin"
 
   gates:
     runs-on: ubuntu-latest
@@ -354,6 +357,49 @@ jobs:
       - name: test
         run: bun test
         working-directory: sdk/ts
+
+  # Nothing built the kotlin SDK until a release did, so a module pinned to an
+  # api level that does not exist reached a publish before anyone noticed. The
+  # engine counts too: these unit tests assert the values the C ABI freezes.
+  kotlin:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.kotlin == 'true' || needs.changes.outputs.engine == 'true'
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      # The action's own default list asks for a package sdkmanager dropped, so
+      # name the platform the library and its demo module compile against.
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-36 platforms;android-37.0
+          log-accepted-android-sdk-licenses: false
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('sdk/kotlin/**/*.gradle.kts', 'sdk/kotlin/gradle/wrapper/gradle-wrapper.properties') }}
+      # ktlint's gradle plugin waits for the standalone kotlin plugin, which
+      # cannot be applied beside the one AGP registers, so it only ever reached
+      # the build scripts. The cli reads the sources, by digest.
+      - name: ktlint the kotlin sources
+        run: |
+          set -euo pipefail
+          jar="$RUNNER_TEMP/ktlint.jar"
+          curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+            "https://repo1.maven.org/maven2/com/pinterest/ktlint/ktlint-cli/1.8.0/ktlint-cli-1.8.0-all.jar" -o "$jar"
+          echo "369ad2b789f95a011f807e1fcb690ccef80bd7cd014fd139e73ae82dcc0baeab  $jar" | sha256sum -c -
+          cd sdk/kotlin
+          java -jar "$jar" "src/**/*.kt" "demo/src/**/*.kt"
+      # assemble covers the demo app too, which is where the unbuildable
+      # compileSdk was hiding. The .so is only packaged, never read.
+      - name: lint, test and build the kotlin sdk
+        run: cd sdk/kotlin && ./gradlew --no-daemon ktlintCheck test assemble
 
   lens-shaders:
     runs-on: ubuntu-latest

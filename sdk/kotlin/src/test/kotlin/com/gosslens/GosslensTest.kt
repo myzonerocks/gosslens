@@ -58,12 +58,20 @@ class GosslensTest {
 
     @Test
     fun `a node reason decodes in the order the ABI numbers it`() {
-        val expected = listOf(
-            "NONE", "OUT_OF_MEMORY", "ASSET_MISSING", "ASSET_MALFORMED",
-            "ASSET_TOO_LARGE", "SHADER_MISSING", "SHADER_LINK_FAILED",
-            "MODEL_REJECTED", "MODEL_UNSUPPORTED", "CAPABILITY_UNAVAILABLE",
-            "CONSTRAINT_FAILED",
-        )
+        val expected =
+            listOf(
+                "NONE",
+                "OUT_OF_MEMORY",
+                "ASSET_MISSING",
+                "ASSET_MALFORMED",
+                "ASSET_TOO_LARGE",
+                "SHADER_MISSING",
+                "SHADER_LINK_FAILED",
+                "MODEL_REJECTED",
+                "MODEL_UNSUPPORTED",
+                "CAPABILITY_UNAVAILABLE",
+                "CONSTRAINT_FAILED",
+            )
         assertEquals(expected, GossSession.NodeReason.entries.map { it.name })
     }
 

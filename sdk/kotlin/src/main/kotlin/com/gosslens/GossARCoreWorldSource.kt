@@ -12,7 +12,9 @@ import java.nio.ByteOrder
  * projection, the tracked planes, the anchors and the light, one submit per frame the host hands
  * over. ARCore is compile-only here, so an app that never wears a world lens carries none of it.
  */
-class GossARCoreWorldSource(private val session: GossSession) {
+class GossARCoreWorldSource(
+    private val session: GossSession,
+) {
     private val stateBuffer = ByteBuffer.allocateDirect(STATE_BYTES).order(ByteOrder.nativeOrder())
     private val lightBuffer = ByteBuffer.allocateDirect(LIGHT_BYTES).order(ByteOrder.nativeOrder())
     private var planesBuffer = ByteBuffer.allocateDirect(PLANE_BYTES * 8).order(ByteOrder.nativeOrder())
@@ -70,17 +72,19 @@ class GossARCoreWorldSource(private val session: GossSession) {
         session.submitWorld(stateBuffer, planesBuffer, 0, anchorsBuffer, 0, lightBuffer)
     }
 
-    private fun trackingState(state: TrackingState): Int = when (state) {
-        TrackingState.TRACKING -> 2
-        TrackingState.PAUSED -> 3
-        TrackingState.STOPPED -> 0
-    }
+    private fun trackingState(state: TrackingState): Int =
+        when (state) {
+            TrackingState.TRACKING -> 2
+            TrackingState.PAUSED -> 3
+            TrackingState.STOPPED -> 0
+        }
 
-    private fun planeClass(type: Plane.Type): Int = when (type) {
-        Plane.Type.HORIZONTAL_UPWARD_FACING -> 1
-        Plane.Type.VERTICAL -> 2
-        Plane.Type.HORIZONTAL_DOWNWARD_FACING -> 3
-    }
+    private fun planeClass(type: Plane.Type): Int =
+        when (type) {
+            Plane.Type.HORIZONTAL_UPWARD_FACING -> 1
+            Plane.Type.VERTICAL -> 2
+            Plane.Type.HORIZONTAL_DOWNWARD_FACING -> 3
+        }
 
     private companion object {
         /** The ABI's world structs: the state, a plane, an anchor and the light, in bytes. */

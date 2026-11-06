@@ -1,6 +1,6 @@
 {
   "name": "@myzonerocks/gosslens",
-  "version": "0.11.1",
+  "version": "0.14.0",
   "description": "Web SDK for gosslens, real-time visual plumbing for agents, over the wasm core.",
   "license": "Apache-2.0",
   "repository": {
