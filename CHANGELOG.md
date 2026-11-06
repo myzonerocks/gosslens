@@ -9,6 +9,11 @@ A release moves that section under its tag with the date, and the release notes 
   machine could install the platform it named and nothing outside a developer's own tree had ever
   compiled it. It compiles against the same level the library does now.
 
+- The kotlin sources are read by a linter. The one wired up answered only for the build scripts,
+  because it waits for a plugin that cannot be applied beside the one the android plugin brings,
+  so a deliberate violation passed it. What the sources already carry is recorded, and anything
+  new is refused.
+
 ## v0.14.0 (2026-11-05)
 
 - The pinned toolchain is Zig 0.17.1. Building the engine, or anything that links it, needs that
