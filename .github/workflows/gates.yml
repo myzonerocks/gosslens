@@ -395,7 +395,7 @@ jobs:
             "https://repo1.maven.org/maven2/com/pinterest/ktlint/ktlint-cli/1.8.0/ktlint-cli-1.8.0-all.jar" -o "$jar"
           echo "369ad2b789f95a011f807e1fcb690ccef80bd7cd014fd139e73ae82dcc0baeab  $jar" | sha256sum -c -
           cd sdk/kotlin
-          java -jar "$jar" --baseline=ktlint-baseline.xml "src/**/*.kt" "demo/src/**/*.kt"
+          java -jar "$jar" "src/**/*.kt" "demo/src/**/*.kt"
       # assemble covers the demo app too, which is where the unbuildable
       # compileSdk was hiding. The .so is only packaged, never read.
       - name: lint, test and build the kotlin sdk

@@ -9,9 +9,16 @@ import java.nio.ByteOrder
 // The Kotlin face of the goss_ ABI. The native names mirror the C surface one
 // to one and carry no logic; GossSession and GossEngine below are the idiomatic
 // wrappers the app consumes.
+
 /** The engine's thermal states, the same four the other SDKs name. */
-enum class Thermal(val raw: Int) {
-    NOMINAL(0), FAIR(1), SERIOUS(2), CRITICAL(3);
+enum class Thermal(
+    val raw: Int,
+) {
+    NOMINAL(0),
+    FAIR(1),
+    SERIOUS(2),
+    CRITICAL(3),
+    ;
 
     companion object {
         fun from(raw: Int): Thermal = entries.firstOrNull { it.raw == raw } ?: NOMINAL
@@ -19,8 +26,14 @@ enum class Thermal(val raw: Int) {
 }
 
 /** What interrupted a recording, as the host saw it. */
-enum class Interruption(val raw: Int) {
-    PAUSE(0), CAMERA_LOST(1), AUDIO_ROUTE(2), BACKGROUNDED(3), THERMAL(4);
+enum class Interruption(
+    val raw: Int,
+) {
+    PAUSE(0),
+    CAMERA_LOST(1),
+    AUDIO_ROUTE(2),
+    BACKGROUNDED(3),
+    THERMAL(4),
 }
 
 /** What this build's media backend declares it encodes. */
@@ -86,7 +99,10 @@ data class GossEvent(
 )
 
 /** A drained batch, with what was missed since the last drain. */
-data class EventBatch(val events: List<GossEvent>, val dropped: Long)
+data class EventBatch(
+    val events: List<GossEvent>,
+    val dropped: Long,
+)
 
 /** What an opened clip is and where it is. */
 data class ClipInfo(
@@ -109,8 +125,15 @@ data class RecordingReport(
 )
 
 /** The rungs of the degradation ladder, top to bottom. */
-enum class DegradeLevel(val raw: Int) {
-    FULL(0), REDUCED_ML_CADENCE(1), SEGMENTATION_OFF(2), BEAUTY_SIMPLIFIED(3), PASSTHROUGH(4);
+enum class DegradeLevel(
+    val raw: Int,
+) {
+    FULL(0),
+    REDUCED_ML_CADENCE(1),
+    SEGMENTATION_OFF(2),
+    BEAUTY_SIMPLIFIED(3),
+    PASSTHROUGH(4),
+    ;
 
     companion object {
         /** An unknown rung reads as passthrough: the conservative one to assume. */
@@ -129,7 +152,10 @@ object GossFlags {
 
     /** Quarter turns above the shift, with the mirror bit beside them. */
     @JvmStatic
-    fun flagsFor(rotationDegrees: Int, mirrored: Boolean): Int {
+    fun flagsFor(
+        rotationDegrees: Int,
+        mirrored: Boolean,
+    ): Int {
         val quarterTurns = ((rotationDegrees % 360) / 90) and 0x3
         var flags = quarterTurns shl ROTATION_SHIFT
         if (mirrored) flags = flags or FLAG_MIRROR
@@ -165,125 +191,565 @@ object Gosslens {
     }
 
     internal external fun nativeAbiVersion(): Int
+
     internal external fun nativeAbiCheck(callerVersion: Int): Int
-    internal external fun nativeLensCapabilitiesMissing(manifestBuffer: ByteBuffer, manifestLen: Int): Long
+
+    internal external fun nativeLensCapabilitiesMissing(
+        manifestBuffer: ByteBuffer,
+        manifestLen: Int,
+    ): Long
+
     internal external fun nativeCapabilities(): Long
-    internal external fun nativeEngineCreate(texturePoolCapacity: Int, stagingPoolCapacity: Int): Long
+
+    internal external fun nativeEngineCreate(
+        texturePoolCapacity: Int,
+        stagingPoolCapacity: Int,
+    ): Long
+
     internal external fun nativeEngineDestroy(engine: Long)
-    internal external fun nativeInitRenderer(engine: Long, surface: Surface, width: Int, height: Int): Int
-    internal external fun nativeResize(engine: Long, width: Int, height: Int)
-    internal external fun nativeRequestScreenshot(engine: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
-    internal external fun nativeCapturePhoto(engine: Long, session: Long, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
-    internal external fun nativeCaptureLiveFrame(engine: Long, session: Long, format: Int, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
-    internal external fun nativeCaptureStill(engine: Long, session: Long, width: Int, height: Int, supersample: Int, format: Int, quality: Int, colorSpace: Int, bitDepth: Int, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
-    internal external fun nativeRecordingStart(engine: Long, session: Long, pathBuffer: ByteBuffer, pathLen: Int, width: Int, height: Int, bitrate: Int, codec: Int, realtime: Int): Int
+
+    internal external fun nativeInitRenderer(
+        engine: Long,
+        surface: Surface,
+        width: Int,
+        height: Int,
+    ): Int
+
+    internal external fun nativeResize(
+        engine: Long,
+        width: Int,
+        height: Int,
+    )
+
+    internal external fun nativeRequestScreenshot(
+        engine: Long,
+        pathBuffer: ByteBuffer,
+        pathLen: Int,
+    ): Int
+
+    internal external fun nativeCapturePhoto(
+        engine: Long,
+        session: Long,
+        dataBuffer: ByteBuffer,
+        dataCapacity: Long,
+        infoBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeCaptureLiveFrame(
+        engine: Long,
+        session: Long,
+        format: Int,
+        dataBuffer: ByteBuffer,
+        dataCapacity: Long,
+        infoBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeCaptureStill(
+        engine: Long,
+        session: Long,
+        width: Int,
+        height: Int,
+        supersample: Int,
+        format: Int,
+        quality: Int,
+        colorSpace: Int,
+        bitDepth: Int,
+        dataBuffer: ByteBuffer,
+        dataCapacity: Long,
+        infoBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeRecordingStart(
+        engine: Long,
+        session: Long,
+        pathBuffer: ByteBuffer,
+        pathLen: Int,
+        width: Int,
+        height: Int,
+        bitrate: Int,
+        codec: Int,
+        realtime: Int,
+    ): Int
+
     internal external fun nativeRecordingStop(engine: Long): Int
-    internal external fun nativeOpenClip(session: Long, path: ByteBuffer, pathLen: Int): Int
-    internal external fun nativeClipSubmitFrame(session: Long, clip: Int, timestampUs: Long): Int
-    internal external fun nativeClipSeek(session: Long, clip: Int, targetUs: Long): Int
-    internal external fun nativeClipInfo(session: Long, clip: Int, out: ByteBuffer): Int
-    internal external fun nativeCloseClip(session: Long, clip: Int): Int
-    internal external fun nativeClipStep(session: Long, clip: Int, frames: Int): Int
-    internal external fun nativeMediaCapabilities(engine: Long, out: ByteBuffer): Int
+
+    internal external fun nativeOpenClip(
+        session: Long,
+        path: ByteBuffer,
+        pathLen: Int,
+    ): Int
+
+    internal external fun nativeClipSubmitFrame(
+        session: Long,
+        clip: Int,
+        timestampUs: Long,
+    ): Int
+
+    internal external fun nativeClipSeek(
+        session: Long,
+        clip: Int,
+        targetUs: Long,
+    ): Int
+
+    internal external fun nativeClipInfo(
+        session: Long,
+        clip: Int,
+        out: ByteBuffer,
+    ): Int
+
+    internal external fun nativeCloseClip(
+        session: Long,
+        clip: Int,
+    ): Int
+
+    internal external fun nativeClipStep(
+        session: Long,
+        clip: Int,
+        frames: Int,
+    ): Int
+
+    internal external fun nativeMediaCapabilities(
+        engine: Long,
+        out: ByteBuffer,
+    ): Int
+
     internal external fun nativePerceptionSelectAll(): Int
 
-    internal external fun nativePerceptionSnapshot(session: Long, select: Int, out: ByteBuffer, capacity: Int): Int
-    internal external fun nativePerceptionJson(session: Long, select: Int, out: ByteBuffer, capacity: Int): Int
-    internal external fun nativePollEvents(session: Long, out: ByteBuffer, capacity: Int, dropped: ByteBuffer): Int
-    internal external fun nativeAnnotate(session: Long, desc: ByteBuffer, text: ByteBuffer?, textLen: Int): Int
-    internal external fun nativeAnnotationRemove(session: Long, id: Int): Int
-    internal external fun nativeAnnotationClear(session: Long): Int
-    internal external fun nativeAnnotationCount(session: Long, out: ByteBuffer): Int
-    internal external fun nativeEgressConfigure(session: Long, config: ByteBuffer): Int
-    internal external fun nativeEgressRequest(session: Long): Int
-    internal external fun nativeEgressDecide(session: Long, out: ByteBuffer): Int
-    internal external fun nativeRecordingPause(engine: Long): Int
-    internal external fun nativeRecordingResume(engine: Long): Int
-    internal external fun nativeReportInterruption(session: Long, kind: Int): Int
-    internal external fun nativeRecordingReport(engine: Long, out: ByteBuffer): Int
-    internal external fun nativeSubmitWorld(session: Long, stateBuffer: ByteBuffer, planesBuffer: ByteBuffer, planeCount: Int, anchorsBuffer: ByteBuffer, anchorCount: Int, lightBuffer: ByteBuffer): Int
-    internal external fun nativeCaptureView(session: Long, guidanceBuffer: ByteBuffer): Int
-    internal external fun nativeResetCapture(session: Long): Int
-    internal external fun nativeSubmitAudio(session: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, timestampUs: Long): Int
-    internal external fun nativeRenderFrame(engine: Long, session: Long): Int
-    internal external fun nativeCompilePrompt(engine: Long, promptBuffer: ByteBuffer, promptLen: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
-    internal external fun nativeGenerateSong(engine: Long, promptBuffer: ByteBuffer, promptLen: Int, sampleRate: Int, seed: Int, bars: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
-    internal external fun nativeScanBarcode(engine: Long, lumBuffer: ByteBuffer, width: Int, height: Int, outBuffer: ByteBuffer): Int
-    internal external fun nativeScanQr(engine: Long, lumBuffer: ByteBuffer, width: Int, height: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
-    internal external fun nativeGenerateQr(engine: Long, payloadBuffer: ByteBuffer, payloadLen: Int, moduleScale: Int, quietModules: Int, outBuffer: ByteBuffer, outCapacity: Long, dimBuffer: ByteBuffer): Int
-    internal external fun nativeMediaSearch(engine: Long, corpusBuffer: ByteBuffer, count: Int, dim: Int, queryBuffer: ByteBuffer, k: Int, indicesBuffer: ByteBuffer, scoresBuffer: ByteBuffer, countBuffer: ByteBuffer): Int
-    internal external fun nativeSealMedia(keyBuffer: ByteBuffer, nonceBuffer: ByteBuffer, plaintextBuffer: ByteBuffer, plaintextLen: Int, aadBuffer: ByteBuffer, aadLen: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
-    internal external fun nativeOpenMedia(keyBuffer: ByteBuffer, nonceBuffer: ByteBuffer, sealedBuffer: ByteBuffer, sealedLen: Int, aadBuffer: ByteBuffer, aadLen: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
-    internal external fun nativeBestTake(engine: Long, framesBuffer: ByteBuffer, frameStride: Long, count: Int, width: Int, height: Int, opennessBuffer: ByteBuffer, opennessWeight: Float, indexBuffer: ByteBuffer): Int
-    internal external fun nativeMusicAddReference(engine: Long, trackId: Int, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
-    internal external fun nativeMusicClearReferences(engine: Long)
-    internal external fun nativeMusicIdentify(engine: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, minVotes: Int, outBuffer: ByteBuffer): Int
-    internal external fun nativeBeatMap(engine: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
-    internal external fun nativeChainReport(session: Long, outBuffer: ByteBuffer): Int
-    internal external fun nativeReadReconstruction(session: Long, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
-    internal external fun nativeWriteReconstruction(session: Long, buffer: ByteBuffer, count: Int): Int
-    internal external fun nativeMlOpSupport(model: ByteBuffer, modelLen: Int, out: ByteBuffer, capacity: Int): Int
+    internal external fun nativePerceptionSnapshot(
+        session: Long,
+        select: Int,
+        out: ByteBuffer,
+        capacity: Int,
+    ): Int
 
-    internal external fun nativeScreenGrant(width: Float, height: Float, density: Float, label: ByteBuffer?, labelLen: Int): Int
+    internal external fun nativePerceptionJson(
+        session: Long,
+        select: Int,
+        out: ByteBuffer,
+        capacity: Int,
+    ): Int
+
+    internal external fun nativePollEvents(
+        session: Long,
+        out: ByteBuffer,
+        capacity: Int,
+        dropped: ByteBuffer,
+    ): Int
+
+    internal external fun nativeAnnotate(
+        session: Long,
+        desc: ByteBuffer,
+        text: ByteBuffer?,
+        textLen: Int,
+    ): Int
+
+    internal external fun nativeAnnotationRemove(
+        session: Long,
+        id: Int,
+    ): Int
+
+    internal external fun nativeAnnotationClear(session: Long): Int
+
+    internal external fun nativeAnnotationCount(
+        session: Long,
+        out: ByteBuffer,
+    ): Int
+
+    internal external fun nativeEgressConfigure(
+        session: Long,
+        config: ByteBuffer,
+    ): Int
+
+    internal external fun nativeEgressRequest(session: Long): Int
+
+    internal external fun nativeEgressDecide(
+        session: Long,
+        out: ByteBuffer,
+    ): Int
+
+    internal external fun nativeRecordingPause(engine: Long): Int
+
+    internal external fun nativeRecordingResume(engine: Long): Int
+
+    internal external fun nativeReportInterruption(
+        session: Long,
+        kind: Int,
+    ): Int
+
+    internal external fun nativeRecordingReport(
+        engine: Long,
+        out: ByteBuffer,
+    ): Int
+
+    internal external fun nativeSubmitWorld(
+        session: Long,
+        stateBuffer: ByteBuffer,
+        planesBuffer: ByteBuffer,
+        planeCount: Int,
+        anchorsBuffer: ByteBuffer,
+        anchorCount: Int,
+        lightBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeCaptureView(
+        session: Long,
+        guidanceBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeResetCapture(session: Long): Int
+
+    internal external fun nativeSubmitAudio(
+        session: Long,
+        samplesBuffer: ByteBuffer,
+        frameCount: Int,
+        sampleRate: Int,
+        channels: Int,
+        timestampUs: Long,
+    ): Int
+
+    internal external fun nativeRenderFrame(
+        engine: Long,
+        session: Long,
+    ): Int
+
+    internal external fun nativeCompilePrompt(
+        engine: Long,
+        promptBuffer: ByteBuffer,
+        promptLen: Int,
+        outBuffer: ByteBuffer,
+        outCapacity: Long,
+        lenBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeGenerateSong(
+        engine: Long,
+        promptBuffer: ByteBuffer,
+        promptLen: Int,
+        sampleRate: Int,
+        seed: Int,
+        bars: Int,
+        outBuffer: ByteBuffer,
+        outCapacity: Long,
+        lenBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeScanBarcode(
+        engine: Long,
+        lumBuffer: ByteBuffer,
+        width: Int,
+        height: Int,
+        outBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeScanQr(
+        engine: Long,
+        lumBuffer: ByteBuffer,
+        width: Int,
+        height: Int,
+        outBuffer: ByteBuffer,
+        outCapacity: Long,
+        lenBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeGenerateQr(
+        engine: Long,
+        payloadBuffer: ByteBuffer,
+        payloadLen: Int,
+        moduleScale: Int,
+        quietModules: Int,
+        outBuffer: ByteBuffer,
+        outCapacity: Long,
+        dimBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeMediaSearch(
+        engine: Long,
+        corpusBuffer: ByteBuffer,
+        count: Int,
+        dim: Int,
+        queryBuffer: ByteBuffer,
+        k: Int,
+        indicesBuffer: ByteBuffer,
+        scoresBuffer: ByteBuffer,
+        countBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeSealMedia(
+        keyBuffer: ByteBuffer,
+        nonceBuffer: ByteBuffer,
+        plaintextBuffer: ByteBuffer,
+        plaintextLen: Int,
+        aadBuffer: ByteBuffer,
+        aadLen: Int,
+        outBuffer: ByteBuffer,
+        outCapacity: Long,
+        lenBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeOpenMedia(
+        keyBuffer: ByteBuffer,
+        nonceBuffer: ByteBuffer,
+        sealedBuffer: ByteBuffer,
+        sealedLen: Int,
+        aadBuffer: ByteBuffer,
+        aadLen: Int,
+        outBuffer: ByteBuffer,
+        outCapacity: Long,
+        lenBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeBestTake(
+        engine: Long,
+        framesBuffer: ByteBuffer,
+        frameStride: Long,
+        count: Int,
+        width: Int,
+        height: Int,
+        opennessBuffer: ByteBuffer,
+        opennessWeight: Float,
+        indexBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeMusicAddReference(
+        engine: Long,
+        trackId: Int,
+        samplesBuffer: ByteBuffer,
+        frameCount: Int,
+        sampleRate: Int,
+        channels: Int,
+    ): Int
+
+    internal external fun nativeMusicClearReferences(engine: Long)
+
+    internal external fun nativeMusicIdentify(
+        engine: Long,
+        samplesBuffer: ByteBuffer,
+        frameCount: Int,
+        sampleRate: Int,
+        channels: Int,
+        minVotes: Int,
+        outBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeBeatMap(
+        engine: Long,
+        samplesBuffer: ByteBuffer,
+        frameCount: Int,
+        sampleRate: Int,
+        channels: Int,
+        outBuffer: ByteBuffer,
+        capacity: Int,
+        countBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeChainReport(
+        session: Long,
+        outBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeReadReconstruction(
+        session: Long,
+        outBuffer: ByteBuffer,
+        capacity: Int,
+        countBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeWriteReconstruction(
+        session: Long,
+        buffer: ByteBuffer,
+        count: Int,
+    ): Int
+
+    internal external fun nativeMlOpSupport(
+        model: ByteBuffer,
+        modelLen: Int,
+        out: ByteBuffer,
+        capacity: Int,
+    ): Int
+
+    internal external fun nativeScreenGrant(
+        width: Float,
+        height: Float,
+        density: Float,
+        label: ByteBuffer?,
+        labelLen: Int,
+    ): Int
 
     internal external fun nativeScreenRevoke(): Int
 
-    internal external fun nativeScreenFrame(pixels: ByteBuffer, width: Int, height: Int, stride: Int, timestampUs: Long): Int
+    internal external fun nativeScreenFrame(
+        pixels: ByteBuffer,
+        width: Int,
+        height: Int,
+        stride: Int,
+        timestampUs: Long,
+    ): Int
 
     internal external fun nativeScreenCount(engine: Long): Int
 
-    internal external fun nativeScreenAt(engine: Long, index: Int, out: ByteBuffer): Int
+    internal external fun nativeScreenAt(
+        engine: Long,
+        index: Int,
+        out: ByteBuffer,
+    ): Int
 
-    internal external fun nativeScreenTitle(engine: Long, index: Int, out: ByteBuffer, capacity: Int): Int
+    internal external fun nativeScreenTitle(
+        engine: Long,
+        index: Int,
+        out: ByteBuffer,
+        capacity: Int,
+    ): Int
 
-    internal external fun nativeOpenScreen(session: Long, surfaceId: Long, scale: Float): Int
+    internal external fun nativeOpenScreen(
+        session: Long,
+        surfaceId: Long,
+        scale: Float,
+    ): Int
 
-    internal external fun nativeCloseScreen(session: Long, screen: Int): Int
+    internal external fun nativeCloseScreen(
+        session: Long,
+        screen: Int,
+    ): Int
 
-    internal external fun nativeStepScreen(session: Long, screen: Int, name: ByteBuffer?, nameLen: Int): Int
+    internal external fun nativeStepScreen(
+        session: Long,
+        screen: Int,
+        name: ByteBuffer?,
+        nameLen: Int,
+    ): Int
 
-    internal external fun nativeScreenPoint(session: Long, screen: Int, x: Float, y: Float, out: ByteBuffer): Int
+    internal external fun nativeScreenPoint(
+        session: Long,
+        screen: Int,
+        x: Float,
+        y: Float,
+        out: ByteBuffer,
+    ): Int
 
-    internal external fun nativeSetScope(session: Long, sections: Int, verbs: Int): Int
+    internal external fun nativeSetScope(
+        session: Long,
+        sections: Int,
+        verbs: Int,
+    ): Int
 
     internal external fun nativeScope(session: Long): Long
 
-    internal external fun nativeMemoryOpen(session: Long, dim: Int, maxEntries: Int): Int
+    internal external fun nativeMemoryOpen(
+        session: Long,
+        dim: Int,
+        maxEntries: Int,
+    ): Int
 
     internal external fun nativeMemoryClose(session: Long): Int
 
-    internal external fun nativeMemoryRemember(session: Long, id: Long, embedding: ByteBuffer, dim: Int): Int
+    internal external fun nativeMemoryRemember(
+        session: Long,
+        id: Long,
+        embedding: ByteBuffer,
+        dim: Int,
+    ): Int
 
-    internal external fun nativeMemoryForget(session: Long, id: Long): Int
+    internal external fun nativeMemoryForget(
+        session: Long,
+        id: Long,
+    ): Int
 
-    internal external fun nativeMemorySearch(session: Long, query: ByteBuffer, dim: Int, k: Int, out: ByteBuffer): Int
+    internal external fun nativeMemorySearch(
+        session: Long,
+        query: ByteBuffer,
+        dim: Int,
+        k: Int,
+        out: ByteBuffer,
+    ): Int
 
     internal external fun nativeMemoryStats(session: Long): Long
 
-    internal external fun nativeMemorySave(session: Long, out: ByteBuffer, capacity: Int): Int
+    internal external fun nativeMemorySave(
+        session: Long,
+        out: ByteBuffer,
+        capacity: Int,
+    ): Int
 
-    internal external fun nativeMemorySaveSealed(session: Long, key: ByteBuffer, nonce: ByteBuffer, out: ByteBuffer, capacity: Int): Int
+    internal external fun nativeMemorySaveSealed(
+        session: Long,
+        key: ByteBuffer,
+        nonce: ByteBuffer,
+        out: ByteBuffer,
+        capacity: Int,
+    ): Int
 
-    internal external fun nativeMemoryLoadSealed(session: Long, key: ByteBuffer, bytes: ByteBuffer, len: Int): Int
+    internal external fun nativeMemoryLoadSealed(
+        session: Long,
+        key: ByteBuffer,
+        bytes: ByteBuffer,
+        len: Int,
+    ): Int
 
-    internal external fun nativeMemoryLoad(session: Long, bytes: ByteBuffer, len: Int): Int
+    internal external fun nativeMemoryLoad(
+        session: Long,
+        bytes: ByteBuffer,
+        len: Int,
+    ): Int
 
-    internal external fun nativeEnableText(session: Long, detector: ByteBuffer, detectorLen: Int, recognizer: ByteBuffer?, recognizerLen: Int, dictionary: ByteBuffer?, dictionaryLen: Int, detectSide: Int): Int
+    internal external fun nativeEnableText(
+        session: Long,
+        detector: ByteBuffer,
+        detectorLen: Int,
+        recognizer: ByteBuffer?,
+        recognizerLen: Int,
+        dictionary: ByteBuffer?,
+        dictionaryLen: Int,
+        detectSide: Int,
+    ): Int
 
     internal external fun nativeDisableText(session: Long): Int
 
     internal external fun nativeTextCount(session: Long): Long
 
-    internal external fun nativeTextAt(session: Long, index: Int, out: ByteBuffer): Int
+    internal external fun nativeTextAt(
+        session: Long,
+        index: Int,
+        out: ByteBuffer,
+    ): Int
 
-    internal external fun nativeTextString(session: Long, index: Int, out: ByteBuffer, capacity: Int): Int
+    internal external fun nativeTextString(
+        session: Long,
+        index: Int,
+        out: ByteBuffer,
+        capacity: Int,
+    ): Int
 
-    internal external fun nativeEngineReport(engine: Long, out: ByteBuffer): Int
-    internal external fun nativeSessionReport(session: Long, out: ByteBuffer): Int
-    internal external fun nativeNodeReports(session: Long, out: ByteBuffer, capacityU32: Int): Int
-    internal external fun nativeNodeReportId(session: Long, index: Int, out: ByteBuffer, capacity: Int, outLen: ByteBuffer): Int
-    internal external fun nativeSessionCreate(engine: Long, frameBudgetUs: Int): Long
+    internal external fun nativeEngineReport(
+        engine: Long,
+        out: ByteBuffer,
+    ): Int
+
+    internal external fun nativeSessionReport(
+        session: Long,
+        out: ByteBuffer,
+    ): Int
+
+    internal external fun nativeNodeReports(
+        session: Long,
+        out: ByteBuffer,
+        capacityU32: Int,
+    ): Int
+
+    internal external fun nativeNodeReportId(
+        session: Long,
+        index: Int,
+        out: ByteBuffer,
+        capacity: Int,
+        outLen: ByteBuffer,
+    ): Int
+
+    internal external fun nativeSessionCreate(
+        engine: Long,
+        frameBudgetUs: Int,
+    ): Long
+
     internal external fun nativeSessionDestroy(session: Long)
+
     internal external fun nativeSubmitFrameCopy(
         session: Long,
         yBuffer: ByteBuffer,
@@ -297,6 +763,7 @@ object Gosslens {
         colorRange: Int,
         timestampUs: Long,
     ): Int
+
     internal external fun nativeSubmitFrameBracket(
         session: Long,
         yBuffer: ByteBuffer,
@@ -309,21 +776,86 @@ object Gosslens {
         colorRange: Int,
         timestampUs: Long,
     ): Int
-    internal external fun nativeSubmitFrameBracketRgba(session: Long, rgba: ByteBuffer, width: Int, height: Int): Int
-    internal external fun nativeReportFrame(session: Long, frameTimeUs: Int, thermal: Int): Int
-    internal external fun nativeEnableFaceTracking(session: Long, taskBuffer: ByteBuffer, taskLen: Int, threads: Int): Int
+
+    internal external fun nativeSubmitFrameBracketRgba(
+        session: Long,
+        rgba: ByteBuffer,
+        width: Int,
+        height: Int,
+    ): Int
+
+    internal external fun nativeReportFrame(
+        session: Long,
+        frameTimeUs: Int,
+        thermal: Int,
+    ): Int
+
+    internal external fun nativeEnableFaceTracking(
+        session: Long,
+        taskBuffer: ByteBuffer,
+        taskLen: Int,
+        threads: Int,
+    ): Int
+
     internal external fun nativeDisableFaceTracking(session: Long)
-    internal external fun nativeEnableHandTracking(session: Long, taskBuffer: ByteBuffer, taskLen: Int, threads: Int): Int
+
+    internal external fun nativeEnableHandTracking(
+        session: Long,
+        taskBuffer: ByteBuffer,
+        taskLen: Int,
+        threads: Int,
+    ): Int
+
     internal external fun nativeDisableHandTracking(session: Long)
-    internal external fun nativeHandResult(session: Long, resultBuffer: ByteBuffer): Int
-    internal external fun nativeEnablePoseTracking(session: Long, taskBuffer: ByteBuffer, taskLen: Int, threads: Int): Int
+
+    internal external fun nativeHandResult(
+        session: Long,
+        resultBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeEnablePoseTracking(
+        session: Long,
+        taskBuffer: ByteBuffer,
+        taskLen: Int,
+        threads: Int,
+    ): Int
+
     internal external fun nativeDisablePoseTracking(session: Long)
-    internal external fun nativeSetPoseUpperBody(session: Long, enabled: Int): Int
-    internal external fun nativePoseResult(session: Long, resultBuffer: ByteBuffer): Int
-    internal external fun nativeFacePose(session: Long, matrixBuffer: ByteBuffer): Int
-    internal external fun nativeFaceRegion(session: Long, region: Int, outBuffer: ByteBuffer): Int
-    internal external fun nativeBodyJoint(session: Long, joint: Int, outBuffer: ByteBuffer): Int
-    internal external fun nativeHandJoint(session: Long, handIndex: Int, joint: Int, outBuffer: ByteBuffer): Int
+
+    internal external fun nativeSetPoseUpperBody(
+        session: Long,
+        enabled: Int,
+    ): Int
+
+    internal external fun nativePoseResult(
+        session: Long,
+        resultBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeFacePose(
+        session: Long,
+        matrixBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeFaceRegion(
+        session: Long,
+        region: Int,
+        outBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeBodyJoint(
+        session: Long,
+        joint: Int,
+        outBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeHandJoint(
+        session: Long,
+        handIndex: Int,
+        joint: Int,
+        outBuffer: ByteBuffer,
+    ): Int
+
     internal external fun nativeTrackFrame(
         session: Long,
         yBuffer: ByteBuffer,
@@ -336,6 +868,7 @@ object Gosslens {
         colorRange: Int,
         timestampUs: Long,
     ): Int
+
     internal external fun nativeSubmitAvatarSource(
         session: Long,
         yBuffer: ByteBuffer,
@@ -348,110 +881,630 @@ object Gosslens {
         colorRange: Int,
         timestampUs: Long,
     ): Int
-    internal external fun nativeSubmitAvatarSourceRgba(session: Long, rgba: ByteBuffer, width: Int, height: Int): Int
-    internal external fun nativeFaceResult(session: Long, resultBuffer: ByteBuffer): Int
-    internal external fun nativeSubmitFaces(session: Long, faces: ByteBuffer, count: Int): Int
+
+    internal external fun nativeSubmitAvatarSourceRgba(
+        session: Long,
+        rgba: ByteBuffer,
+        width: Int,
+        height: Int,
+    ): Int
+
+    internal external fun nativeFaceResult(
+        session: Long,
+        resultBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeSubmitFaces(
+        session: Long,
+        faces: ByteBuffer,
+        count: Int,
+    ): Int
+
     internal external fun nativeFaceCount(session: Long): Int
-    internal external fun nativeFaceResultAt(session: Long, index: Int, resultBuffer: ByteBuffer): Int
-    internal external fun nativeFaceTrackId(session: Long, index: Int): Int
-    internal external fun nativeSubmitBodies(session: Long, bodies: ByteBuffer, count: Int): Int
-    internal external fun nativeSubmitHands(session: Long, hands: ByteBuffer?): Int
-    internal external fun nativeProvideLensAsset(session: Long, name: ByteBuffer, nameLen: Int, bytes: ByteBuffer, len: Long): Int
-    internal external fun nativeMlOutput(session: Long, nodeId: ByteBuffer, nodeIdLen: Int, tensor: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
-    internal external fun nativeMlMask(session: Long, nodeId: ByteBuffer, nodeIdLen: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
-    internal external fun nativeSubmitDepth(session: Long, depth: ByteBuffer, width: Int, height: Int, near: Float, far: Float): Int
-    internal external fun nativeSubmitCameraIntrinsics(session: Long, fx: Float, fy: Float, cx: Float, cy: Float, distortion: ByteBuffer, distortionLen: Int): Int
-    internal external fun nativeSubmitOrientation(session: Long, gravityX: Float, gravityY: Float, gravityZ: Float, timestampUs: Long): Int
-    internal external fun nativeSetInfo(session: Long, keyBuffer: ByteBuffer, keyLen: Int, valueBuffer: ByteBuffer?, valueLen: Int): Int
-    internal external fun nativeSnapshotLensState(session: Long, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
-    internal external fun nativeApplyLensState(session: Long, blobBuffer: ByteBuffer, blobLen: Int): Int
-    internal external fun nativeCaptureProvenance(session: Long, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
-    internal external fun nativeCaptionText(session: Long, nodeId: ByteBuffer, nodeIdLen: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
-    internal external fun nativeCaptionSegment(session: Long, index: Int, out: ByteBuffer): Int
-    internal external fun nativeCaptionSegmentText(session: Long, index: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
-    internal external fun nativeSetDubbing(session: Long, enabled: Int): Int
-    internal external fun nativeSubmitSegmentationImage(session: Long, rgba: ByteBuffer, width: Int, height: Int): Int
-    internal external fun nativeSetMakeupReference(session: Long, rgba: ByteBuffer, width: Int, height: Int, landmarks: ByteBuffer, count: Int): Int
+
+    internal external fun nativeFaceResultAt(
+        session: Long,
+        index: Int,
+        resultBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeFaceTrackId(
+        session: Long,
+        index: Int,
+    ): Int
+
+    internal external fun nativeSubmitBodies(
+        session: Long,
+        bodies: ByteBuffer,
+        count: Int,
+    ): Int
+
+    internal external fun nativeSubmitHands(
+        session: Long,
+        hands: ByteBuffer?,
+    ): Int
+
+    internal external fun nativeProvideLensAsset(
+        session: Long,
+        name: ByteBuffer,
+        nameLen: Int,
+        bytes: ByteBuffer,
+        len: Long,
+    ): Int
+
+    internal external fun nativeMlOutput(
+        session: Long,
+        nodeId: ByteBuffer,
+        nodeIdLen: Int,
+        tensor: Int,
+        out: ByteBuffer,
+        capacity: Long,
+        outLen: ByteBuffer,
+    ): Int
+
+    internal external fun nativeMlMask(
+        session: Long,
+        nodeId: ByteBuffer,
+        nodeIdLen: Int,
+        out: ByteBuffer,
+        capacity: Long,
+        outLen: ByteBuffer,
+    ): Int
+
+    internal external fun nativeSubmitDepth(
+        session: Long,
+        depth: ByteBuffer,
+        width: Int,
+        height: Int,
+        near: Float,
+        far: Float,
+    ): Int
+
+    internal external fun nativeSubmitCameraIntrinsics(
+        session: Long,
+        fx: Float,
+        fy: Float,
+        cx: Float,
+        cy: Float,
+        distortion: ByteBuffer,
+        distortionLen: Int,
+    ): Int
+
+    internal external fun nativeSubmitOrientation(
+        session: Long,
+        gravityX: Float,
+        gravityY: Float,
+        gravityZ: Float,
+        timestampUs: Long,
+    ): Int
+
+    internal external fun nativeSetInfo(
+        session: Long,
+        keyBuffer: ByteBuffer,
+        keyLen: Int,
+        valueBuffer: ByteBuffer?,
+        valueLen: Int,
+    ): Int
+
+    internal external fun nativeSnapshotLensState(
+        session: Long,
+        outBuffer: ByteBuffer,
+        outCapacity: Long,
+        lenBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeApplyLensState(
+        session: Long,
+        blobBuffer: ByteBuffer,
+        blobLen: Int,
+    ): Int
+
+    internal external fun nativeCaptureProvenance(
+        session: Long,
+        outBuffer: ByteBuffer,
+        outCapacity: Long,
+        lenBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeCaptionText(
+        session: Long,
+        nodeId: ByteBuffer,
+        nodeIdLen: Int,
+        out: ByteBuffer,
+        capacity: Long,
+        outLen: ByteBuffer,
+    ): Int
+
+    internal external fun nativeCaptionSegment(
+        session: Long,
+        index: Int,
+        out: ByteBuffer,
+    ): Int
+
+    internal external fun nativeCaptionSegmentText(
+        session: Long,
+        index: Int,
+        out: ByteBuffer,
+        capacity: Long,
+        outLen: ByteBuffer,
+    ): Int
+
+    internal external fun nativeSetDubbing(
+        session: Long,
+        enabled: Int,
+    ): Int
+
+    internal external fun nativeSubmitSegmentationImage(
+        session: Long,
+        rgba: ByteBuffer,
+        width: Int,
+        height: Int,
+    ): Int
+
+    internal external fun nativeSetMakeupReference(
+        session: Long,
+        rgba: ByteBuffer,
+        width: Int,
+        height: Int,
+        landmarks: ByteBuffer,
+        count: Int,
+    ): Int
+
     internal external fun nativeBodyCount(session: Long): Int
-    internal external fun nativeBodyResultAt(session: Long, index: Int, resultBuffer: ByteBuffer): Int
-    internal external fun nativeEnableBeauty(session: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
+
+    internal external fun nativeBodyResultAt(
+        session: Long,
+        index: Int,
+        resultBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeEnableBeauty(
+        session: Long,
+        pathBuffer: ByteBuffer,
+        pathLen: Int,
+    ): Int
+
     internal external fun nativeDisableBeauty(session: Long)
-    internal external fun nativeSetBeauty(session: Long, effect: Int, value: Float): Int
-    internal external fun nativeBeautifyFrame(session: Long, rgbaIn: ByteBuffer, rgbaOut: ByteBuffer, width: Int, height: Int): Int
-    internal external fun nativeActivateLens(session: Long, manifestBuffer: ByteBuffer, manifestLen: Int): Int
+
+    internal external fun nativeSetBeauty(
+        session: Long,
+        effect: Int,
+        value: Float,
+    ): Int
+
+    internal external fun nativeBeautifyFrame(
+        session: Long,
+        rgbaIn: ByteBuffer,
+        rgbaOut: ByteBuffer,
+        width: Int,
+        height: Int,
+    ): Int
+
+    internal external fun nativeActivateLens(
+        session: Long,
+        manifestBuffer: ByteBuffer,
+        manifestLen: Int,
+    ): Int
+
     internal external fun nativeDeactivateLens(session: Long)
-    internal external fun nativeTickLens(session: Long, dtUs: Int, signalsBuffer: ByteBuffer): Int
-    internal external fun nativeParameterValue(session: Long, nameBuffer: ByteBuffer, nameLen: Int, outBuffer: ByteBuffer): Int
-    internal external fun nativeHitTest(session: Long, screenX: Float, screenY: Float, outBuffer: ByteBuffer): Int
-    internal external fun nativeSubmitWorldMesh(session: Long, verticesBuffer: ByteBuffer, vertexCount: Int, indicesBuffer: ByteBuffer, indexCount: Int): Int
-    internal external fun nativeRaycastWorldMesh(session: Long, originBuffer: ByteBuffer, directionBuffer: ByteBuffer, pointBuffer: ByteBuffer, distanceBuffer: ByteBuffer): Int
-    internal external fun nativeScopeVerbName(verb: Int, outBuffer: ByteBuffer, capacity: Int, lenBuffer: ByteBuffer): Int
+
+    internal external fun nativeTickLens(
+        session: Long,
+        dtUs: Int,
+        signalsBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeParameterValue(
+        session: Long,
+        nameBuffer: ByteBuffer,
+        nameLen: Int,
+        outBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeHitTest(
+        session: Long,
+        screenX: Float,
+        screenY: Float,
+        outBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeSubmitWorldMesh(
+        session: Long,
+        verticesBuffer: ByteBuffer,
+        vertexCount: Int,
+        indicesBuffer: ByteBuffer,
+        indexCount: Int,
+    ): Int
+
+    internal external fun nativeRaycastWorldMesh(
+        session: Long,
+        originBuffer: ByteBuffer,
+        directionBuffer: ByteBuffer,
+        pointBuffer: ByteBuffer,
+        distanceBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeScopeVerbName(
+        verb: Int,
+        outBuffer: ByteBuffer,
+        capacity: Int,
+        lenBuffer: ByteBuffer,
+    ): Int
+
     internal external fun nativeScopeVerbCount(): Int
 
-    internal external fun nativeDecodePng(inBuffer: ByteBuffer, inLen: Int, outBuffer: ByteBuffer?, capacity: Int, metaBuffer: ByteBuffer): Int
-    internal external fun nativePathAcrossWorld(session: Long, startBuffer: ByteBuffer, goalBuffer: ByteBuffer, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
-    internal external fun nativePlaneKind(session: Long, planeId: Long, outBuffer: ByteBuffer): Int
-    internal external fun nativeFloorPlane(session: Long, outBuffer: ByteBuffer): Int
-    internal external fun nativePlaceOn(session: Long, itemBuffer: ByteBuffer, occupantBuffer: ByteBuffer?, occupantCount: Int, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
-    internal external fun nativeMeasureBetween(session: Long, fromBuffer: ByteBuffer, fromAccuracy: Float, toBuffer: ByteBuffer, toAccuracy: Float, outBuffer: ByteBuffer): Int
-    internal external fun nativeSharedLandmarks(session: Long, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
-    internal external fun nativeAlignShared(session: Long, theirBuffer: ByteBuffer, count: Int, outBuffer: ByteBuffer): Int
-    internal external fun nativePullAudio(session: Long, outBuffer: ByteBuffer, frames: Int): Int
-    internal external fun nativeMixOutputAudio(session: Long, micBuffer: ByteBuffer?, outBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
-    internal external fun nativeSetCameraControls(session: Long, buffer: ByteBuffer): Int
-    internal external fun nativeCameraControls(session: Long, buffer: ByteBuffer): Int
-    internal external fun nativeSetRecordingPolicy(session: Long, buffer: ByteBuffer): Int
-    internal external fun nativeRecordingPolicy(session: Long, buffer: ByteBuffer): Int
-    internal external fun nativeSetCaptureUi(session: Long, buffer: ByteBuffer): Int
-    internal external fun nativeCaptureUi(session: Long, buffer: ByteBuffer): Int
-    internal external fun nativeFireEvent(session: Long, nameBuffer: ByteBuffer, nameLen: Int): Int
-    internal external fun nativeDefineSource(session: Long, nameBuffer: ByteBuffer, nameLen: Int): Int
-    internal external fun nativeRemoveSource(session: Long, nameBuffer: ByteBuffer, nameLen: Int): Int
-    internal external fun nativeSubmitSourceFrameRgba(session: Long, nameBuffer: ByteBuffer, nameLen: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int, stride: Int, pixelFormat: Int): Int
-    internal external fun nativeSetLayout(session: Long, arrangement: Int): Int
+    internal external fun nativeDecodePng(
+        inBuffer: ByteBuffer,
+        inLen: Int,
+        outBuffer: ByteBuffer?,
+        capacity: Int,
+        metaBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativePathAcrossWorld(
+        session: Long,
+        startBuffer: ByteBuffer,
+        goalBuffer: ByteBuffer,
+        outBuffer: ByteBuffer,
+        capacity: Int,
+        countBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativePlaneKind(
+        session: Long,
+        planeId: Long,
+        outBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeFloorPlane(
+        session: Long,
+        outBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativePlaceOn(
+        session: Long,
+        itemBuffer: ByteBuffer,
+        occupantBuffer: ByteBuffer?,
+        occupantCount: Int,
+        outBuffer: ByteBuffer,
+        capacity: Int,
+        countBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeMeasureBetween(
+        session: Long,
+        fromBuffer: ByteBuffer,
+        fromAccuracy: Float,
+        toBuffer: ByteBuffer,
+        toAccuracy: Float,
+        outBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeSharedLandmarks(
+        session: Long,
+        outBuffer: ByteBuffer,
+        capacity: Int,
+        countBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeAlignShared(
+        session: Long,
+        theirBuffer: ByteBuffer,
+        count: Int,
+        outBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativePullAudio(
+        session: Long,
+        outBuffer: ByteBuffer,
+        frames: Int,
+    ): Int
+
+    internal external fun nativeMixOutputAudio(
+        session: Long,
+        micBuffer: ByteBuffer?,
+        outBuffer: ByteBuffer,
+        frameCount: Int,
+        sampleRate: Int,
+        channels: Int,
+    ): Int
+
+    internal external fun nativeSetCameraControls(
+        session: Long,
+        buffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeCameraControls(
+        session: Long,
+        buffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeSetRecordingPolicy(
+        session: Long,
+        buffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeRecordingPolicy(
+        session: Long,
+        buffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeSetCaptureUi(
+        session: Long,
+        buffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeCaptureUi(
+        session: Long,
+        buffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeFireEvent(
+        session: Long,
+        nameBuffer: ByteBuffer,
+        nameLen: Int,
+    ): Int
+
+    internal external fun nativeDefineSource(
+        session: Long,
+        nameBuffer: ByteBuffer,
+        nameLen: Int,
+    ): Int
+
+    internal external fun nativeRemoveSource(
+        session: Long,
+        nameBuffer: ByteBuffer,
+        nameLen: Int,
+    ): Int
+
+    internal external fun nativeSubmitSourceFrameRgba(
+        session: Long,
+        nameBuffer: ByteBuffer,
+        nameLen: Int,
+        rgbaBuffer: ByteBuffer,
+        width: Int,
+        height: Int,
+        stride: Int,
+        pixelFormat: Int,
+    ): Int
+
+    internal external fun nativeSetLayout(
+        session: Long,
+        arrangement: Int,
+    ): Int
+
     internal external fun nativeClearLayout(session: Long): Int
-    internal external fun nativeSetSourceComposite(session: Long, nameBuffer: ByteBuffer, nameLen: Int, opacity: Float, keyMode: Int, keyR: Float, keyG: Float, keyB: Float, similarity: Float): Int
-    internal external fun nativeSubmitSourceMask(session: Long, nameBuffer: ByteBuffer, nameLen: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int): Int
-    internal external fun nativeEnableSourceSegmentation(session: Long, nameBuffer: ByteBuffer, nameLen: Int, modelBuffer: ByteBuffer, modelLen: Int, threads: Int): Int
-    internal external fun nativeDefineScreenShare(session: Long, nameBuffer: ByteBuffer, nameLen: Int): Int
-    internal external fun nativeSubmitLocation(session: Long, latitude: Double, longitude: Double, accuracyM: Float, timestampUs: Long): Int
-    internal external fun nativeSetGeofence(session: Long, latitude: Double, longitude: Double, radiusM: Double): Int
+
+    internal external fun nativeSetSourceComposite(
+        session: Long,
+        nameBuffer: ByteBuffer,
+        nameLen: Int,
+        opacity: Float,
+        keyMode: Int,
+        keyR: Float,
+        keyG: Float,
+        keyB: Float,
+        similarity: Float,
+    ): Int
+
+    internal external fun nativeSubmitSourceMask(
+        session: Long,
+        nameBuffer: ByteBuffer,
+        nameLen: Int,
+        rgbaBuffer: ByteBuffer,
+        width: Int,
+        height: Int,
+    ): Int
+
+    internal external fun nativeEnableSourceSegmentation(
+        session: Long,
+        nameBuffer: ByteBuffer,
+        nameLen: Int,
+        modelBuffer: ByteBuffer,
+        modelLen: Int,
+        threads: Int,
+    ): Int
+
+    internal external fun nativeDefineScreenShare(
+        session: Long,
+        nameBuffer: ByteBuffer,
+        nameLen: Int,
+    ): Int
+
+    internal external fun nativeSubmitLocation(
+        session: Long,
+        latitude: Double,
+        longitude: Double,
+        accuracyM: Float,
+        timestampUs: Long,
+    ): Int
+
+    internal external fun nativeSetGeofence(
+        session: Long,
+        latitude: Double,
+        longitude: Double,
+        radiusM: Double,
+    ): Int
+
     internal external fun nativeClearGeofence(session: Long): Int
-    internal external fun nativeSetGeofenceBbox(session: Long, minLat: Double, minLon: Double, maxLat: Double, maxLon: Double): Int
-    internal external fun nativeSetGeofencePolygon(session: Long, coordsBuffer: ByteBuffer, vertexCount: Int): Int
-    internal external fun nativeSetNamedGeofence(session: Long, nameBuffer: ByteBuffer, nameLen: Int, latitude: Double, longitude: Double, radiusM: Double): Int
-    internal external fun nativeSetNamedGeofencePolygon(session: Long, nameBuffer: ByteBuffer, nameLen: Int, coordsBuffer: ByteBuffer, vertexCount: Int): Int
+
+    internal external fun nativeSetGeofenceBbox(
+        session: Long,
+        minLat: Double,
+        minLon: Double,
+        maxLat: Double,
+        maxLon: Double,
+    ): Int
+
+    internal external fun nativeSetGeofencePolygon(
+        session: Long,
+        coordsBuffer: ByteBuffer,
+        vertexCount: Int,
+    ): Int
+
+    internal external fun nativeSetNamedGeofence(
+        session: Long,
+        nameBuffer: ByteBuffer,
+        nameLen: Int,
+        latitude: Double,
+        longitude: Double,
+        radiusM: Double,
+    ): Int
+
+    internal external fun nativeSetNamedGeofencePolygon(
+        session: Long,
+        nameBuffer: ByteBuffer,
+        nameLen: Int,
+        coordsBuffer: ByteBuffer,
+        vertexCount: Int,
+    ): Int
+
     internal external fun nativeClearNamedGeofences(session: Long): Int
-    internal external fun nativeSetGeoAccuracy(session: Long, maxAccuracyM: Float): Int
-    internal external fun nativeBrushSetStyle(session: Long, r: Float, g: Float, b: Float, a: Float, width: Float): Int
-    internal external fun nativeBrushSetStamp(session: Long, rgbaBuffer: ByteBuffer, width: Int, height: Int): Int
+
+    internal external fun nativeSetGeoAccuracy(
+        session: Long,
+        maxAccuracyM: Float,
+    ): Int
+
+    internal external fun nativeBrushSetStyle(
+        session: Long,
+        r: Float,
+        g: Float,
+        b: Float,
+        a: Float,
+        width: Float,
+    ): Int
+
+    internal external fun nativeBrushSetStamp(
+        session: Long,
+        rgbaBuffer: ByteBuffer,
+        width: Int,
+        height: Int,
+    ): Int
+
     internal external fun nativeBrushBegin(session: Long): Int
-    internal external fun nativeBrushPoint(session: Long, x: Float, y: Float): Int
+
+    internal external fun nativeBrushPoint(
+        session: Long,
+        x: Float,
+        y: Float,
+    ): Int
+
     internal external fun nativeBrushEnd(session: Long): Int
+
     internal external fun nativeBrushUndo(session: Long): Int
+
     internal external fun nativeBrushRedo(session: Long): Int
+
     internal external fun nativeBrushClear(session: Long): Int
+
     internal external fun nativeBrushVertexCount(session: Long): Int
-    internal external fun nativeBrushVertices(session: Long, outBuffer: ByteBuffer, capacityFloats: Int): Int
-    internal external fun nativeBrushSetMode(session: Long, mode: Int): Int
-    internal external fun nativeBrushEraseAt(session: Long, x: Float, y: Float, radius: Float): Int
-    internal external fun nativeArBrushSetStyle(session: Long, r: Float, g: Float, b: Float, a: Float, width: Float): Int
-    internal external fun nativeArBrushSetMode(session: Long, mode: Int): Int
+
+    internal external fun nativeBrushVertices(
+        session: Long,
+        outBuffer: ByteBuffer,
+        capacityFloats: Int,
+    ): Int
+
+    internal external fun nativeBrushSetMode(
+        session: Long,
+        mode: Int,
+    ): Int
+
+    internal external fun nativeBrushEraseAt(
+        session: Long,
+        x: Float,
+        y: Float,
+        radius: Float,
+    ): Int
+
+    internal external fun nativeArBrushSetStyle(
+        session: Long,
+        r: Float,
+        g: Float,
+        b: Float,
+        a: Float,
+        width: Float,
+    ): Int
+
+    internal external fun nativeArBrushSetMode(
+        session: Long,
+        mode: Int,
+    ): Int
+
     internal external fun nativeArBrushBegin(session: Long): Int
-    internal external fun nativeArBrushPoint(session: Long, x: Float, y: Float, z: Float): Int
+
+    internal external fun nativeArBrushPoint(
+        session: Long,
+        x: Float,
+        y: Float,
+        z: Float,
+    ): Int
+
     internal external fun nativeArBrushEnd(session: Long): Int
+
     internal external fun nativeArBrushUndo(session: Long): Int
+
     internal external fun nativeArBrushRedo(session: Long): Int
-    internal external fun nativeSpriteTransform(session: Long, nodeId: ByteBuffer, nodeIdLen: Int, out: ByteBuffer): Int
+
+    internal external fun nativeSpriteTransform(
+        session: Long,
+        nodeId: ByteBuffer,
+        nodeIdLen: Int,
+        out: ByteBuffer,
+    ): Int
+
     internal external fun nativeArBrushClear(session: Long): Int
-    internal external fun nativeGrab(session: Long, x: Float, y: Float, z: Float): Int
-    internal external fun nativeTouch(session: Long, phase: Int, pointerId: Int, x: Float, y: Float): Int
-    internal external fun nativePullHaptic(session: Long, outBuffer: ByteBuffer): Int
+
+    internal external fun nativeGrab(
+        session: Long,
+        x: Float,
+        y: Float,
+        z: Float,
+    ): Int
+
+    internal external fun nativeTouch(
+        session: Long,
+        phase: Int,
+        pointerId: Int,
+        x: Float,
+        y: Float,
+    ): Int
+
+    internal external fun nativePullHaptic(
+        session: Long,
+        outBuffer: ByteBuffer,
+    ): Int
+
     internal external fun nativeFlashRisk(session: Long): Float
-    internal external fun nativeSubmitSourceFrame(session: Long, nameBuffer: ByteBuffer, nameLen: Int, plane0: Long, width: Int, height: Int, pixelFormat: Int): Int
+
+    internal external fun nativeSubmitSourceFrame(
+        session: Long,
+        nameBuffer: ByteBuffer,
+        nameLen: Int,
+        plane0: Long,
+        width: Int,
+        height: Int,
+        pixelFormat: Int,
+    ): Int
+
     internal external fun nativeRelease(session: Long): Int
-    internal external fun nativeAddCollider(session: Long, x: Float, y: Float, z: Float): Int
-    internal external fun nativeEraseCollider(session: Long, x: Float, y: Float, z: Float, radius: Float): Int
+
+    internal external fun nativeAddCollider(
+        session: Long,
+        x: Float,
+        y: Float,
+        z: Float,
+    ): Int
+
+    internal external fun nativeEraseCollider(
+        session: Long,
+        x: Float,
+        y: Float,
+        z: Float,
+        radius: Float,
+    ): Int
+
     internal external fun nativeSubmitHardwareBuffer(
         session: Long,
         hardwareBuffer: android.hardware.HardwareBuffer,
@@ -462,6 +1515,7 @@ object Gosslens {
         colorRange: Int,
         timestampUs: Long,
     ): Int
+
     internal external fun nativeSubmitSourceHardwareBuffer(
         session: Long,
         name: ByteBuffer,
@@ -474,27 +1528,142 @@ object Gosslens {
         colorRange: Int,
         timestampUs: Long,
     ): Int
+
     internal external fun nativeDegradeLevel(session: Long): Int
-    internal external fun nativeYuvToRgb(standard: Int, range: Int, outBuffer: ByteBuffer): Int
-    internal external fun nativeSolveTwoBoneIk(inBuffer: ByteBuffer, upperLen: Float, lowerLen: Float, outBuffer: ByteBuffer): Int
-    internal external fun nativeActivateLensFromDirectory(session: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
-    internal external fun nativeSubmitFrame(session: Long, plane0: Long, plane1: Long, plane2: Long, planeCount: Int, width: Int, height: Int, pixelFormat: Int, flags: Int, colorStandard: Int, colorRange: Int, timestampUs: Long): Int
-    internal external fun nativeSubmitFrameRgbaCopy(session: Long, rgba: ByteBuffer, stride: Int, width: Int, height: Int, pixelFormat: Int, flags: Int, timestampUs: Long): Int
-    internal external fun nativeEnableSegmentation(session: Long, modelBuffer: ByteBuffer, modelLen: Int, threads: Int): Int
-    internal external fun nativeAllowModelDigest(session: Long, digestBuffer: ByteBuffer): Int
+
+    internal external fun nativeYuvToRgb(
+        standard: Int,
+        range: Int,
+        outBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeSolveTwoBoneIk(
+        inBuffer: ByteBuffer,
+        upperLen: Float,
+        lowerLen: Float,
+        outBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeActivateLensFromDirectory(
+        session: Long,
+        pathBuffer: ByteBuffer,
+        pathLen: Int,
+    ): Int
+
+    internal external fun nativeSubmitFrame(
+        session: Long,
+        plane0: Long,
+        plane1: Long,
+        plane2: Long,
+        planeCount: Int,
+        width: Int,
+        height: Int,
+        pixelFormat: Int,
+        flags: Int,
+        colorStandard: Int,
+        colorRange: Int,
+        timestampUs: Long,
+    ): Int
+
+    internal external fun nativeSubmitFrameRgbaCopy(
+        session: Long,
+        rgba: ByteBuffer,
+        stride: Int,
+        width: Int,
+        height: Int,
+        pixelFormat: Int,
+        flags: Int,
+        timestampUs: Long,
+    ): Int
+
+    internal external fun nativeEnableSegmentation(
+        session: Long,
+        modelBuffer: ByteBuffer,
+        modelLen: Int,
+        threads: Int,
+    ): Int
+
+    internal external fun nativeAllowModelDigest(
+        session: Long,
+        digestBuffer: ByteBuffer,
+    ): Int
+
     internal external fun nativeClearModelAllowlist(session: Long): Int
+
     internal external fun nativeDisableSegmentation(session: Long)
-    internal external fun nativeSetSegmentationMask(session: Long, maskBuffer: ByteBuffer, maskLen: Int): Int
-    internal external fun nativeSetSegmentationClassMask(session: Long, channel: Int, maskBuffer: ByteBuffer, maskLen: Int): Int
+
+    internal external fun nativeSetSegmentationMask(
+        session: Long,
+        maskBuffer: ByteBuffer,
+        maskLen: Int,
+    ): Int
+
+    internal external fun nativeSetSegmentationClassMask(
+        session: Long,
+        channel: Int,
+        maskBuffer: ByteBuffer,
+        maskLen: Int,
+    ): Int
+
     internal external fun nativeSegmentationChannels(session: Long): Int
-    internal external fun nativeSetFaceLandmarks(session: Long, pointsBuffer: ByteBuffer, pointCount: Int): Int
-    internal external fun nativeSetBeautyLut(session: Long, slot: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int): Int
-    internal external fun nativeSetBeautyMakeupTexture(session: Long, effect: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int): Int
-    internal external fun nativeCaptureFrame(engine: Long, session: Long, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
-    internal external fun nativeCapturePhotoAs(engine: Long, session: Long, format: Int, quality: Int, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
-    internal external fun nativeRenderToLiveTexture(engine: Long, session: Long, nativeHandle: Long, width: Int, height: Int): Int
-    internal external fun nativeReleaseLiveTexture(engine: Long, nativeHandle: Long): Int
-    internal external fun nativePhysicsHairRemove(session: Long, hairId: Int): Int
+
+    internal external fun nativeSetFaceLandmarks(
+        session: Long,
+        pointsBuffer: ByteBuffer,
+        pointCount: Int,
+    ): Int
+
+    internal external fun nativeSetBeautyLut(
+        session: Long,
+        slot: Int,
+        rgbaBuffer: ByteBuffer,
+        width: Int,
+        height: Int,
+    ): Int
+
+    internal external fun nativeSetBeautyMakeupTexture(
+        session: Long,
+        effect: Int,
+        rgbaBuffer: ByteBuffer,
+        width: Int,
+        height: Int,
+    ): Int
+
+    internal external fun nativeCaptureFrame(
+        engine: Long,
+        session: Long,
+        dataBuffer: ByteBuffer,
+        dataCapacity: Long,
+        infoBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeCapturePhotoAs(
+        engine: Long,
+        session: Long,
+        format: Int,
+        quality: Int,
+        dataBuffer: ByteBuffer,
+        dataCapacity: Long,
+        infoBuffer: ByteBuffer,
+    ): Int
+
+    internal external fun nativeRenderToLiveTexture(
+        engine: Long,
+        session: Long,
+        nativeHandle: Long,
+        width: Int,
+        height: Int,
+    ): Int
+
+    internal external fun nativeReleaseLiveTexture(
+        engine: Long,
+        nativeHandle: Long,
+    ): Int
+
+    internal external fun nativePhysicsHairRemove(
+        session: Long,
+        hairId: Int,
+    ): Int
 
     const val COLOR_BT601 = 0
     const val COLOR_BT709 = 1
@@ -543,6 +1712,7 @@ object Gosslens {
     const val BODY_JOINT_RIGHT_KNEE = 10
     const val BODY_JOINT_LEFT_ANKLE = 11
     const val BODY_JOINT_RIGHT_ANKLE = 12
+
     // Named attach points on a tracked hand for handJoint; palm is the knuckle.
     const val HAND_JOINT_WRIST = 0
     const val HAND_JOINT_THUMB_TIP = 1
@@ -616,7 +1786,10 @@ object Gosslens {
 
     /** The 4x4 YUV-to-RGB conversion matrix for a color standard and
      * range, column-major, sixteen floats. */
-    fun yuvToRgb(colorStandard: Int, colorRange: Int): FloatArray {
+    fun yuvToRgb(
+        colorStandard: Int,
+        colorRange: Int,
+    ): FloatArray {
         val buffer = ByteBuffer.allocateDirect(16 * 4).order(java.nio.ByteOrder.nativeOrder())
         check(nativeYuvToRgb(colorStandard, colorRange, buffer) == 0) { "unknown color standard or range" }
         val matrix = FloatArray(16)
@@ -627,9 +1800,19 @@ object Gosslens {
     /** Analytic two-bone inverse kinematics for a limb: root, the upper and
      * lower bone lengths, target, and pole (each xyz); returns the mid joint
      * then the end. An out-of-reach target extends the limb straight at it. */
-    fun solveTwoBoneIk(root: FloatArray, upperLen: Float, lowerLen: Float, target: FloatArray, pole: FloatArray): Pair<FloatArray, FloatArray> {
+    fun solveTwoBoneIk(
+        root: FloatArray,
+        upperLen: Float,
+        lowerLen: Float,
+        target: FloatArray,
+        pole: FloatArray,
+    ): Pair<FloatArray, FloatArray> {
         val inBuf = ByteBuffer.allocateDirect(9 * 4).order(java.nio.ByteOrder.nativeOrder())
-        inBuf.asFloatBuffer().apply { put(root); put(target); put(pole) }
+        inBuf.asFloatBuffer().apply {
+            put(root)
+            put(target)
+            put(pole)
+        }
         val outBuf = ByteBuffer.allocateDirect(6 * 4).order(java.nio.ByteOrder.nativeOrder())
         check(nativeSolveTwoBoneIk(inBuf, upperLen, lowerLen, outBuf) == 0) { "invalid ik arguments" }
         val out = FloatArray(6)
@@ -637,19 +1820,30 @@ object Gosslens {
         return Pair(out.copyOfRange(0, 3), out.copyOfRange(3, 6))
     }
 
-    fun flagsFor(rotationDegrees: Int, mirrored: Boolean): Int = GossFlags.flagsFor(rotationDegrees, mirrored)
+    fun flagsFor(
+        rotationDegrees: Int,
+        mirrored: Boolean,
+    ): Int = GossFlags.flagsFor(rotationDegrees, mirrored)
 }
 
 /** Pool capacities for the engine's texture and staging pools; the
  * core clamps and defaults exactly as the C config does. */
-data class GossEngineConfig(val texturePoolCapacity: Int, val stagingPoolCapacity: Int)
+data class GossEngineConfig(
+    val texturePoolCapacity: Int,
+    val stagingPoolCapacity: Int,
+)
 
 /** The best track a music snippet matched: its id and how many landmarks agreed. */
-data class MusicMatch(val trackId: Int, val votes: Int)
+data class MusicMatch(
+    val trackId: Int,
+    val votes: Int,
+)
 
 /** frameBudgetUs is the whole-pipeline frame time the degradation
  * policy holds the session to; zero means the built-in 30 fps budget. */
-data class GossSessionConfig(val frameBudgetUs: Int)
+data class GossSessionConfig(
+    val frameBudgetUs: Int,
+)
 
 /** Declarative camera-hardware intent. The engine normalizes every field; the
  * app reads it back and drives CameraX. Modes: flash 0 off/1 on/2 auto; focus
@@ -711,7 +1905,10 @@ data class GossCaptureGuidance(
 internal object NativeCleaner {
     private val cleaner: Cleaner = Cleaner.create()
 
-    fun register(owner: Any, action: Runnable): Any = cleaner.register(owner, action)
+    fun register(
+        owner: Any,
+        action: Runnable,
+    ): Any = cleaner.register(owner, action)
 
     fun disarm(registration: Any) = (registration as Cleaner.Cleanable).clean()
 }
@@ -721,14 +1918,19 @@ internal object NativeCleaner {
  * still-live session, after which that session's own handle is stale. On the
  * garbage-collected path a session holds its engine strongly, so a dropped
  * pair is always cleaned session-first. */
-class GossEngine private constructor(internal val handle: Long) : AutoCloseable {
+class GossEngine private constructor(
+    internal val handle: Long,
+) : AutoCloseable {
     private var closed = false
+
     /** Frees the native engine if the wrapper is dropped without close();
      * only registered on API 33+, where Cleaner exists. */
     private val cleanable: Any? =
         if (Build.VERSION.SDK_INT >= 33) NativeCleaner.register(this, EngineDisposer(handle)) else null
 
-    private class EngineDisposer(private val handle: Long) : Runnable {
+    private class EngineDisposer(
+        private val handle: Long,
+    ) : Runnable {
         override fun run() = Gosslens.nativeEngineDestroy(handle)
     }
 
@@ -751,20 +1953,28 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
             // The engine refuses a caller from another major, asked rather than
             // remembered: these bindings read the version and never compared it.
             check(Gosslens.abiCheck()) { "gosslens abi major mismatch" }
-            val handle = Gosslens.nativeEngineCreate(
-                config?.texturePoolCapacity ?: -1,
-                config?.stagingPoolCapacity ?: -1,
-            )
+            val handle =
+                Gosslens.nativeEngineCreate(
+                    config?.texturePoolCapacity ?: -1,
+                    config?.stagingPoolCapacity ?: -1,
+                )
             check(handle != 0L) { "engine create failed" }
             return GossEngine(handle)
         }
     }
 
-    fun initRenderer(surface: Surface, width: Int, height: Int) {
+    fun initRenderer(
+        surface: Surface,
+        width: Int,
+        height: Int,
+    ) {
         check(Gosslens.nativeInitRenderer(handle, surface, width, height) == 0) { "renderer init failed" }
     }
 
-    fun resize(width: Int, height: Int) = Gosslens.nativeResize(handle, width, height)
+    fun resize(
+        width: Int,
+        height: Int,
+    ) = Gosslens.nativeResize(handle, width, height)
 
     /** Requests a screenshot of the next presented frame, written as
      * [path] plus a ".tga" suffix the renderer's own callback appends -
@@ -778,8 +1988,7 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
         return Gosslens.nativeRequestScreenshot(handle, buffer, bytes.size) == 0
     }
 
-    fun renderFrame(session: GossSession?): Boolean =
-        Gosslens.nativeRenderFrame(handle, session?.handle ?: 0L) == 0
+    fun renderFrame(session: GossSession?): Boolean = Gosslens.nativeRenderFrame(handle, session?.handle ?: 0L) == 0
 
     /** Compiles a text prompt into a GLF lens manifest on device. The result
      * is ordinary GLF the caller can inspect or pass to activateLens, and needs
@@ -804,7 +2013,12 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     /** Composes an on-device generative-music track from a text prompt and
      * returns it as a mono 16-bit WAV. A non-zero seed varies the take; bars 0
      * uses the default length. Deterministic, no model and no network. */
-    fun generateSong(prompt: String, sampleRate: Int = 48000, seed: Int = 0, bars: Int = 0): ByteArray {
+    fun generateSong(
+        prompt: String,
+        sampleRate: Int = 48000,
+        seed: Int = 0,
+        bars: Int = 0,
+    ): ByteArray {
         val bytes = prompt.toByteArray(Charsets.UTF_8)
         val promptBuffer = ByteBuffer.allocateDirect(maxOf(bytes.size, 1))
         promptBuffer.put(bytes)
@@ -824,7 +2038,11 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     /** Scans a width*height 8-bit luminance frame for an EAN-13 / UPC-A barcode,
      * returning its 13 digits or null when no checksum-valid symbol is found.
      * Purely algorithmic and deterministic, no model. */
-    fun scanBarcode(luminance: ByteArray, width: Int, height: Int): ByteArray? {
+    fun scanBarcode(
+        luminance: ByteArray,
+        width: Int,
+        height: Int,
+    ): ByteArray? {
         val lumBuffer = ByteBuffer.allocateDirect(maxOf(luminance.size, 1))
         lumBuffer.put(luminance)
         lumBuffer.rewind()
@@ -838,7 +2056,11 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     /** Scans a width*height 8-bit luminance frame for a QR code and returns its
      * decoded payload bytes, or null when no QR decodes. Reed-Solomon error
      * correction, algorithmic and deterministic, no model. */
-    fun scanQR(luminance: ByteArray, width: Int, height: Int): ByteArray? {
+    fun scanQR(
+        luminance: ByteArray,
+        width: Int,
+        height: Int,
+    ): ByteArray? {
         val lumBuffer = ByteBuffer.allocateDirect(maxOf(luminance.size, 1))
         lumBuffer.put(luminance)
         lumBuffer.rewind()
@@ -857,7 +2079,11 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     /** Generates a QR code for a payload and renders it into a square 8-bit
      * luminance image (0 dark, 255 light); returns the pixels and the side
      * length. Algorithmic and deterministic, no model. */
-    fun generateQR(payload: ByteArray, moduleScale: Int = 6, quietModules: Int = 4): Pair<ByteArray, Int>? {
+    fun generateQR(
+        payload: ByteArray,
+        moduleScale: Int = 6,
+        quietModules: Int = 4,
+    ): Pair<ByteArray, Int>? {
         val payloadBuffer = ByteBuffer.allocateDirect(maxOf(payload.size, 1))
         payloadBuffer.put(payload)
         payloadBuffer.rewind()
@@ -874,13 +2100,22 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
 
     /** One semantic-search hit: the archive index of a media item and its cosine
      * similarity to the query. */
-    data class MediaHit(val index: Int, val score: Float)
+    data class MediaHit(
+        val index: Int,
+        val score: Float,
+    )
 
     /** Ranks a media archive by semantic similarity. [corpus] holds [count]
      * embedding vectors of length [dim] contiguously and [query] is one
      * dim-vector, all from your own embedding model; returns the top [k] hits by
      * cosine similarity. The engine owns the exact search; any embedder feeds it. */
-    fun mediaSearch(corpus: FloatArray, count: Int, dim: Int, query: FloatArray, k: Int): List<MediaHit> {
+    fun mediaSearch(
+        corpus: FloatArray,
+        count: Int,
+        dim: Int,
+        query: FloatArray,
+        k: Int,
+    ): List<MediaHit> {
         val corpusBuffer = ByteBuffer.allocateDirect(maxOf(corpus.size, 1) * 4).order(ByteOrder.nativeOrder())
         corpusBuffer.asFloatBuffer().put(corpus)
         val queryBuffer = ByteBuffer.allocateDirect(maxOf(query.size, 1) * 4).order(ByteOrder.nativeOrder())
@@ -896,11 +2131,24 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     /** Seals a media blob for the on-device vault with ChaCha20-Poly1305 under a
      * 32-byte [key] and 12-byte [nonce], binding [aad]; returns ciphertext then
      * the 16-byte tag. Keep the key in the platform keystore. */
-    fun sealMedia(key: ByteArray, nonce: ByteArray, plaintext: ByteArray, aad: ByteArray = ByteArray(0)): ByteArray? {
-        val keyBuffer = ByteBuffer.allocateDirect(maxOf(key.size, 1)); keyBuffer.put(key); keyBuffer.rewind()
-        val nonceBuffer = ByteBuffer.allocateDirect(maxOf(nonce.size, 1)); nonceBuffer.put(nonce); nonceBuffer.rewind()
-        val plainBuffer = ByteBuffer.allocateDirect(maxOf(plaintext.size, 1)); plainBuffer.put(plaintext); plainBuffer.rewind()
-        val aadBuffer = ByteBuffer.allocateDirect(maxOf(aad.size, 1)); aadBuffer.put(aad); aadBuffer.rewind()
+    fun sealMedia(
+        key: ByteArray,
+        nonce: ByteArray,
+        plaintext: ByteArray,
+        aad: ByteArray = ByteArray(0),
+    ): ByteArray? {
+        val keyBuffer = ByteBuffer.allocateDirect(maxOf(key.size, 1))
+        keyBuffer.put(key)
+        keyBuffer.rewind()
+        val nonceBuffer = ByteBuffer.allocateDirect(maxOf(nonce.size, 1))
+        nonceBuffer.put(nonce)
+        nonceBuffer.rewind()
+        val plainBuffer = ByteBuffer.allocateDirect(maxOf(plaintext.size, 1))
+        plainBuffer.put(plaintext)
+        plainBuffer.rewind()
+        val aadBuffer = ByteBuffer.allocateDirect(maxOf(aad.size, 1))
+        aadBuffer.put(aad)
+        aadBuffer.rewind()
         val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
         val probe = ByteBuffer.allocateDirect(1)
         if (Gosslens.nativeSealMedia(keyBuffer, nonceBuffer, plainBuffer, plaintext.size, aadBuffer, aad.size, probe, 0L, len) != 0) return null
@@ -915,11 +2163,24 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     /** Opens a sealed vault blob back to plaintext under the same key, nonce and
      * aad. Returns null if authentication fails, so a tampered blob never
      * decodes. */
-    fun openMedia(key: ByteArray, nonce: ByteArray, sealed: ByteArray, aad: ByteArray = ByteArray(0)): ByteArray? {
-        val keyBuffer = ByteBuffer.allocateDirect(maxOf(key.size, 1)); keyBuffer.put(key); keyBuffer.rewind()
-        val nonceBuffer = ByteBuffer.allocateDirect(maxOf(nonce.size, 1)); nonceBuffer.put(nonce); nonceBuffer.rewind()
-        val sealedBuffer = ByteBuffer.allocateDirect(maxOf(sealed.size, 1)); sealedBuffer.put(sealed); sealedBuffer.rewind()
-        val aadBuffer = ByteBuffer.allocateDirect(maxOf(aad.size, 1)); aadBuffer.put(aad); aadBuffer.rewind()
+    fun openMedia(
+        key: ByteArray,
+        nonce: ByteArray,
+        sealed: ByteArray,
+        aad: ByteArray = ByteArray(0),
+    ): ByteArray? {
+        val keyBuffer = ByteBuffer.allocateDirect(maxOf(key.size, 1))
+        keyBuffer.put(key)
+        keyBuffer.rewind()
+        val nonceBuffer = ByteBuffer.allocateDirect(maxOf(nonce.size, 1))
+        nonceBuffer.put(nonce)
+        nonceBuffer.rewind()
+        val sealedBuffer = ByteBuffer.allocateDirect(maxOf(sealed.size, 1))
+        sealedBuffer.put(sealed)
+        sealedBuffer.rewind()
+        val aadBuffer = ByteBuffer.allocateDirect(maxOf(aad.size, 1))
+        aadBuffer.put(aad)
+        aadBuffer.rewind()
         val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
         val probe = ByteBuffer.allocateDirect(1)
         if (Gosslens.nativeOpenMedia(keyBuffer, nonceBuffer, sealedBuffer, sealed.size, aadBuffer, aad.size, probe, 0L, len) != 0) return null
@@ -935,8 +2196,18 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * [frameStride] bytes apart, scored by sharpness blended with a per-frame
      * [openness] score weighted by [opennessWeight] in 0..1. Returns the winning
      * frame index for best-take fusion. */
-    fun bestTake(frames: ByteArray, frameStride: Long, count: Int, width: Int, height: Int, openness: FloatArray, opennessWeight: Float): Int {
-        val framesBuffer = ByteBuffer.allocateDirect(maxOf(frames.size, 1)); framesBuffer.put(frames); framesBuffer.rewind()
+    fun bestTake(
+        frames: ByteArray,
+        frameStride: Long,
+        count: Int,
+        width: Int,
+        height: Int,
+        openness: FloatArray,
+        opennessWeight: Float,
+    ): Int {
+        val framesBuffer = ByteBuffer.allocateDirect(maxOf(frames.size, 1))
+        framesBuffer.put(frames)
+        framesBuffer.rewind()
         val opennessBuffer = ByteBuffer.allocateDirect(maxOf(openness.size, 1) * 4).order(ByteOrder.nativeOrder())
         opennessBuffer.asFloatBuffer().put(openness)
         val index = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
@@ -946,7 +2217,13 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
 
     /** Fingerprints a reference recording and registers it under [trackId] in the
      * engine's on-device music catalog. Samples are interleaved f32. */
-    fun addMusicReference(trackId: Int, samples: FloatArray, frameCount: Int, sampleRate: Int, channels: Int): Boolean {
+    fun addMusicReference(
+        trackId: Int,
+        samples: FloatArray,
+        frameCount: Int,
+        sampleRate: Int,
+        channels: Int,
+    ): Boolean {
         val buf = ByteBuffer.allocateDirect(maxOf(samples.size, 1) * 4).order(ByteOrder.nativeOrder())
         buf.asFloatBuffer().put(samples)
         return Gosslens.nativeMusicAddReference(handle, trackId, buf, frameCount, sampleRate, channels) == 0
@@ -957,7 +2234,13 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
 
     /** Fingerprints a captured snippet and matches it against the catalog,
      * returning the best track and its vote count, or null below [minVotes]. */
-    fun identifyMusic(samples: FloatArray, frameCount: Int, sampleRate: Int, channels: Int, minVotes: Int = 5): MusicMatch? {
+    fun identifyMusic(
+        samples: FloatArray,
+        frameCount: Int,
+        sampleRate: Int,
+        channels: Int,
+        minVotes: Int = 5,
+    ): MusicMatch? {
         val buf = ByteBuffer.allocateDirect(maxOf(samples.size, 1) * 4).order(ByteOrder.nativeOrder())
         buf.asFloatBuffer().put(samples)
         val out = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
@@ -969,7 +2252,12 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     /** The times, in seconds from the buffer's start, of every beat in a piece of
      * audio, from the same onset detector a lens's beat trigger rides. Samples are
      * interleaved f32, and a take cut to these meets its sound on the beat. */
-    fun beatMap(samples: FloatArray, frameCount: Int, sampleRate: Int, channels: Int): DoubleArray {
+    fun beatMap(
+        samples: FloatArray,
+        frameCount: Int,
+        sampleRate: Int,
+        channels: Int,
+    ): DoubleArray {
         val buf = ByteBuffer.allocateDirect(maxOf(samples.size, 1) * 4).order(ByteOrder.nativeOrder())
         buf.asFloatBuffer().put(samples)
         val countBuffer = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
@@ -989,12 +2277,21 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * rendered frame appends until [stopRecording].
      * [realtime] false is for an offline lane with no viewfinder: the composite goes straight
      * to the encoder rather than waiting on a display refresh nobody is watching. */
-    fun startRecording(session: GossSession, path: String, width: Int = 0, height: Int = 0, bitrate: Int = 0, hevc: Boolean = false, realtime: Boolean = true): Boolean {
+    fun startRecording(
+        session: GossSession,
+        path: String,
+        width: Int = 0,
+        height: Int = 0,
+        bitrate: Int = 0,
+        hevc: Boolean = false,
+        realtime: Boolean = true,
+    ): Boolean {
         val bytes = path.toByteArray(Charsets.UTF_8)
         val buffer = ByteBuffer.allocateDirect(bytes.size)
         buffer.put(bytes)
         buffer.rewind()
-        return Gosslens.nativeRecordingStart(handle, session.handle, buffer, bytes.size, width, height, bitrate, if (hevc) 1 else 0, if (realtime) 1 else 0) == 0
+        return Gosslens.nativeRecordingStart(handle, session.handle, buffer, bytes.size, width, height, bitrate, if (hevc) 1 else 0, if (realtime) 1 else 0) ==
+            0
     }
 
     /** Stops the recording, flushing in-flight frames and finalizing
@@ -1016,11 +2313,15 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     }
 
     /** False at the end of the stream; loop by seeking rather than reopening. */
-    fun clipSubmitFrame(clip: Int, timestampUs: Long = 0): Boolean =
-        Gosslens.nativeClipSubmitFrame(handle, clip, timestampUs) == 0
+    fun clipSubmitFrame(
+        clip: Int,
+        timestampUs: Long = 0,
+    ): Boolean = Gosslens.nativeClipSubmitFrame(handle, clip, timestampUs) == 0
 
-    fun clipSeek(clip: Int, targetUs: Long): Boolean =
-        Gosslens.nativeClipSeek(handle, clip, targetUs) == 0
+    fun clipSeek(
+        clip: Int,
+        targetUs: Long,
+    ): Boolean = Gosslens.nativeClipSeek(handle, clip, targetUs) == 0
 
     fun clipInfo(clip: Int): ClipInfo? {
         // Two u32, two i64, one u32, padded: the struct's own layout.
@@ -1043,7 +2344,12 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * Turns on the text rail. A detector alone finds where the text is; pass a
      * recogniser and its dictionary to get strings back.
      */
-    fun enableText(detector: ByteArray, recognizer: ByteArray = ByteArray(0), dictionary: ByteArray = ByteArray(0), detectSide: Int = 320): Boolean {
+    fun enableText(
+        detector: ByteArray,
+        recognizer: ByteArray = ByteArray(0),
+        dictionary: ByteArray = ByteArray(0),
+        detectSide: Int = 320,
+    ): Boolean {
         val det = ByteBuffer.allocateDirect(detector.size).put(detector)
         val rec = if (recognizer.isEmpty()) null else ByteBuffer.allocateDirect(recognizer.size).put(recognizer)
         val dict = if (dictionary.isEmpty()) null else ByteBuffer.allocateDirect(dictionary.size).put(dictionary)
@@ -1096,8 +2402,10 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     }
 
     /** Opens the memory plane at a fixed embedding width under a caller-set bound. */
-    fun memoryOpen(dim: Int, maxEntries: Int = 4096): Boolean =
-        Gosslens.nativeMemoryOpen(handle, dim, maxEntries) == 0
+    fun memoryOpen(
+        dim: Int,
+        maxEntries: Int = 4096,
+    ): Boolean = Gosslens.nativeMemoryOpen(handle, dim, maxEntries) == 0
 
     fun memoryClose(): Boolean = Gosslens.nativeMemoryClose(handle) == 0
 
@@ -1105,7 +2413,10 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * The memory sealed under a host key. The nonce is yours: reusing one under the
      * same key breaks the cipher, and only you know what you have written.
      */
-    fun memorySaveSealed(key: ByteArray, nonce: ByteArray): ByteArray {
+    fun memorySaveSealed(
+        key: ByteArray,
+        nonce: ByteArray,
+    ): ByteArray {
         val keyBuffer = ByteBuffer.allocateDirect(key.size).put(key)
         val nonceBuffer = ByteBuffer.allocateDirect(nonce.size).put(nonce)
         val empty = ByteBuffer.allocateDirect(1)
@@ -1119,14 +2430,20 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     }
 
     /** Reads a sealed memory back, refusing a wrong key or a changed byte. */
-    fun memoryLoadSealed(key: ByteArray, bytes: ByteArray): Boolean {
+    fun memoryLoadSealed(
+        key: ByteArray,
+        bytes: ByteArray,
+    ): Boolean {
         val keyBuffer = ByteBuffer.allocateDirect(key.size).put(key)
         val data = ByteBuffer.allocateDirect(bytes.size).put(bytes)
         return Gosslens.nativeMemoryLoadSealed(handle, keyBuffer, data, bytes.size) == 0
     }
 
     /** Remembers one embedding; the same id replaces rather than duplicating. */
-    fun remember(id: Long, embedding: FloatArray): Boolean {
+    fun remember(
+        id: Long,
+        embedding: FloatArray,
+    ): Boolean {
         val buffer = ByteBuffer.allocateDirect(embedding.size * 4).order(ByteOrder.LITTLE_ENDIAN)
         embedding.forEach { buffer.putFloat(it) }
         return Gosslens.nativeMemoryRemember(handle, id, buffer, embedding.size) == 0
@@ -1135,7 +2452,10 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     fun forget(id: Long): Boolean = Gosslens.nativeMemoryForget(handle, id) == 0
 
     /** The nearest remembered embeddings, fewer than k on a smaller memory. */
-    fun memorySearch(query: FloatArray, k: Int = 8): List<GossMemoryMatch> {
+    fun memorySearch(
+        query: FloatArray,
+        k: Int = 8,
+    ): List<GossMemoryMatch> {
         val queryBuffer = ByteBuffer.allocateDirect(query.size * 4).order(ByteOrder.LITTLE_ENDIAN)
         query.forEach { queryBuffer.putFloat(it) }
         val out = ByteBuffer.allocateDirect(k * 12).order(ByteOrder.LITTLE_ENDIAN)
@@ -1154,8 +2474,10 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * Narrows what this session answers. A read out of scope is dropped from the
      * record rather than failing; a verb out of scope is refused.
      */
-    fun setScope(sections: Int, verbs: Int): Boolean =
-        Gosslens.nativeSetScope(handle, sections, verbs) == 0
+    fun setScope(
+        sections: Int,
+        verbs: Int,
+    ): Boolean = Gosslens.nativeSetScope(handle, sections, verbs) == 0
 
     fun scope(): Pair<Int, Int> {
         val packed = Gosslens.nativeScope(handle)
@@ -1163,20 +2485,29 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     }
 
     /** Opens a screen as a source, after MediaProjection consent is granted. */
-    fun openScreen(surfaceId: Long, scale: Float = 0f): Int =
-        Gosslens.nativeOpenScreen(handle, surfaceId, scale)
+    fun openScreen(
+        surfaceId: Long,
+        scale: Float = 0f,
+    ): Int = Gosslens.nativeOpenScreen(handle, surfaceId, scale)
 
     fun closeScreen(screen: Int): Boolean = Gosslens.nativeCloseScreen(handle, screen) == 0
 
     /** Submits the newest frame. False when the screen has not changed. */
-    fun stepScreen(screen: Int, source: String = ""): Boolean {
+    fun stepScreen(
+        screen: Int,
+        source: String = "",
+    ): Boolean {
         val bytes = source.toByteArray()
         val buffer = if (bytes.isEmpty()) null else ByteBuffer.allocateDirect(bytes.size).put(bytes)
         return Gosslens.nativeStepScreen(handle, screen, buffer, bytes.size) == 0
     }
 
     /** Where a normalized point lands: logical points, backing pixels, desktop. */
-    fun screenPoint(screen: Int, x: Float, y: Float): Triple<FloatArray, FloatArray, FloatArray>? {
+    fun screenPoint(
+        screen: Int,
+        x: Float,
+        y: Float,
+    ): Triple<FloatArray, FloatArray, FloatArray>? {
         val out = ByteBuffer.allocateDirect(24).order(ByteOrder.LITTLE_ENDIAN)
         if (Gosslens.nativeScreenPoint(handle, screen, x, y, out) != 0) return null
         return Triple(
@@ -1190,22 +2521,17 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * One versioned record of what the engine currently sees, into the caller's
      * buffer. The bytes written, or the size needed when the buffer is short.
      */
-    fun perceptionSnapshot(select: Int, out: ByteBuffer): Int =
-        Gosslens.nativePerceptionSnapshot(handle, select, out, out.capacity())
+    fun perceptionSnapshot(
+        select: Int,
+        out: ByteBuffer,
+    ): Int = Gosslens.nativePerceptionSnapshot(handle, select, out, out.capacity())
 
     /** The same record as compact JSON. Same size-once contract. */
-    fun perceptionJson(select: Int, out: ByteBuffer): Int =
-        Gosslens.nativePerceptionJson(handle, select, out, out.capacity())
+    fun perceptionJson(
+        select: Int,
+        out: ByteBuffer,
+    ): Int = Gosslens.nativePerceptionJson(handle, select, out, out.capacity())
 
-    /**
-     * Drains the session's event ring in order. dropped says whether anything was
-     * missed since the last drain, and is cleared by the read.
-     */
-    /**
-     * Drains the ring and hands each event to a callback, returning what was
-     * dropped. A caller using coroutines wraps this in a flow in one line; the SDK
-     * takes no coroutines dependency of its own.
-     */
     /**
      * Adds or updates one annotation. The same id replaces rather than
      * duplicating, so moving one box every frame leaks no entry per frame.
@@ -1272,12 +2598,24 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
         )
     }
 
-    fun drainEvents(capacity: Int = 64, onEvent: (GossEvent) -> Unit): Long {
+    /**
+     * Drains the ring and hands each event to a callback, returning what was
+     * dropped. A caller using coroutines wraps this in a flow in one line; the SDK
+     * takes no coroutines dependency of its own.
+     */
+    fun drainEvents(
+        capacity: Int = 64,
+        onEvent: (GossEvent) -> Unit,
+    ): Long {
         val batch = pollEvents(capacity)
         for (event in batch.events) onEvent(event)
         return batch.dropped
     }
 
+    /**
+     * Drains the session's event ring in order. dropped says whether anything was
+     * missed since the last drain, and is cleared by the read.
+     */
     fun pollEvents(capacity: Int = 64): EventBatch {
         // kind u32 at 0, sequence u64 at 8, timestamp i64 at 16, a u32 at 24,
         // b u32 at 28, value f32 at 32; forty bytes with the tail padding.
@@ -1304,7 +2642,10 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     }
 
     /** Forward decodes; backward seeks and decodes. */
-    fun clipStep(clip: Int, frames: Int): Boolean = Gosslens.nativeClipStep(handle, clip, frames) == 0
+    fun clipStep(
+        clip: Int,
+        frames: Int,
+    ): Boolean = Gosslens.nativeClipStep(handle, clip, frames) == 0
 
     /**
      * Holds the recording clock. Frames submitted while paused are not written and
@@ -1328,8 +2669,14 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * and beat analysis drives audio triggers, and an active recording
      * muxes it where the backend supports audio. [samples] is a direct
      * float buffer. */
-    fun submitAudio(session: GossSession, samples: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, timestampUs: Long): Boolean =
-        Gosslens.nativeSubmitAudio(session.handle, samples, frameCount, sampleRate, channels, timestampUs) == 0
+    fun submitAudio(
+        session: GossSession,
+        samples: ByteBuffer,
+        frameCount: Int,
+        sampleRate: Int,
+        channels: Int,
+        timestampUs: Long,
+    ): Boolean = Gosslens.nativeSubmitAudio(session.handle, samples, frameCount, sampleRate, channels, timestampUs) == 0
 
     /** Renders like renderFrame and returns the composited output
      * encoded as PNG bytes, sized by a probe call first. Deterministic:
@@ -1353,7 +2700,12 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * for a hardware encoder), the supported per-frame output for a live
      * broadcast source. width and height are the render size; returns the
      * packed frame bytes, or null when the renderer is away. */
-    fun captureLiveFrame(session: GossSession?, width: Int, height: Int, format: Int = 3): ByteArray? {
+    fun captureLiveFrame(
+        session: GossSession?,
+        width: Int,
+        height: Int,
+        format: Int = 3,
+    ): ByteArray? {
         if (width <= 0 || height <= 0) return null
         val pixels = width.toLong() * height
         val capacity = if (format == 0) pixels + pixels / 2 else pixels * 4
@@ -1370,7 +2722,13 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * reuse sibling of captureLiveFrame for a per-frame broadcast loop.
      * Returns the byte count, or -1 when the renderer is away or [into]
      * is too short for the format at this size. */
-    fun captureLiveFrame(session: GossSession?, width: Int, height: Int, into: ByteArray, format: Int = 3): Int {
+    fun captureLiveFrame(
+        session: GossSession?,
+        width: Int,
+        height: Int,
+        into: ByteArray,
+        format: Int = 3,
+    ): Int {
         if (width <= 0 || height <= 0) return -1
         val pixels = width.toLong() * height
         val capacity = if (format == 0) pixels + pixels / 2 else pixels * 4
@@ -1386,15 +2744,42 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * requested resolution, encoded as PNG (0), JPEG (1) or HEIC (2).
      * colorSpace tags the gamut (0 sRGB, 1 P3, 2 Rec2020); bitDepth 16 is
      * the PNG high-bit-depth path. Null when the renderer/backend is away. */
-    fun captureStill(session: GossSession?, width: Int = 0, height: Int = 0, supersample: Int = 0, format: Int = 0, quality: Int = 0, colorSpace: Int = 0, bitDepth: Int = 8): ByteArray? {
+    fun captureStill(
+        session: GossSession?,
+        width: Int = 0,
+        height: Int = 0,
+        supersample: Int = 0,
+        format: Int = 0,
+        quality: Int = 0,
+        colorSpace: Int = 0,
+        bitDepth: Int = 8,
+    ): ByteArray? {
         val info = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
         val probe = ByteBuffer.allocateDirect(1)
-        val probeStatus = Gosslens.nativeCaptureStill(handle, session?.handle ?: 0L, width, height, supersample, format, quality, colorSpace, bitDepth, probe, 0L, info)
+        val probeStatus =
+            Gosslens.nativeCaptureStill(
+                handle,
+                session?.handle ?: 0L,
+                width,
+                height,
+                supersample,
+                format,
+                quality,
+                colorSpace,
+                bitDepth,
+                probe,
+                0L,
+                info,
+            )
         val needed = info.getLong(0)
         if (probeStatus == 0 && needed == 0L) return ByteArray(0)
         if (needed <= 0L) return null
         val data = ByteBuffer.allocateDirect(needed.toInt())
-        if (Gosslens.nativeCaptureStill(handle, session?.handle ?: 0L, width, height, supersample, format, quality, colorSpace, bitDepth, data, needed, info) != 0) return null
+        if (Gosslens.nativeCaptureStill(handle, session?.handle ?: 0L, width, height, supersample, format, quality, colorSpace, bitDepth, data, needed, info) !=
+            0
+        ) {
+            return null
+        }
         val encoded = ByteArray(info.getLong(0).toInt())
         data.get(encoded)
         return encoded
@@ -1404,7 +2789,11 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * at [quality] percent, sized by a probe call first. Lossy and not
      * bit-stable across runs - the PNG [capturePhoto] stays the
      * deterministic surface. Null when the photo backend is away. */
-    fun capturePhotoAs(session: GossSession?, format: Int, quality: Int = 0): ByteArray? {
+    fun capturePhotoAs(
+        session: GossSession?,
+        format: Int,
+        quality: Int = 0,
+    ): ByteArray? {
         val info = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
         val probe = ByteBuffer.allocateDirect(1)
         val probeStatus = Gosslens.nativeCapturePhotoAs(handle, session?.handle ?: 0L, format, quality, probe, 0L, info)
@@ -1422,7 +2811,11 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * composited output back as RGBA8, row 0 first, at the render size;
      * [width] and [height] must be at least the render surface. Null when
      * the renderer is unavailable. */
-    fun captureFrame(session: GossSession?, width: Int, height: Int): ByteArray? {
+    fun captureFrame(
+        session: GossSession?,
+        width: Int,
+        height: Int,
+    ): ByteArray? {
         if (width <= 0 || height <= 0) return null
         val info = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
         val capacity = width * height * 4
@@ -1437,19 +2830,23 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * texture ([nativeHandle], a platform texture object) instead of reading
      * it back, zero-copy. False means the override is warming up (skip this
      * frame and retry) or the path is unavailable on this backend. */
-    fun renderToLiveTexture(session: GossSession, nativeHandle: Long, width: Int, height: Int): Boolean =
-        Gosslens.nativeRenderToLiveTexture(handle, session.handle, nativeHandle, width, height) == 0
+    fun renderToLiveTexture(
+        session: GossSession,
+        nativeHandle: Long,
+        width: Int,
+        height: Int,
+    ): Boolean = Gosslens.nativeRenderToLiveTexture(handle, session.handle, nativeHandle, width, height) == 0
 
     /** Releases the persistent wrap renderToLiveTexture keeps for one
      * external texture, when a publish surface retires before the engine
      * does. False for a handle with no live wrap. */
-    fun releaseLiveTexture(nativeHandle: Long): Boolean =
-        Gosslens.nativeReleaseLiveTexture(handle, nativeHandle) == 0
+    fun releaseLiveTexture(nativeHandle: Long): Boolean = Gosslens.nativeReleaseLiveTexture(handle, nativeHandle) == 0
 
     // Idempotent like destroy() everywhere else - a second close() must
     // not hand the native side an already-freed handle. Disarming the
     // Cleaner runs the same disposer once; below API 33 there is no
     // registration, so free the handle directly.
+
     /**
      * A named composite source's NV12 frame straight from a platform buffer, so
      * a second camera or a screen never needs the RGBA copy.
@@ -1469,9 +2866,16 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
         val buf = ByteBuffer.allocateDirect(bytes.size.coerceAtLeast(1)).order(ByteOrder.nativeOrder())
         buf.put(bytes)
         return Gosslens.nativeSubmitSourceHardwareBuffer(
-            handle, buf, bytes.size, buffer, width, height,
+            handle,
+            buf,
+            bytes.size,
+            buffer,
+            width,
+            height,
             Gosslens.flagsFor(rotationDegrees, mirrored),
-            colorStandard, colorRange, timestampUs,
+            colorStandard,
+            colorRange,
+            timestampUs,
         ) == 0
     }
 
@@ -1489,10 +2893,14 @@ class GossFaceResult {
     internal val buffer: ByteBuffer =
         ByteBuffer.allocateDirect(Gosslens.FACE_RESULT_BYTES).order(java.nio.ByteOrder.nativeOrder())
 
-    var frameSerial: Long = 0; private set
-    var timestampUs: Long = 0; private set
-    var presence: Float = 0f; private set
-    var landmarkCount: Int = 0; private set
+    var frameSerial: Long = 0
+        private set
+    var timestampUs: Long = 0
+        private set
+    var presence: Float = 0f
+        private set
+    var landmarkCount: Int = 0
+        private set
 
     /** x, y frame pixels and z, three floats per landmark. */
     val landmarks = FloatArray(Gosslens.FACE_LANDMARK_COUNT * 3)
@@ -1524,7 +2932,14 @@ class GossLensSignals {
      * reads as zero. Pass hasFace = false when no face is tracked -
      * every face-driven signal then reads false regardless of what
      * blendshapes holds. */
-    fun set(hasFace: Boolean, handsPresent: Boolean, tap: Boolean, worldTrackingState: Double, audioLevel: Double, blendshapes: FloatArray) {
+    fun set(
+        hasFace: Boolean,
+        handsPresent: Boolean,
+        tap: Boolean,
+        worldTrackingState: Double,
+        audioLevel: Double,
+        blendshapes: FloatArray,
+    ) {
         buffer.put(0, if (hasFace) 1 else 0)
         buffer.put(1, if (handsPresent) 1 else 0)
         buffer.put(2, if (tap) 1 else 0)
@@ -1547,9 +2962,12 @@ class GossHandResult {
     internal val buffer: ByteBuffer =
         ByteBuffer.allocateDirect(Gosslens.HAND_RESULT_BYTES).order(java.nio.ByteOrder.nativeOrder())
 
-    var frameSerial: Long = 0; private set
-    var timestampUs: Long = 0; private set
-    var handCount: Int = 0; private set
+    var frameSerial: Long = 0
+        private set
+    var timestampUs: Long = 0
+        private set
+    var handCount: Int = 0
+        private set
 
     val presences = FloatArray(Gosslens.HAND_MAX)
     val handednesses = FloatArray(Gosslens.HAND_MAX)
@@ -1579,7 +2997,10 @@ class GossHandResult {
     /** Writes the public arrays back into the frozen C layout, so an app's
      * own tracker fills presences, handednesses, gestures, and landmarks and
      * submits this result through submitHands. */
-    fun pack(hands: Int, timestampUs: Long = 0L) {
+    fun pack(
+        hands: Int,
+        timestampUs: Long = 0L,
+    ) {
         buffer.rewind()
         buffer.putLong(frameSerial)
         buffer.putLong(timestampUs)
@@ -1605,10 +3026,14 @@ class GossPoseResult {
     internal val buffer: ByteBuffer =
         ByteBuffer.allocateDirect(Gosslens.POSE_RESULT_BYTES).order(java.nio.ByteOrder.nativeOrder())
 
-    var frameSerial: Long = 0; private set
-    var timestampUs: Long = 0; private set
-    var presence: Float = 0f; private set
-    var landmarkCount: Int = 0; private set
+    var frameSerial: Long = 0
+        private set
+    var timestampUs: Long = 0
+        private set
+    var presence: Float = 0f
+        private set
+    var landmarkCount: Int = 0
+        private set
 
     /** x, y frame pixels and z, three floats per landmark. */
     val landmarks = FloatArray(Gosslens.POSE_LANDMARK_COUNT * 3)
@@ -1638,6 +3063,7 @@ class GossSession private constructor(
     internal val handle: Long,
 ) : AutoCloseable {
     private var closed = false
+
     /** Frees the native session if the wrapper is dropped without close();
      * only registered on API 33+, where Cleaner exists. */
     private val cleanable: Any? =
@@ -1674,7 +3100,10 @@ class GossSession private constructor(
         internal const val SESSION_REPORT_BYTES = 88
 
         /** Null config means the core's own defaults, same as C's null. */
-        fun create(engine: GossEngine, config: GossSessionConfig? = null): GossSession {
+        fun create(
+            engine: GossEngine,
+            config: GossSessionConfig? = null,
+        ): GossSession {
             val handle = Gosslens.nativeSessionCreate(engine.handle, config?.frameBudgetUs ?: -1)
             check(handle != 0L) { "session create failed" }
             return GossSession(engine, handle)
@@ -1693,11 +3122,20 @@ class GossSession private constructor(
         colorStandard: Int = Gosslens.COLOR_BT709,
         colorRange: Int = Gosslens.RANGE_VIDEO,
         timestampUs: Long,
-    ): Boolean = Gosslens.nativeSubmitFrameCopy(
-        handle, y, yStride, uv, uvStride, width, height,
-        Gosslens.flagsFor(rotationDegrees, mirrored),
-        colorStandard, colorRange, timestampUs,
-    ) == 0
+    ): Boolean =
+        Gosslens.nativeSubmitFrameCopy(
+            handle,
+            y,
+            yStride,
+            uv,
+            uvStride,
+            width,
+            height,
+            Gosslens.flagsFor(rotationDegrees, mirrored),
+            colorStandard,
+            colorRange,
+            timestampUs,
+        ) == 0
 
     /** Zero-copy submission: up to three platform texture handles (an
      * AHardwareBuffer-backed image or a GL texture) as opaque pointer-sized
@@ -1713,15 +3151,21 @@ class GossSession private constructor(
         colorStandard: Int = Gosslens.COLOR_BT709,
         colorRange: Int = Gosslens.RANGE_VIDEO,
         timestampUs: Long,
-    ): Boolean = Gosslens.nativeSubmitFrame(
-        handle,
-        if (planes.isNotEmpty()) planes[0] else 0L,
-        if (planes.size > 1) planes[1] else 0L,
-        if (planes.size > 2) planes[2] else 0L,
-        planes.size, width, height, pixelFormat,
-        Gosslens.flagsFor(rotationDegrees, mirrored),
-        colorStandard, colorRange, timestampUs,
-    ) == 0
+    ): Boolean =
+        Gosslens.nativeSubmitFrame(
+            handle,
+            if (planes.isNotEmpty()) planes[0] else 0L,
+            if (planes.size > 1) planes[1] else 0L,
+            if (planes.size > 2) planes[2] else 0L,
+            planes.size,
+            width,
+            height,
+            pixelFormat,
+            Gosslens.flagsFor(rotationDegrees, mirrored),
+            colorStandard,
+            colorRange,
+            timestampUs,
+        ) == 0
 
     /** The CPU-copy path for a single interleaved BGRA8/RGBA8 plane - a
      * Bitmap or decoded video frame's own byte buffer, with no native GPU
@@ -1735,41 +3179,58 @@ class GossSession private constructor(
         rotationDegrees: Int = 0,
         mirrored: Boolean = false,
         timestampUs: Long = 0,
-    ): Boolean = Gosslens.nativeSubmitFrameRgbaCopy(
-        handle, rgba, stride, width, height, pixelFormat,
-        Gosslens.flagsFor(rotationDegrees, mirrored), timestampUs,
-    ) == 0
+    ): Boolean =
+        Gosslens.nativeSubmitFrameRgbaCopy(
+            handle,
+            rgba,
+            stride,
+            width,
+            height,
+            pixelFormat,
+            Gosslens.flagsFor(rotationDegrees, mirrored),
+            timestampUs,
+        ) == 0
 
-    fun reportFrame(frameTimeUs: Int, thermal: Thermal): DegradeLevel =
-        DegradeLevel.from(Gosslens.nativeReportFrame(handle, frameTimeUs, thermal.raw))
+    fun reportFrame(
+        frameTimeUs: Int,
+        thermal: Thermal,
+    ): DegradeLevel = DegradeLevel.from(Gosslens.nativeReportFrame(handle, frameTimeUs, thermal.raw))
 
     /**
      * Reports one finished frame with the device's thermal status read from
      * the given context, the call a frame loop wants. This is the ladder's only
      * clock; the engine has no way to reach the thermal API on its own.
      */
-    fun reportFrame(frameTimeUs: Int, context: android.content.Context): DegradeLevel =
-        reportFrame(frameTimeUs, Gosslens.platformThermal(context))
+    fun reportFrame(
+        frameTimeUs: Int,
+        context: android.content.Context,
+    ): DegradeLevel = reportFrame(frameTimeUs, Gosslens.platformThermal(context))
 
     fun degradeLevel(): DegradeLevel = DegradeLevel.from(Gosslens.nativeDegradeLevel(handle))
 
-    fun enableFaceTracking(taskBundle: ByteBuffer, threads: Int): Boolean =
-        Gosslens.nativeEnableFaceTracking(handle, taskBundle, taskBundle.remaining(), threads) == 0
+    fun enableFaceTracking(
+        taskBundle: ByteBuffer,
+        threads: Int,
+    ): Boolean = Gosslens.nativeEnableFaceTracking(handle, taskBundle, taskBundle.remaining(), threads) == 0
 
     fun disableFaceTracking() = Gosslens.nativeDisableFaceTracking(handle)
 
     /** Stands the hand tracking worker up from a hand landmarker or
      * gesture recognizer task bundle; up to two hands publish per frame,
      * with canned gestures scored when the bundle carries the models. */
-    fun enableHandTracking(taskBundle: ByteBuffer, threads: Int): Boolean =
-        Gosslens.nativeEnableHandTracking(handle, taskBundle, taskBundle.remaining(), threads) == 0
+    fun enableHandTracking(
+        taskBundle: ByteBuffer,
+        threads: Int,
+    ): Boolean = Gosslens.nativeEnableHandTracking(handle, taskBundle, taskBundle.remaining(), threads) == 0
 
     fun disableHandTracking() = Gosslens.nativeDisableHandTracking(handle)
 
     /** Stands the pose tracking worker up from a pose landmarker task
      * bundle; one 33-point body publishes per frame. */
-    fun enablePoseTracking(taskBundle: ByteBuffer, threads: Int): Boolean =
-        Gosslens.nativeEnablePoseTracking(handle, taskBundle, taskBundle.remaining(), threads) == 0
+    fun enablePoseTracking(
+        taskBundle: ByteBuffer,
+        threads: Int,
+    ): Boolean = Gosslens.nativeEnablePoseTracking(handle, taskBundle, taskBundle.remaining(), threads) == 0
 
     fun disablePoseTracking() = Gosslens.nativeDisablePoseTracking(handle)
 
@@ -1825,7 +3286,10 @@ class GossSession private constructor(
     /** The tracked point (x, y in frame pixels, z in the same scale) of a
      * named HAND_JOINT_* on the [handIndex]-th hand, or null until that hand
      * is tracked. */
-    fun handJoint(joint: Int, handIndex: Int = 0): FloatArray? {
+    fun handJoint(
+        joint: Int,
+        handIndex: Int = 0,
+    ): FloatArray? {
         if (Gosslens.nativeHandJoint(handle, handIndex, joint, faceRegionBuffer) != 0) return null
         faceRegionBuffer.rewind()
         val out = FloatArray(3)
@@ -1852,9 +3316,19 @@ class GossSession private constructor(
         colorStandard: Int = Gosslens.COLOR_BT709,
         colorRange: Int = Gosslens.RANGE_VIDEO,
         timestampUs: Long,
-    ): Boolean = Gosslens.nativeTrackFrame(
-        handle, y, yStride, uv, uvStride, width, height, colorStandard, colorRange, timestampUs,
-    ) == 0
+    ): Boolean =
+        Gosslens.nativeTrackFrame(
+            handle,
+            y,
+            yStride,
+            uv,
+            uvStride,
+            width,
+            height,
+            colorStandard,
+            colorRange,
+            timestampUs,
+        ) == 0
 
     /** Runs each selfie-source splat.cloud once over one NV12 still, so a
      * photoreal avatar is generated from a photo and then held off the camera. */
@@ -1868,13 +3342,27 @@ class GossSession private constructor(
         colorStandard: Int = Gosslens.COLOR_BT709,
         colorRange: Int = Gosslens.RANGE_VIDEO,
         timestampUs: Long,
-    ): Boolean = Gosslens.nativeSubmitAvatarSource(
-        handle, y, yStride, uv, uvStride, width, height, colorStandard, colorRange, timestampUs,
-    ) == 0
+    ): Boolean =
+        Gosslens.nativeSubmitAvatarSource(
+            handle,
+            y,
+            yStride,
+            uv,
+            uvStride,
+            width,
+            height,
+            colorStandard,
+            colorRange,
+            timestampUs,
+        ) == 0
 
     /** The RGBA sibling of submitAvatarSource: runs each selfie-source splat
      * once over one width by height RGBA8 still, row major. */
-    fun submitAvatarSourceRgba(rgba: ByteArray, width: Int, height: Int): Boolean {
+    fun submitAvatarSourceRgba(
+        rgba: ByteArray,
+        width: Int,
+        height: Int,
+    ): Boolean {
         val buf = stage(rgba.size)
         buf.put(rgba)
         buf.rewind()
@@ -1892,9 +3380,16 @@ class GossSession private constructor(
         anchorsBuffer: ByteBuffer,
         anchorCount: Int,
         lightBuffer: ByteBuffer,
-    ): Boolean = Gosslens.nativeSubmitWorld(
-        handle, stateBuffer, planesBuffer, planeCount, anchorsBuffer, anchorCount, lightBuffer,
-    ) == 0
+    ): Boolean =
+        Gosslens.nativeSubmitWorld(
+            handle,
+            stateBuffer,
+            planesBuffer,
+            planeCount,
+            anchorsBuffer,
+            anchorCount,
+            lightBuffer,
+        ) == 0
 
     /** What the last drawn frame did with the active lens: stages ready to draw, stages it
      * has, and whether the beauty bridge ran. Zero ready over a non-zero total is a lens the
@@ -1975,16 +3470,27 @@ class GossSession private constructor(
 
     /** Why a node is not ready. */
     enum class NodeReason {
-        NONE, OUT_OF_MEMORY, ASSET_MISSING, ASSET_MALFORMED, ASSET_TOO_LARGE,
-        SHADER_MISSING, SHADER_LINK_FAILED, MODEL_REJECTED, MODEL_UNSUPPORTED,
+        NONE,
+        OUT_OF_MEMORY,
+        ASSET_MISSING,
+        ASSET_MALFORMED,
+        ASSET_TOO_LARGE,
+        SHADER_MISSING,
+        SHADER_LINK_FAILED,
+        MODEL_REJECTED,
+        MODEL_UNSUPPORTED,
         CAPABILITY_UNAVAILABLE,
         CONSTRAINT_FAILED,
     }
 
     /** One lens node that is not doing what its manifest asked. */
-    data class NodeReport(val id: String, val nodeIndex: Int, val state: NodeState, val reason: NodeReason)
+    data class NodeReport(
+        val id: String,
+        val nodeIndex: Int,
+        val state: NodeState,
+        val reason: NodeReason,
+    )
 
-    /** What the engine is doing now; every field is measured, not configured. */
     /** What this build's media backend declares it encodes. */
     fun mediaCapabilities(): MediaCapabilities? {
         // Eight u32 in declaration order.
@@ -1994,18 +3500,35 @@ class GossSession private constructor(
         return MediaCapabilities(w.get(0), w.get(1), w.get(2), w.get(3), w.get(4), w.get(5), w.get(6) != 0, w.get(7) != 0)
     }
 
+    /** What the engine is doing now; every field is measured, not configured. */
     fun engineReport(): EngineReport? {
         // Thirteen u32, four padding bytes, then three u64: the struct's own layout.
         val buf = ByteBuffer.allocateDirect(ENGINE_REPORT_BYTES).order(ByteOrder.nativeOrder())
         if (Gosslens.nativeEngineReport(engine.handle, buf) != 0) return null
         val w = buf.asIntBuffer()
-        val q = buf.duplicate().order(ByteOrder.nativeOrder()).position(14 * 4).let { (it as ByteBuffer).asLongBuffer() }
+        val q =
+            buf
+                .duplicate()
+                .order(ByteOrder.nativeOrder())
+                .position(14 * 4)
+                .let { (it as ByteBuffer).asLongBuffer() }
         return EngineReport(
-            w.get(0), w.get(1) != 0,
-            w.get(2), w.get(3), w.get(4), w.get(5),
-            w.get(6), w.get(7), w.get(8), w.get(9),
-            w.get(10), w.get(11), w.get(12),
-            q.get(0), q.get(1), q.get(2),
+            w.get(0),
+            w.get(1) != 0,
+            w.get(2),
+            w.get(3),
+            w.get(4),
+            w.get(5),
+            w.get(6),
+            w.get(7),
+            w.get(8),
+            w.get(9),
+            w.get(10),
+            w.get(11),
+            w.get(12),
+            q.get(0),
+            q.get(1),
+            q.get(2),
         )
     }
 
@@ -2017,11 +3540,20 @@ class GossSession private constructor(
         val q = buf.asLongBuffer()
         val w = buf.duplicate().order(ByteOrder.nativeOrder()).asIntBuffer()
         return SessionReport(
-            q.get(0), q.get(1),
-            DegradeLevel.from(w.get(4)), w.get(5),
-            q.get(3), q.get(4), q.get(5), q.get(6), q.get(7),
-            w.get(16), w.get(17), w.get(18),
-            w.get(19), q.get(10),
+            q.get(0),
+            q.get(1),
+            DegradeLevel.from(w.get(4)),
+            w.get(5),
+            q.get(3),
+            q.get(4),
+            q.get(5),
+            q.get(6),
+            q.get(7),
+            w.get(16),
+            w.get(17),
+            w.get(18),
+            w.get(19),
+            q.get(10),
         )
     }
 
@@ -2070,13 +3602,21 @@ class GossSession private constructor(
         return Pair(out, lost)
     }
 
-    data class ChainReport(val ready: Int, val total: Int, val beauty: Boolean)
+    data class ChainReport(
+        val ready: Int,
+        val total: Int,
+        val beauty: Boolean,
+    )
 
     /** Submits a bare camera pose and projection, for a host driving a scan with no
      * platform world session behind it: a selfie scan on the front camera, where the
      * depth comes from a lens's own net rather than a sensor. Both matrices are
      * column-major, sixteen floats. */
-    fun submitCameraPose(worldFromCamera: FloatArray, projection: FloatArray, timestampUs: Long): Boolean {
+    fun submitCameraPose(
+        worldFromCamera: FloatArray,
+        projection: FloatArray,
+        timestampUs: Long,
+    ): Boolean {
         if (worldFromCamera.size != 16 || projection.size != 16) return false
         // The world state as the ABI lays it out: tracking state, the two matrices, the stamp.
         val state = ByteBuffer.allocateDirect(4 + 64 + 64 + 8).order(ByteOrder.nativeOrder())
@@ -2086,7 +3626,9 @@ class GossSession private constructor(
         state.putLong(timestampUs)
         state.rewind()
         val light = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
-        light.putFloat(1000f); light.putFloat(6500f); light.rewind()
+        light.putFloat(1000f)
+        light.putFloat(6500f)
+        light.rewind()
         val none = ByteBuffer.allocateDirect(1)
         return submitWorld(state, none, 0, none, 0, light)
     }
@@ -2094,8 +3636,10 @@ class GossSession private constructor(
     /** Stands the segmentation worker up from a raw model - a selfie or hair
      * segmenter .tflite; [model] is a direct buffer of the model bytes. Once
      * enabled, trackFrame feeds it the same frame it feeds the trackers. */
-    fun enableSegmentation(model: ByteBuffer, threads: Int): Boolean =
-        Gosslens.nativeEnableSegmentation(handle, model, model.remaining(), threads) == 0
+    fun enableSegmentation(
+        model: ByteBuffer,
+        threads: Int,
+    ): Boolean = Gosslens.nativeEnableSegmentation(handle, model, model.remaining(), threads) == 0
 
     fun disableSegmentation() = Gosslens.nativeDisableSegmentation(handle)
 
@@ -2117,7 +3661,10 @@ class GossSession private constructor(
     /** Uploads one class channel's mask (MASK_SIDE squared floats) as the texture
      * that channel's passes sample; channel 0 (person) rides setSegmentationMask,
      * so upload the classes after it. An empty array clears one channel. */
-    fun setSegmentationClassMask(channel: Int, mask: FloatArray): Boolean {
+    fun setSegmentationClassMask(
+        channel: Int,
+        mask: FloatArray,
+    ): Boolean {
         val buf = stage(mask.size * 4)
         buf.asFloatBuffer().put(mask)
         return Gosslens.nativeSetSegmentationClassMask(handle, channel, buf, mask.size) == 0
@@ -2164,21 +3711,33 @@ class GossSession private constructor(
 
     /** Effects in order: smooth 0, whiten 1, thin face 2, big eye 3,
      * lipstick 4, blush 5; values clamp to zero and one. */
-    fun setBeauty(effect: Int, amount: Float): Boolean =
-        Gosslens.nativeSetBeauty(handle, effect, amount) == 0
+    fun setBeauty(
+        effect: Int,
+        amount: Float,
+    ): Boolean = Gosslens.nativeSetBeauty(handle, effect, amount) == 0
 
     fun setSmooth(amount: Float) = setBeauty(0, amount)
+
     fun setWhiten(amount: Float) = setBeauty(1, amount)
+
     fun setThinFace(amount: Float) = setBeauty(2, amount)
+
     fun setBigEye(amount: Float) = setBeauty(3, amount)
+
     fun setLipstick(amount: Float) = setBeauty(4, amount)
+
     fun setBlush(amount: Float) = setBeauty(5, amount)
 
     /** Web only; UNSUPPORTED on every other target, where whiten runs through
      * the native beauty engine. Uploads one of whiten's four lookup textures
      * (slot 0 gray, 1 origin, 2 skin, 3 custom); [rgba] is width by height
      * RGBA8. Whiten stays inert until all four slots are loaded. */
-    fun setBeautyLut(slot: Int, rgba: ByteArray, width: Int, height: Int): Boolean {
+    fun setBeautyLut(
+        slot: Int,
+        rgba: ByteArray,
+        width: Int,
+        height: Int,
+    ): Boolean {
         val buf = ByteBuffer.allocateDirect(rgba.size).order(ByteOrder.nativeOrder())
         buf.put(rgba)
         buf.rewind()
@@ -2187,15 +3746,24 @@ class GossSession private constructor(
 
     /** Web only; UNSUPPORTED on every other target. Uploads lipstick's (4) or
      * blush's (5) own source image; [rgba] is width by height RGBA8. */
-    fun setBeautyMakeupTexture(effect: Int, rgba: ByteArray, width: Int, height: Int): Boolean {
+    fun setBeautyMakeupTexture(
+        effect: Int,
+        rgba: ByteArray,
+        width: Int,
+        height: Int,
+    ): Boolean {
         val buf = ByteBuffer.allocateDirect(rgba.size).order(ByteOrder.nativeOrder())
         buf.put(rgba)
         buf.rewind()
         return Gosslens.nativeSetBeautyMakeupTexture(handle, effect, buf, width, height) == 0
     }
 
-    fun beautifyFrame(rgbaIn: ByteBuffer, rgbaOut: ByteBuffer, width: Int, height: Int): Boolean =
-        Gosslens.nativeBeautifyFrame(handle, rgbaIn, rgbaOut, width, height) == 0
+    fun beautifyFrame(
+        rgbaIn: ByteBuffer,
+        rgbaOut: ByteBuffer,
+        width: Int,
+        height: Int,
+    ): Boolean = Gosslens.nativeBeautifyFrame(handle, rgbaIn, rgbaOut, width, height) == 0
 
     /** Fills [result] with the newest tracking output; false until the
      * worker publishes its first result. */
@@ -2226,7 +3794,10 @@ class GossSession private constructor(
 
     /** Fills [result] with the index-th submitted face; false once index
      * reaches faceCount, so a caller loops zero to faceCount. */
-    fun faceResultAt(index: Int, result: GossFaceResult): Boolean {
+    fun faceResultAt(
+        index: Int,
+        result: GossFaceResult,
+    ): Boolean {
         if (Gosslens.nativeFaceResultAt(handle, index, result.buffer) != 0) return false
         result.parse()
         return true
@@ -2267,7 +3838,10 @@ class GossSession private constructor(
      * ahead of a JSON activateLens, so a lens's models and label files load
      * from memory with no bundle directory. An empty array removes a
      * previously staged name; the engine keeps its own copy. */
-    fun provideLensAsset(name: String, bytes: ByteArray): Boolean {
+    fun provideLensAsset(
+        name: String,
+        bytes: ByteArray,
+    ): Boolean {
         val idBytes = name.toByteArray(Charsets.UTF_8)
         val idBuf = ByteBuffer.allocateDirect(maxOf(idBytes.size, 1))
         idBuf.put(idBytes)
@@ -2281,7 +3855,10 @@ class GossSession private constructor(
     /** One ml.infer node's whole published output tensor, by the node's id
      * and tensor index, or null before the model's first publish or when the
      * node or tensor does not exist. A length probe sizes the buffer. */
-    fun mlOutput(nodeId: String, tensor: Int = 0): FloatArray? {
+    fun mlOutput(
+        nodeId: String,
+        tensor: Int = 0,
+    ): FloatArray? {
         val idBytes = nodeId.toByteArray(Charsets.UTF_8)
         val idBuf = ByteBuffer.allocateDirect(maxOf(idBytes.size, 1))
         idBuf.put(idBytes)
@@ -2322,7 +3899,13 @@ class GossSession private constructor(
      * API): width by height metres per pixel, row major, with the near and
      * far metres that bound it. An empty array clears it. Kept for depth
      * occlusion against the rendered content. */
-    fun submitDepth(depth: FloatArray, width: Int, height: Int, near: Float, far: Float): Boolean {
+    fun submitDepth(
+        depth: FloatArray,
+        width: Int,
+        height: Int,
+        near: Float,
+        far: Float,
+    ): Boolean {
         if (depth.isEmpty()) return Gosslens.nativeSubmitDepth(handle, stage(4), 0, 0, 0f, 0f) == 0
         val buf = stage(depth.size * 4)
         buf.asFloatBuffer().put(depth)
@@ -2334,7 +3917,13 @@ class GossSession private constructor(
      * lengths and principal point in pixels of the submitted frame, and the
      * radial distortion coefficients (k1, k2 read). An empty array or zero
      * focal length clears them, leaving an undistort.pass inert. */
-    fun submitCameraIntrinsics(fx: Float, fy: Float, cx: Float, cy: Float, distortion: FloatArray): Boolean {
+    fun submitCameraIntrinsics(
+        fx: Float,
+        fy: Float,
+        cx: Float,
+        cy: Float,
+        distortion: FloatArray,
+    ): Boolean {
         if (distortion.isEmpty()) return Gosslens.nativeSubmitCameraIntrinsics(handle, 0f, 0f, 0f, 0f, stage(4), 0) == 0
         val buf = stage(distortion.size * 4)
         buf.asFloatBuffer().put(distortion)
@@ -2346,13 +3935,20 @@ class GossSession private constructor(
      * rolling.pass reads the image-plane motion derived from consecutive samples
      * to correct rolling-shutter skew; feed one per frame from the IMU. A
      * near-zero vector clears the stream, leaving a rolling.pass inert. */
-    fun submitOrientation(gravityX: Float, gravityY: Float, gravityZ: Float, timestampUs: Long): Boolean =
-        Gosslens.nativeSubmitOrientation(handle, gravityX, gravityY, gravityZ, timestampUs) == 0
+    fun submitOrientation(
+        gravityX: Float,
+        gravityY: Float,
+        gravityZ: Float,
+        timestampUs: Long,
+    ): Boolean = Gosslens.nativeSubmitOrientation(handle, gravityX, gravityY, gravityZ, timestampUs) == 0
 
     /** Feeds a host info value keyed by name, the rail an info sticker reads: a
      * text.2d node with a matching content_source shows the latest value each
      * frame (a time, a place, a sensor reading). A null value clears the key. */
-    fun setInfo(key: String, value: String?): Boolean {
+    fun setInfo(
+        key: String,
+        value: String?,
+    ): Boolean {
         val keyBytes = key.toByteArray(Charsets.UTF_8)
         val keyBuffer = ByteBuffer.allocateDirect(maxOf(keyBytes.size, 1))
         keyBuffer.put(keyBytes)
@@ -2427,8 +4023,7 @@ class GossSession private constructor(
     /** Enables or disables on-device dubbing: when on, a dub-bound audio.infer
      * node synthesizes its decoded caption or translation to speech and plays it
      * into the lens mixer. Off by default; a host turns it on for a voice-over. */
-    fun setDubbing(enabled: Boolean): Boolean =
-        Gosslens.nativeSetDubbing(handle, if (enabled) 1 else 0) == 0
+    fun setDubbing(enabled: Boolean): Boolean = Gosslens.nativeSetDubbing(handle, if (enabled) 1 else 0) == 0
 
     /** The latest caption an audio.infer node decoded, by the node's id, or null
      * when that node has no caption binding or nothing decoded yet. On-device ASR
@@ -2453,7 +4048,12 @@ class GossSession private constructor(
 
     /** One diarized caption segment: the times it spanned, the speaker who spoke
      * it, and its text. */
-    data class CaptionSegment(val startUs: Long, val endUs: Long, val speaker: Int, val text: String)
+    data class CaptionSegment(
+        val startUs: Long,
+        val endUs: Long,
+        val speaker: Int,
+        val text: String,
+    )
 
     /** The recent diarized caption segment at [index] (0 the newest), or null when
      * the index is past the segments held: a speaker-tagged transcript the app can
@@ -2482,7 +4082,11 @@ class GossSession private constructor(
     /** Segments a host-provided still image through the running segmenter:
      * rgba is width by height RGBA8 pixels, row major. The mask reaches the
      * active lens the way a camera frame's would. */
-    fun submitSegmentationImage(rgba: ByteArray, width: Int, height: Int): Boolean {
+    fun submitSegmentationImage(
+        rgba: ByteArray,
+        width: Int,
+        height: Int,
+    ): Boolean {
         val buf = stage(rgba.size)
         buf.put(rgba)
         buf.rewind()
@@ -2501,13 +4105,27 @@ class GossSession private constructor(
         height: Int,
         colorStandard: Int = Gosslens.COLOR_BT709,
         colorRange: Int = Gosslens.RANGE_VIDEO,
-    ): Boolean = Gosslens.nativeSubmitFrameBracket(
-        handle, y, yStride, uv, uvStride, width, height, colorStandard, colorRange, 0L,
-    ) == 0
+    ): Boolean =
+        Gosslens.nativeSubmitFrameBracket(
+            handle,
+            y,
+            yStride,
+            uv,
+            uvStride,
+            width,
+            height,
+            colorStandard,
+            colorRange,
+            0L,
+        ) == 0
 
     /** Submits one RGBA exposure of an HDR bracket (width by height RGBA8, row
      * major), converted to NV12 and fed to bracket-source temporal.fuse nodes. */
-    fun submitFrameBracketRgba(rgba: ByteArray, width: Int, height: Int): Boolean {
+    fun submitFrameBracketRgba(
+        rgba: ByteArray,
+        width: Int,
+        height: Int,
+    ): Boolean {
         val buf = stage(rgba.size)
         buf.put(rgba)
         buf.rewind()
@@ -2518,7 +4136,12 @@ class GossSession private constructor(
      * with a reference source paints the live face in that color. rgba is
      * width by height RGBA8; landmarks is the reference face's 478 x, y, z
      * points. An empty landmarks array clears the reference. */
-    fun setMakeupReference(rgba: ByteArray, width: Int, height: Int, landmarks: FloatArray): Boolean {
+    fun setMakeupReference(
+        rgba: ByteArray,
+        width: Int,
+        height: Int,
+        landmarks: FloatArray,
+    ): Boolean {
         if (landmarks.isEmpty()) return Gosslens.nativeSetMakeupReference(handle, ByteBuffer.allocateDirect(4), 0, 0, ByteBuffer.allocateDirect(4), 0) == 0
         val rbuf = ByteBuffer.allocateDirect(rgba.size).order(ByteOrder.nativeOrder())
         rbuf.put(rgba)
@@ -2534,18 +4157,20 @@ class GossSession private constructor(
 
     /** Fills [result] with the index-th submitted body; false once index
      * reaches bodyCount, so a caller loops zero to bodyCount. */
-    fun bodyResultAt(index: Int, result: GossPoseResult): Boolean {
+    fun bodyResultAt(
+        index: Int,
+        result: GossPoseResult,
+    ): Boolean {
         if (Gosslens.nativeBodyResultAt(handle, index, result.buffer) != 0) return false
         result.parse()
         return true
     }
 
-    /** Replaces any currently active lens with the one manifestJson
-     * describes, splicing its nodes into the session graph. */
     /**
-     * False when the lens did not activate, and also when it is live with a node
-     * the manifest did not mark optional that could not do what it asked;
-     * nodeReports distinguishes the two and says which node and why.
+     * Replaces any active lens with the one manifestJson describes, splicing its
+     * nodes into the session graph. False when it did not activate, and when it
+     * is live with a node the manifest did not mark optional that could not do
+     * what it asked; nodeReports says which node and why.
      */
     fun activateLens(manifestJson: ByteArray): Boolean {
         val buffer = ByteBuffer.allocateDirect(manifestJson.size)
@@ -2568,14 +4193,20 @@ class GossSession private constructor(
     /** Advances the active lens by [dtUs] of real time and applies
      * whatever effect values its triggers/ramps changed to the beauty
      * chain, if one is enabled. False with no active lens. */
-    fun tickLens(dtUs: Int, signals: GossLensSignals): Boolean =
-        Gosslens.nativeTickLens(handle, dtUs, signals.buffer) == 0
+    fun tickLens(
+        dtUs: Int,
+        signals: GossLensSignals,
+    ): Boolean = Gosslens.nativeTickLens(handle, dtUs, signals.buffer) == 0
 
     /** Reads a live parameter of the active lens by name, including whatever
      * a script node last wrote. Null with no active lens or no such name. */
     fun parameterValue(name: String): Float? {
         val nameBytes = name.toByteArray(Charsets.UTF_8)
-        val nameBuf = ByteBuffer.allocateDirect(nameBytes.size).apply { put(nameBytes); rewind() }
+        val nameBuf =
+            ByteBuffer.allocateDirect(nameBytes.size).apply {
+                put(nameBytes)
+                rewind()
+            }
         val outBuf = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
         return if (Gosslens.nativeParameterValue(handle, nameBuf, nameBytes.size, outBuf) == 0) outBuf.getFloat(0) else null
     }
@@ -2584,20 +4215,32 @@ class GossSession private constructor(
      * tracked ground plane, returning the world hit position as [x, y, z], or
      * null until world tracking is live and the ray meets the plane. A
      * tap-to-place lens polls this and drops an anchor at the hit. */
-    fun hitTest(screenX: Float, screenY: Float): FloatArray? {
+    fun hitTest(
+        screenX: Float,
+        screenY: Float,
+    ): FloatArray? {
         val outBuf = ByteBuffer.allocateDirect(3 * 4).order(ByteOrder.nativeOrder())
-        return if (Gosslens.nativeHitTest(handle, screenX, screenY, outBuf) == 0)
-            floatArrayOf(outBuf.getFloat(0), outBuf.getFloat(4), outBuf.getFloat(8)) else null
+        return if (Gosslens.nativeHitTest(handle, screenX, screenY, outBuf) == 0) {
+            floatArrayOf(outBuf.getFloat(0), outBuf.getFloat(4), outBuf.getFloat(8))
+        } else {
+            null
+        }
     }
 
     /** One world-mesh raycast hit: the world-space [point] and the ray
      * [distance] to it. */
-    data class WorldMeshHit(val point: FloatArray, val distance: Float)
+    data class WorldMeshHit(
+        val point: FloatArray,
+        val distance: Float,
+    )
 
     /** Submits the device's pre-scanned world mesh (scene reconstruction, a VPS
      * scan) in world space: [vertices] are xyz triples and [indices] name three
      * vertices per triangle. Passing empty arrays clears the stored mesh. */
-    fun submitWorldMesh(vertices: FloatArray, indices: IntArray) {
+    fun submitWorldMesh(
+        vertices: FloatArray,
+        indices: IntArray,
+    ) {
         val vBuf = ByteBuffer.allocateDirect(maxOf(vertices.size, 1) * 4).order(ByteOrder.nativeOrder())
         vBuf.asFloatBuffer().put(vertices)
         val iBuf = ByteBuffer.allocateDirect(maxOf(indices.size, 1) * 4).order(ByteOrder.nativeOrder())
@@ -2608,7 +4251,10 @@ class GossSession private constructor(
     /** Casts a world-space ray against the submitted world mesh, returning the
      * nearest surface hit and its ray distance, or null when no mesh is
      * submitted or the ray misses. A tap-to-place lens anchors content there. */
-    fun raycastWorldMesh(origin: FloatArray, direction: FloatArray): WorldMeshHit? {
+    fun raycastWorldMesh(
+        origin: FloatArray,
+        direction: FloatArray,
+    ): WorldMeshHit? {
         val oBuf = ByteBuffer.allocateDirect(3 * 4).order(ByteOrder.nativeOrder())
         oBuf.asFloatBuffer().put(origin)
         val dBuf = ByteBuffer.allocateDirect(3 * 4).order(ByteOrder.nativeOrder())
@@ -2622,9 +4268,23 @@ class GossSession private constructor(
     /** What a scope may carry. Reading is covered by the snapshot sections; these
      * are the things that change something or reach a resource. */
     enum class Verb {
-        ANNOTATE, EGRESS, RECORD, REMEMBER, SEARCH_MEMORY, OPEN_CLIP, CAPTURE_SCREEN,
-        SUBMIT_FRAME, SUBMIT_WORLD, SUBMIT_AUDIO, AUDIO_OUT, SEAL_MEMORY,
-        ACTIVATE_LENS, LOAD_MODEL, ENABLE_TRACKING, RETOUCH;
+        ANNOTATE,
+        EGRESS,
+        RECORD,
+        REMEMBER,
+        SEARCH_MEMORY,
+        OPEN_CLIP,
+        CAPTURE_SCREEN,
+        SUBMIT_FRAME,
+        SUBMIT_WORLD,
+        SUBMIT_AUDIO,
+        AUDIO_OUT,
+        SEAL_MEMORY,
+        ACTIVATE_LENS,
+        LOAD_MODEL,
+        ENABLE_TRACKING,
+        RETOUCH,
+        ;
 
         val bit: Int get() = 1 shl ordinal
 
@@ -2643,7 +4303,11 @@ class GossSession private constructor(
 
     /** A decoded PNG: packed RGBA8 with its size, through the decoder the engine
      * already carries. Null when the bytes are not a png it can read. */
-    data class DecodedImage(val rgba: ByteArray, val width: Int, val height: Int)
+    data class DecodedImage(
+        val rgba: ByteArray,
+        val width: Int,
+        val height: Int,
+    )
 
     fun decodePng(bytes: ByteArray): DecodedImage? {
         val input = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder())
@@ -2663,7 +4327,10 @@ class GossSession private constructor(
     /** A walkable route over the submitted world mesh, so an agent walks content
      * across real scanned ground. Null when no mesh is submitted or no route
      * exists. */
-    fun pathAcrossWorld(start: FloatArray, goal: FloatArray): List<FloatArray>? {
+    fun pathAcrossWorld(
+        start: FloatArray,
+        goal: FloatArray,
+    ): List<FloatArray>? {
         val capacity = 256
         val a = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
         a.asFloatBuffer().put(start)
@@ -2682,7 +4349,10 @@ class GossSession private constructor(
      * number, and whether a thing can rest on it. */
     enum class PlaneKind { UNKNOWN, FLOOR, WALL, CEILING, TABLE, SEAT, DOOR, WINDOW, SCREEN }
 
-    data class PlaneFacts(val kind: PlaneKind, val bearing: Boolean)
+    data class PlaneFacts(
+        val kind: PlaneKind,
+        val bearing: Boolean,
+    )
 
     fun planeKind(planeId: Long): PlaneFacts? {
         val out = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
@@ -2702,13 +4372,28 @@ class GossSession private constructor(
 
     /** Something already on a plane, on that plane's own axes in metres from its
      * centre, so a placement answers about the surface as it is now. */
-    data class Occupant(val planeId: Long, val x: Float, val z: Float, val width: Float, val depth: Float)
+    data class Occupant(
+        val planeId: Long,
+        val x: Float,
+        val z: Float,
+        val width: Float,
+        val depth: Float,
+    )
 
-    data class Placement(val planeId: Long, val position: FloatArray, val freeFraction: Float)
+    data class Placement(
+        val planeId: Long,
+        val position: FloatArray,
+        val freeFraction: Float,
+    )
 
     /** Where a footprint fits, best surface first: the bearing plane with the most
      * room left afterwards. An empty list is an answer. */
-    fun placeOn(width: Float, depth: Float, height: Float = 0f, occupants: List<Occupant> = emptyList()): List<Placement> {
+    fun placeOn(
+        width: Float,
+        depth: Float,
+        height: Float = 0f,
+        occupants: List<Occupant> = emptyList(),
+    ): List<Placement> {
         val item = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
         item.putFloat(0, width)
         item.putFloat(4, depth)
@@ -2741,9 +4426,18 @@ class GossSession private constructor(
 
     /** Point to point in metres with its uncertainty. [known] is false when either
      * end vouched for no accuracy, so a sigma of zero is never read as certainty. */
-    data class Distance(val metres: Float, val sigma: Float, val known: Boolean)
+    data class Distance(
+        val metres: Float,
+        val sigma: Float,
+        val known: Boolean,
+    )
 
-    fun measureBetween(from: FloatArray, to: FloatArray, fromAccuracyM: Float = 0f, toAccuracyM: Float = 0f): Distance? {
+    fun measureBetween(
+        from: FloatArray,
+        to: FloatArray,
+        fromAccuracyM: Float = 0f,
+        toAccuracyM: Float = 0f,
+    ): Distance? {
         val a = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
         a.asFloatBuffer().put(from)
         val b = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
@@ -2755,7 +4449,11 @@ class GossSession private constructor(
 
     /** One landmark as it crosses to another device. No pose: a pose is
      * meaningless in another origin. */
-    data class SharedLandmark(val id: Long, val position: FloatArray, val confidence: Float = 1f)
+    data class SharedLandmark(
+        val id: Long,
+        val position: FloatArray,
+        val confidence: Float = 1f,
+    )
 
     /** What this device can offer another: one landmark per world anchor it holds. */
     fun sharedLandmarks(): List<SharedLandmark> {
@@ -2778,7 +4476,11 @@ class GossSession private constructor(
     /** The transform from the sender's origin into this one, column-major, with the
      * fit it achieved. Null when fewer than three matched, which cannot fix a
      * rigid transform. */
-    data class Alignment(val transform: FloatArray, val rmsError: Float, val matched: Int)
+    data class Alignment(
+        val transform: FloatArray,
+        val rmsError: Float,
+        val matched: Int,
+    )
 
     fun alignShared(theirs: List<SharedLandmark>): Alignment? {
         val list = ByteBuffer.allocateDirect(maxOf(theirs.size, 1) * 24).order(ByteOrder.nativeOrder())
@@ -2799,24 +4501,41 @@ class GossSession private constructor(
     /** Pulls the next block of mixed lens audio into a direct [out] buffer
      * (frames interleaved s16) that play_sound triggers produced, for the app
      * to route to platform audio out. */
-    fun pullAudio(out: ByteBuffer, frames: Int): Boolean =
-        Gosslens.nativePullAudio(handle, out, frames) == 0
+    fun pullAudio(
+        out: ByteBuffer,
+        frames: Int,
+    ): Boolean = Gosslens.nativePullAudio(handle, out, frames) == 0
 
     /** Folds the active lens sound into the caller's outgoing call/live track:
      * [mic] (interleaved f32 at [sampleRate]/[channels], or null for silence)
      * summed with the 48 kHz mono lens mixer resampled to that rate, into [out]
      * (frameCount*channels s16). Advances the mixer once, replacing [pullAudio]. */
-    fun mixOutputAudio(mic: ByteBuffer?, out: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Boolean =
-        Gosslens.nativeMixOutputAudio(handle, mic, out, frameCount, sampleRate, channels) == 0
+    fun mixOutputAudio(
+        mic: ByteBuffer?,
+        out: ByteBuffer,
+        frameCount: Int,
+        sampleRate: Int,
+        channels: Int,
+    ): Boolean = Gosslens.nativeMixOutputAudio(handle, mic, out, frameCount, sampleRate, channels) == 0
 
     /** Stores validated camera-hardware intent; the engine normalizes it. Read
      * it back with [cameraControls] and drive CameraX with the result. */
     fun setCameraControls(c: GossCameraControls): Boolean {
         val buf = ByteBuffer.allocateDirect(56).order(ByteOrder.nativeOrder())
-        buf.putInt(c.flashMode); buf.putInt(c.torch); buf.putInt(c.focusMode); buf.putInt(c.exposureMode)
-        buf.putFloat(c.focusPointX); buf.putFloat(c.focusPointY); buf.putInt(c.exposureLinked)
-        buf.putFloat(c.exposurePointX); buf.putFloat(c.exposurePointY); buf.putFloat(c.exposureBiasEv)
-        buf.putFloat(c.zoomFactor); buf.putFloat(c.maxZoomFactor); buf.putInt(c.mirrorSavePolicy); buf.putInt(0)
+        buf.putInt(c.flashMode)
+        buf.putInt(c.torch)
+        buf.putInt(c.focusMode)
+        buf.putInt(c.exposureMode)
+        buf.putFloat(c.focusPointX)
+        buf.putFloat(c.focusPointY)
+        buf.putInt(c.exposureLinked)
+        buf.putFloat(c.exposurePointX)
+        buf.putFloat(c.exposurePointY)
+        buf.putFloat(c.exposureBiasEv)
+        buf.putFloat(c.zoomFactor)
+        buf.putFloat(c.maxZoomFactor)
+        buf.putInt(c.mirrorSavePolicy)
+        buf.putInt(0)
         buf.rewind()
         return Gosslens.nativeSetCameraControls(handle, buf) == 0
     }
@@ -2826,19 +4545,35 @@ class GossSession private constructor(
         val buf = ByteBuffer.allocateDirect(56).order(ByteOrder.nativeOrder())
         if (Gosslens.nativeCameraControls(handle, buf) != 0) return null
         return GossCameraControls(
-            buf.getInt(0), buf.getInt(4), buf.getInt(8), buf.getInt(12),
-            buf.getFloat(16), buf.getFloat(20), buf.getInt(24),
-            buf.getFloat(28), buf.getFloat(32), buf.getFloat(36),
-            buf.getFloat(40), buf.getFloat(44), buf.getInt(48),
+            buf.getInt(0),
+            buf.getInt(4),
+            buf.getInt(8),
+            buf.getInt(12),
+            buf.getFloat(16),
+            buf.getFloat(20),
+            buf.getInt(24),
+            buf.getFloat(28),
+            buf.getFloat(32),
+            buf.getFloat(36),
+            buf.getFloat(40),
+            buf.getFloat(44),
+            buf.getInt(48),
         )
     }
 
     /** Stores the recording policy the SDK applies to the platform recorder. */
     fun setRecordingPolicy(p: GossRecordingPolicy): Boolean {
         val buf = ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder())
-        buf.putInt(p.maxDurationMs); buf.putInt(p.minClipMs); buf.putInt(p.segmentMode); buf.putInt(p.loopPlayback)
-        buf.putInt(p.speedPreset); buf.putInt(p.micMuted); buf.putInt(p.saveOriginal); buf.putInt(p.stabilization)
-        buf.putInt(0); buf.putInt(0)
+        buf.putInt(p.maxDurationMs)
+        buf.putInt(p.minClipMs)
+        buf.putInt(p.segmentMode)
+        buf.putInt(p.loopPlayback)
+        buf.putInt(p.speedPreset)
+        buf.putInt(p.micMuted)
+        buf.putInt(p.saveOriginal)
+        buf.putInt(p.stabilization)
+        buf.putInt(0)
+        buf.putInt(0)
         buf.rewind()
         return Gosslens.nativeSetRecordingPolicy(handle, buf) == 0
     }
@@ -2847,17 +4582,30 @@ class GossSession private constructor(
         val buf = ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder())
         if (Gosslens.nativeRecordingPolicy(handle, buf) != 0) return null
         return GossRecordingPolicy(
-            buf.getInt(0), buf.getInt(4), buf.getInt(8), buf.getInt(12),
-            buf.getInt(16), buf.getInt(20), buf.getInt(24), buf.getInt(28),
+            buf.getInt(0),
+            buf.getInt(4),
+            buf.getInt(8),
+            buf.getInt(12),
+            buf.getInt(16),
+            buf.getInt(20),
+            buf.getInt(24),
+            buf.getInt(28),
         )
     }
 
     /** Stores the capture-UI intent the app renders (grid, timer, night mode, flash). */
     fun setCaptureUi(u: GossCaptureUi): Boolean {
         val buf = ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder())
-        buf.putInt(u.gridMode); buf.putInt(u.levelIndicator); buf.putInt(u.shutterMode); buf.putInt(u.countdownS)
-        buf.putInt(u.nightMode); buf.putInt(u.screenFlashMode); buf.putFloat(u.screenFlashIntensity); buf.putFloat(u.screenFlashWarmth)
-        buf.putInt(0); buf.putInt(0)
+        buf.putInt(u.gridMode)
+        buf.putInt(u.levelIndicator)
+        buf.putInt(u.shutterMode)
+        buf.putInt(u.countdownS)
+        buf.putInt(u.nightMode)
+        buf.putInt(u.screenFlashMode)
+        buf.putFloat(u.screenFlashIntensity)
+        buf.putFloat(u.screenFlashWarmth)
+        buf.putInt(0)
+        buf.putInt(0)
         buf.rewind()
         return Gosslens.nativeSetCaptureUi(handle, buf) == 0
     }
@@ -2866,8 +4614,14 @@ class GossSession private constructor(
         val buf = ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder())
         if (Gosslens.nativeCaptureUi(handle, buf) != 0) return null
         return GossCaptureUi(
-            buf.getInt(0), buf.getInt(4), buf.getInt(8), buf.getInt(12),
-            buf.getInt(16), buf.getInt(20), buf.getFloat(24), buf.getFloat(28),
+            buf.getInt(0),
+            buf.getInt(4),
+            buf.getInt(8),
+            buf.getInt(12),
+            buf.getInt(16),
+            buf.getInt(20),
+            buf.getFloat(24),
+            buf.getFloat(28),
         )
     }
 
@@ -2875,7 +4629,11 @@ class GossSession private constructor(
      * event('name') triggers for one tick. */
     fun fireEvent(name: String): Boolean {
         val bytes = name.toByteArray(Charsets.UTF_8)
-        val buf = ByteBuffer.allocateDirect(bytes.size).apply { put(bytes); rewind() }
+        val buf =
+            ByteBuffer.allocateDirect(bytes.size).apply {
+                put(bytes)
+                rewind()
+            }
         return Gosslens.nativeFireEvent(handle, buf, bytes.size) == 0
     }
 
@@ -2886,7 +4644,10 @@ class GossSession private constructor(
     private fun nameBuf(name: String): Pair<ByteBuffer, Int> =
         nameBufs.getOrPut(name) {
             val b = name.toByteArray(Charsets.UTF_8)
-            ByteBuffer.allocateDirect(b.size).apply { put(b); rewind() } to b.size
+            ByteBuffer.allocateDirect(b.size).apply {
+                put(b)
+                rewind()
+            } to b.size
         }
 
     /** Registers a named RGBA source for multi-source composition. */
@@ -2904,7 +4665,14 @@ class GossSession private constructor(
     }
 
     /** Uploads one RGBA/BGRA frame into a named source ([pixelFormat] 3 BGRA, 4 RGBA). */
-    fun submitSourceFrameRgba(name: String, rgba: ByteBuffer, width: Int, height: Int, stride: Int, pixelFormat: Int = 4): Boolean {
+    fun submitSourceFrameRgba(
+        name: String,
+        rgba: ByteBuffer,
+        width: Int,
+        height: Int,
+        stride: Int,
+        pixelFormat: Int = 4,
+    ): Boolean {
         val (buf, n) = nameBuf(name)
         return Gosslens.nativeSubmitSourceFrameRgba(handle, buf, n, rgba, width, height, stride, pixelFormat) == 0
     }
@@ -2916,14 +4684,27 @@ class GossSession private constructor(
     fun clearLayout(): Boolean = Gosslens.nativeClearLayout(handle) == 0
 
     /** Sets a source's composite blend: opacity, key mode (0 none, 1 matte, 2 chroma), chroma color, similarity. Name "camera" is the base. */
-    fun setSourceComposite(name: String, opacity: Float = 1f, keyMode: Int = 0, keyR: Float = 0f, keyG: Float = 0f, keyB: Float = 0f, similarity: Float = 0f): Boolean {
+    fun setSourceComposite(
+        name: String,
+        opacity: Float = 1f,
+        keyMode: Int = 0,
+        keyR: Float = 0f,
+        keyG: Float = 0f,
+        keyB: Float = 0f,
+        similarity: Float = 0f,
+    ): Boolean {
         val (buf, n) = nameBuf(name)
         return Gosslens.nativeSetSourceComposite(handle, buf, n, opacity, keyMode, keyR, keyG, keyB, similarity) == 0
     }
 
     /** Uploads a per-source matte for key mode 3 (red channel is the mask), so an
      * opaque guest is keyed to a subject without a baked alpha. */
-    fun submitSourceMask(name: String, rgba: ByteBuffer, width: Int, height: Int): Boolean {
+    fun submitSourceMask(
+        name: String,
+        rgba: ByteBuffer,
+        width: Int,
+        height: Int,
+    ): Boolean {
         val (buf, n) = nameBuf(name)
         return Gosslens.nativeSubmitSourceMask(handle, buf, n, rgba, width, height) == 0
     }
@@ -2931,7 +4712,11 @@ class GossSession private constructor(
     /** Runs the engine's own segmenter on a source's frames so its key mode 3 matte is computed
      * on-device (a virtual background for a remote guest). The model is the selfie/hair net
      * enableSegmentation takes; an empty model tears the source segmenter down. */
-    fun enableSourceSegmentation(name: String, model: ByteBuffer, threads: Int): Boolean {
+    fun enableSourceSegmentation(
+        name: String,
+        model: ByteBuffer,
+        threads: Int,
+    ): Boolean {
         val (buf, n) = nameBuf(name)
         return Gosslens.nativeEnableSourceSegmentation(handle, buf, n, model, model.remaining(), threads) == 0
     }
@@ -2943,30 +4728,49 @@ class GossSession private constructor(
     }
 
     /** Feeds a location fix for on-device geo.in_region membership. */
-    fun submitLocation(latitude: Double, longitude: Double, accuracyM: Float, timestampUs: Long): Boolean =
-        Gosslens.nativeSubmitLocation(handle, latitude, longitude, accuracyM, timestampUs) == 0
+    fun submitLocation(
+        latitude: Double,
+        longitude: Double,
+        accuracyM: Float,
+        timestampUs: Long,
+    ): Boolean = Gosslens.nativeSubmitLocation(handle, latitude, longitude, accuracyM, timestampUs) == 0
 
     /** Sets the geofence circle the app derives from a lens's intended place. */
-    fun setGeofence(latitude: Double, longitude: Double, radiusM: Double): Boolean =
-        Gosslens.nativeSetGeofence(handle, latitude, longitude, radiusM) == 0
+    fun setGeofence(
+        latitude: Double,
+        longitude: Double,
+        radiusM: Double,
+    ): Boolean = Gosslens.nativeSetGeofence(handle, latitude, longitude, radiusM) == 0
 
     fun clearGeofence(): Boolean = Gosslens.nativeClearGeofence(handle) == 0
 
     /** Sets the geofence to an axis-aligned lat/lon box. */
-    fun setGeofenceBBox(minLat: Double, minLon: Double, maxLat: Double, maxLon: Double): Boolean =
-        Gosslens.nativeSetGeofenceBbox(handle, minLat, minLon, maxLat, maxLon) == 0
+    fun setGeofenceBBox(
+        minLat: Double,
+        minLon: Double,
+        maxLat: Double,
+        maxLon: Double,
+    ): Boolean = Gosslens.nativeSetGeofenceBbox(handle, minLat, minLon, maxLat, maxLon) == 0
 
     /** Sets the geofence to a polygon ring of (lat, lon) pairs, three to 64 vertices. */
     fun setGeofencePolygon(vertices: List<Pair<Double, Double>>): Boolean {
         val buffer = ByteBuffer.allocateDirect(vertices.size * 2 * 8).order(ByteOrder.nativeOrder())
         val doubles = buffer.asDoubleBuffer()
-        for (v in vertices) { doubles.put(v.first); doubles.put(v.second) }
+        for (v in vertices) {
+            doubles.put(v.first)
+            doubles.put(v.second)
+        }
         return Gosslens.nativeSetGeofencePolygon(handle, buffer, vertices.size) == 0
     }
 
     /** Adds a named circular geofence, so a lens fires geo.in_region("name") for
      * its own place among several; re-adding a name replaces its region. */
-    fun setNamedGeofence(name: String, latitude: Double, longitude: Double, radiusM: Double): Boolean {
+    fun setNamedGeofence(
+        name: String,
+        latitude: Double,
+        longitude: Double,
+        radiusM: Double,
+    ): Boolean {
         val bytes = name.toByteArray(Charsets.UTF_8)
         val buffer = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder())
         buffer.put(bytes)
@@ -2975,13 +4779,19 @@ class GossSession private constructor(
 
     /** Adds a named polygon geofence (a ring of (lat, lon) pairs, three or more),
      * the non-circular counterpart of setNamedGeofence; re-adding a name replaces it. */
-    fun setNamedGeofencePolygon(name: String, vertices: List<Pair<Double, Double>>): Boolean {
+    fun setNamedGeofencePolygon(
+        name: String,
+        vertices: List<Pair<Double, Double>>,
+    ): Boolean {
         val bytes = name.toByteArray(Charsets.UTF_8)
         val nameBuf = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder())
         nameBuf.put(bytes)
         val coords = ByteBuffer.allocateDirect(vertices.size * 2 * 8).order(ByteOrder.nativeOrder())
         val doubles = coords.asDoubleBuffer()
-        for (v in vertices) { doubles.put(v.first); doubles.put(v.second) }
+        for (v in vertices) {
+            doubles.put(v.first)
+            doubles.put(v.second)
+        }
         return Gosslens.nativeSetNamedGeofencePolygon(handle, nameBuf, bytes.size, coords, vertices.size) == 0
     }
 
@@ -2992,12 +4802,21 @@ class GossSession private constructor(
     fun setGeoAccuracy(maxAccuracyM: Float): Boolean = Gosslens.nativeSetGeoAccuracy(handle, maxAccuracyM) == 0
 
     /** Sets the color and half-width (normalized units) the next stroke opens with. */
-    fun setBrushStyle(r: Float, g: Float, b: Float, a: Float, width: Float): Boolean =
-        Gosslens.nativeBrushSetStyle(handle, r, g, b, a, width) == 0
+    fun setBrushStyle(
+        r: Float,
+        g: Float,
+        b: Float,
+        a: Float,
+        width: Float,
+    ): Boolean = Gosslens.nativeBrushSetStyle(handle, r, g, b, a, width) == 0
 
     /** Uploads the RGBA sprite a stamp-mode stroke (brush mode 4) lays along its
      * length, an emoji or icon the host rasterizes. [rgba] is width by height RGBA8. */
-    fun setBrushStamp(rgba: ByteArray, width: Int, height: Int): Boolean {
+    fun setBrushStamp(
+        rgba: ByteArray,
+        width: Int,
+        height: Int,
+    ): Boolean {
         val buf = ByteBuffer.allocateDirect(rgba.size).order(ByteOrder.nativeOrder())
         buf.put(rgba)
         buf.rewind()
@@ -3008,38 +4827,77 @@ class GossSession private constructor(
     fun beginStroke(): Boolean = Gosslens.nativeBrushBegin(handle) == 0
 
     /** Adds a point to the open stroke, in normalized screen space (0..1). */
-    fun addStrokePoint(x: Float, y: Float): Boolean = Gosslens.nativeBrushPoint(handle, x, y) == 0
+    fun addStrokePoint(
+        x: Float,
+        y: Float,
+    ): Boolean = Gosslens.nativeBrushPoint(handle, x, y) == 0
 
     /** Commits the open stroke. A stroke of fewer than two points is dropped. */
     fun endStroke(): Boolean = Gosslens.nativeBrushEnd(handle) == 0
 
     fun undoStroke(): Boolean = Gosslens.nativeBrushUndo(handle) == 0
+
     fun redoStroke(): Boolean = Gosslens.nativeBrushRedo(handle) == 0
+
     fun clearStrokes(): Boolean = Gosslens.nativeBrushClear(handle) == 0
 
     /** The brush preset the next stroke opens with. */
-    enum class BrushMode(val raw: Int) { PEN(0), HIGHLIGHTER(1), MARKER(2), NEON(3), STAMP(4) }
+    enum class BrushMode(
+        val raw: Int,
+    ) {
+        PEN(0),
+        HIGHLIGHTER(1),
+        MARKER(2),
+        NEON(3),
+        STAMP(4),
+    }
 
     fun setBrushMode(mode: BrushMode): Boolean = Gosslens.nativeBrushSetMode(handle, mode.raw) == 0
 
     /** Erases committed strokes within radius (normalized units) of the point; returns how many, or -1 on a bad session. */
-    fun eraseStrokes(x: Float, y: Float, radius: Float): Int = Gosslens.nativeBrushEraseAt(handle, x, y, radius)
+    fun eraseStrokes(
+        x: Float,
+        y: Float,
+        radius: Float,
+    ): Int = Gosslens.nativeBrushEraseAt(handle, x, y, radius)
 
     /** The world-anchored brush. Points are pushed in the world frame world tracking reports; the engine projects and draws them so a stroke stays fixed in the scene. */
-    fun setARBrushStyle(r: Float, g: Float, b: Float, a: Float, width: Float): Boolean =
-        Gosslens.nativeArBrushSetStyle(handle, r, g, b, a, width) == 0
+    fun setARBrushStyle(
+        r: Float,
+        g: Float,
+        b: Float,
+        a: Float,
+        width: Float,
+    ): Boolean = Gosslens.nativeArBrushSetStyle(handle, r, g, b, a, width) == 0
 
     fun setARBrushMode(mode: BrushMode): Boolean = Gosslens.nativeArBrushSetMode(handle, mode.raw) == 0
+
     fun beginARStroke(): Boolean = Gosslens.nativeArBrushBegin(handle) == 0
-    fun addARStrokePoint(x: Float, y: Float, z: Float): Boolean = Gosslens.nativeArBrushPoint(handle, x, y, z) == 0
+
+    fun addARStrokePoint(
+        x: Float,
+        y: Float,
+        z: Float,
+    ): Boolean = Gosslens.nativeArBrushPoint(handle, x, y, z) == 0
+
     fun endARStroke(): Boolean = Gosslens.nativeArBrushEnd(handle) == 0
+
     fun undoARStroke(): Boolean = Gosslens.nativeArBrushUndo(handle) == 0
+
     fun redoARStroke(): Boolean = Gosslens.nativeArBrushRedo(handle) == 0
+
     fun clearARStrokes(): Boolean = Gosslens.nativeArBrushClear(handle) == 0
-    /// Where a placed sprite.2d, text.2d or video.texture node currently draws: its rect in
-    /// normalized coordinates and its turn in degrees clockwise - the authored angle, plus any
-    /// bound parameter, plus any gesture. Null for an unknown node.
-    data class SpriteTransform(val x: Float, val y: Float, val w: Float, val h: Float, val rotation: Float)
+
+    // / Where a placed sprite.2d, text.2d or video.texture node currently draws: its rect in
+    // / normalized coordinates and its turn in degrees clockwise - the authored angle, plus any
+    // / bound parameter, plus any gesture. Null for an unknown node.
+    data class SpriteTransform(
+        val x: Float,
+        val y: Float,
+        val w: Float,
+        val h: Float,
+        val rotation: Float,
+    )
 
     fun spriteTransform(nodeId: String): SpriteTransform? {
         val idBytes = nodeId.toByteArray(Charsets.UTF_8)
@@ -3051,39 +4909,71 @@ class GossSession private constructor(
         return SpriteTransform(out.getFloat(0), out.getFloat(4), out.getFloat(8), out.getFloat(12), out.getFloat(16))
     }
 
-    /// Feeds one screen touch event so the engine recognizes the gestures a
-    /// lens reacts to. phase is 0 began, 1 moved, 2 ended, 3 cancelled;
-    /// pointerId names the finger; x and y are normalized 0..1 over the frame.
-    fun touch(phase: Int, pointerId: Int = 0, x: Float, y: Float): Boolean =
-        Gosslens.nativeTouch(handle, phase, pointerId, x, y) == 0
+    // / Feeds one screen touch event so the engine recognizes the gestures a
+    // / lens reacts to. phase is 0 began, 1 moved, 2 ended, 3 cancelled;
+    // / pointerId names the finger; x and y are normalized 0..1 over the frame.
+    fun touch(
+        phase: Int,
+        pointerId: Int = 0,
+        x: Float,
+        y: Float,
+    ): Boolean = Gosslens.nativeTouch(handle, phase, pointerId, x, y) == 0
 
-    /// A device haptic a haptic trigger asked for: the style index (0 light..7
-    /// failure) and a 0..1 intensity hint.
-    data class Haptic(val style: Int, val intensity: Float)
+    // / A device haptic a haptic trigger asked for: the style index (0 light..7
+    // / failure) and a 0..1 intensity hint.
+    data class Haptic(
+        val style: Int,
+        val intensity: Float,
+    )
 
     private val hapticBuffer: ByteBuffer = ByteBuffer.allocateDirect(2 * 4).order(ByteOrder.nativeOrder())
 
-    /// Drains one haptic queued this tick, or null when none remain. Call in a
-    /// loop after tickLens and buzz the device for each.
+    // / Drains one haptic queued this tick, or null when none remain. Call in a
+    // / loop after tickLens and buzz the device for each.
     fun pullHaptic(): Haptic? {
         if (Gosslens.nativePullHaptic(handle, hapticBuffer) != 0) return null
         hapticBuffer.rewind()
         val fb = hapticBuffer.asFloatBuffer()
         return Haptic(fb.get(0).toInt(), fb.get(1))
     }
-    /// The photosensitivity risk (0..1) the flash detector last reported for the
-    /// frames this session was fed, the same value a lens reads as safety.flash_risk.
+
+    // / The photosensitivity risk (0..1) the flash detector last reported for the
+    // / frames this session was fed, the same value a lens reads as safety.flash_risk.
     fun flashRisk(): Float = Gosslens.nativeFlashRisk(handle)
-    /// Zero-copy for a named source: one platform texture handle wrapped, not read, so a second
-    /// lens composites at no per-frame copy. The platform object must outlive the next frame.
-    fun submitSourceFrame(name: String, plane: Long, width: Int, height: Int, pixelFormat: Int = Gosslens.PIXEL_BGRA8): Boolean {
+
+    // / Zero-copy for a named source: one platform texture handle wrapped, not read, so a second
+    // / lens composites at no per-frame copy. The platform object must outlive the next frame.
+    fun submitSourceFrame(
+        name: String,
+        plane: Long,
+        width: Int,
+        height: Int,
+        pixelFormat: Int = Gosslens.PIXEL_BGRA8,
+    ): Boolean {
         val (buf, n) = nameBuf(name)
         return Gosslens.nativeSubmitSourceFrame(handle, buf, n, plane, width, height, pixelFormat) == 0
     }
-    fun grab(x: Float, y: Float, z: Float): Boolean = Gosslens.nativeGrab(handle, x, y, z) == 0
+
+    fun grab(
+        x: Float,
+        y: Float,
+        z: Float,
+    ): Boolean = Gosslens.nativeGrab(handle, x, y, z) == 0
+
     fun release(): Boolean = Gosslens.nativeRelease(handle) == 0
-    fun addCollider(x: Float, y: Float, z: Float): Boolean = Gosslens.nativeAddCollider(handle, x, y, z) == 0
-    fun eraseCollider(x: Float, y: Float, z: Float, radius: Float): Boolean = Gosslens.nativeEraseCollider(handle, x, y, z, radius) == 0
+
+    fun addCollider(
+        x: Float,
+        y: Float,
+        z: Float,
+    ): Boolean = Gosslens.nativeAddCollider(handle, x, y, z) == 0
+
+    fun eraseCollider(
+        x: Float,
+        y: Float,
+        z: Float,
+        radius: Float,
+    ): Boolean = Gosslens.nativeEraseCollider(handle, x, y, z, radius) == 0
 
     /** Releases one solver hair by the id the physics world assigned it,
      * pairing the acquire a hair lens performs at activation, so a hair
@@ -3111,11 +5001,17 @@ class GossSession private constructor(
         colorStandard: Int = Gosslens.COLOR_BT709,
         colorRange: Int = Gosslens.RANGE_VIDEO,
         timestampUs: Long,
-    ): Boolean = Gosslens.nativeSubmitHardwareBuffer(
-        handle, buffer, width, height,
-        Gosslens.flagsFor(rotationDegrees, mirrored),
-        colorStandard, colorRange, timestampUs,
-    ) == 0
+    ): Boolean =
+        Gosslens.nativeSubmitHardwareBuffer(
+            handle,
+            buffer,
+            width,
+            height,
+            Gosslens.flagsFor(rotationDegrees, mirrored),
+            colorStandard,
+            colorRange,
+            timestampUs,
+        ) == 0
 
     override fun close() {
         if (closed) return
@@ -3124,9 +5020,9 @@ class GossSession private constructor(
     }
 }
 
-/// The operators a model needs that this build does not implement. An empty
-/// list means the model runs; anything in it names exactly what is missing,
-/// which beats a bare "unsupported" when choosing a model.
+// / The operators a model needs that this build does not implement. An empty
+// / list means the model runs; anything in it names exactly what is missing,
+// / which beats a bare "unsupported" when choosing a model.
 fun mlOpSupport(model: ByteArray): List<String> {
     val modelBuf = ByteBuffer.allocateDirect(model.size)
     modelBuf.put(model)
@@ -3145,8 +5041,8 @@ fun mlOpSupport(model: ByteArray): List<String> {
     return emptyList()
 }
 
-/// What the frame says at one place in it. The quadrilateral is in normalized
-/// frame space and in reading order, so a coordinate sent back maps to a pixel.
+// / What the frame says at one place in it. The quadrilateral is in normalized
+// / frame space and in reading order, so a coordinate sent back maps to a pixel.
 data class GossReading(
     val text: String,
     val quad: FloatArray,
@@ -3159,12 +5055,15 @@ data class GossReading(
     val paragraph: Int,
 )
 
-/// One remembered embedding and how near it was.
-data class GossMemoryMatch(val id: Long, val score: Float)
+// / One remembered embedding and how near it was.
+data class GossMemoryMatch(
+    val id: Long,
+    val score: Float,
+)
 
-/// What the engine will let this process capture. Scale is the field to carry
-/// through: a point sent back without it lands at half its place on a dense
-/// display.
+// / What the engine will let this process capture. Scale is the field to carry
+// / through: a point sent back without it lands at half its place on a dense
+// / display.
 data class GossScreenSurface(
     val id: Long,
     val kind: Int,
@@ -3176,12 +5075,17 @@ data class GossScreenSurface(
     val scale: Float,
 )
 
-/// The MediaProjection consent flow. Only an Activity can show the dialog and
-/// receive the answer, so this is the app's to drive: grant after the result
-/// arrives, feed each frame the virtual display produces, and revoke when the
-/// projection stops.
+// / The MediaProjection consent flow. Only an Activity can show the dialog and
+// / receive the answer, so this is the app's to drive: grant after the result
+// / arrives, feed each frame the virtual display produces, and revoke when the
+// / projection stops.
 object GossScreenCapture {
-    fun grant(widthPx: Float, heightPx: Float, density: Float, label: String) {
+    fun grant(
+        widthPx: Float,
+        heightPx: Float,
+        density: Float,
+        label: String,
+    ) {
         val bytes = label.toByteArray()
         val buffer = ByteBuffer.allocateDirect(bytes.size.coerceAtLeast(1))
         buffer.put(bytes)
@@ -3192,8 +5096,13 @@ object GossScreenCapture {
         Gosslens.nativeScreenRevoke()
     }
 
-    /// One frame off the ImageReader. The buffer must be direct and must stay
-    /// valid until the next call, which is what the engine reads from.
-    fun frame(pixels: ByteBuffer, width: Int, height: Int, stride: Int, timestampUs: Long): Boolean =
-        Gosslens.nativeScreenFrame(pixels, width, height, stride, timestampUs) == 0
+    // / One frame off the ImageReader. The buffer must be direct and must stay
+    // / valid until the next call, which is what the engine reads from.
+    fun frame(
+        pixels: ByteBuffer,
+        width: Int,
+        height: Int,
+        stride: Int,
+        timestampUs: Long,
+    ): Boolean = Gosslens.nativeScreenFrame(pixels, width, height, stride, timestampUs) == 0
 }

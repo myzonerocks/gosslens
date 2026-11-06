@@ -41,7 +41,9 @@ import java.util.concurrent.Executors
 // sliders, tracking overlays, a lens filter picker, a virtual-background
 // toggle, capture, and a front/back switch. NV12 planes go through the stated
 // CPU copy path until the hardware buffer import lands.
-class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
+class MainActivity :
+    AppCompatActivity(),
+    SurfaceHolder.Callback {
     private val tag = "GOSSDROID"
     private lateinit var surfaceView: SurfaceView
     private lateinit var overlay: FaceOverlayView
@@ -83,7 +85,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private val yScratchRing = arrayOfNulls<ByteBuffer>(2)
     private val uvScratchRing = arrayOfNulls<ByteBuffer>(2)
     private var scratchRingIndex = 0
-    private val pendingCopySubmits = java.util.concurrent.atomic.AtomicInteger(0)
+    private val pendingCopySubmits =
+        java.util.concurrent.atomic
+            .AtomicInteger(0)
 
     // Zero-copy is attempted until the device or stream refuses it once;
     // after that the stream stays on the declared copy path. Written from
@@ -125,7 +129,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         }
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
             startCamera()
@@ -174,7 +182,12 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     // Reads a model bundle asset into a direct buffer and stands its worker up,
     // logging the same plain state whether the bundle is present or not.
-    private fun enableTracker(session: GossSession, asset: String, label: String, enable: (ByteBuffer) -> Boolean) {
+    private fun enableTracker(
+        session: GossSession,
+        asset: String,
+        label: String,
+        enable: (ByteBuffer) -> Boolean,
+    ) {
         try {
             assets.open(asset).use { stream ->
                 val bytes = stream.readBytes()
@@ -188,7 +201,12 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         }
     }
 
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+    override fun surfaceChanged(
+        holder: SurfaceHolder,
+        format: Int,
+        width: Int,
+        height: Int,
+    ) {
         engine?.resize(width, height)
     }
 
@@ -196,7 +214,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
      * render frame regardless of whether that particular result was new
      * keeps the lens's own animation ramps advancing smoothly at display
      * refresh rate rather than at tracking cadence. */
-    private fun tickLens(session: GossSession, dtUs: Int) {
+    private fun tickLens(
+        session: GossSession,
+        dtUs: Int,
+    ) {
         lensSignals.set(overlay.facePresent, overlay.handCount > 0, false, 0.0, 0.0, overlay.latestFaceResult.blendshapes)
         session.tickLens(dtUs, lensSignals)
         audioOutput?.pump()
@@ -217,12 +238,20 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private fun extractBeautyResources(): String? {
         val resDir = java.io.File(filesDir, "res")
         if (!resDir.exists()) {
-            val names = try { assets.list("res") } catch (e: java.io.IOException) { null }
+            val names =
+                try {
+                    assets.list("res")
+                } catch (e: java.io.IOException) {
+                    null
+                }
             if (names.isNullOrEmpty()) return null
             resDir.mkdirs()
             for (name in names) {
                 assets.open("res/$name").use { input ->
-                    java.io.File(resDir, name).outputStream().use { output -> input.copyTo(output) }
+                    java.io
+                        .File(resDir, name)
+                        .outputStream()
+                        .use { output -> input.copyTo(output) }
                 }
             }
         }
@@ -234,19 +263,24 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     // background toggle, and capture button along the bottom. Both bars pad to
     // the system insets so nothing sits under the status or navigation area.
     private fun setupControls(root: FrameLayout) {
-        val top = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(24, 24, 24, 24)
-        }
+        val top =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(24, 24, 24, 24)
+            }
         statusLine = readoutLabel().also { top.addView(it) }
         trackingLine = readoutLabel().also { top.addView(it) }
         topBar = top
-        root.addView(top, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.TOP })
+        root.addView(
+            top,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.TOP },
+        )
 
-        val topRight = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(24, 24, 24, 24)
-        }
+        val topRight =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(24, 24, 24, 24)
+            }
         val overlayButton = ToggleButton(this)
         overlayButton.textOn = "Overlay on"
         overlayButton.textOff = "Overlay off"
@@ -255,20 +289,35 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             overlay.visibility = if (checked) View.VISIBLE else View.GONE
         }
         topRight.addView(overlayButton)
-        topRight.addView(Button(this).apply {
-            text = "Flip"
-            setOnClickListener { switchCamera() }
-        })
-        root.addView(topRight, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.TOP or Gravity.END })
+        topRight.addView(
+            Button(this).apply {
+                text = "Flip"
+                setOnClickListener { switchCamera() }
+            },
+        )
+        root.addView(
+            topRight,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+                gravity =
+                    Gravity.TOP or Gravity.END
+            },
+        )
 
-        val bottom = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(24, 24, 24, 24)
-        }
+        val bottom =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(24, 24, 24, 24)
+            }
         setupBeautyControls(bottom)
         bottom.addView(setupLensRow())
         bottomBar = bottom
-        root.addView(bottom, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.BOTTOM })
+        root.addView(
+            bottom,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+                gravity =
+                    Gravity.BOTTOM
+            },
+        )
 
         // A captured photo shows over everything until tapped away.
         val preview = ImageView(this)
@@ -295,49 +344,62 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         }
     }
 
-    private fun readoutLabel(): TextView = TextView(this).apply {
-        setTextColor(Color.WHITE)
-        textSize = 12f
-        maxLines = 1
-        isSingleLine = true
-        ellipsize = android.text.TextUtils.TruncateAt.END
-    }
+    private fun readoutLabel(): TextView =
+        TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            maxLines = 1
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
 
     // The filter picker (None/Blur/Grade/Bloom), the virtual-background
     // toggle with its degrade note, and the capture button, on one row.
     private fun setupLensRow(): LinearLayout {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
+        val row =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
         val picker = Spinner(this)
         picker.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, LensCatalog.filterNames)
-        picker.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                selectedFilter = position
-                applyActiveLens()
+        picker.onItemSelectedListener =
+            object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(
+                    parent: AdapterView<*>?,
+                    view: View?,
+                    position: Int,
+                    id: Long,
+                ) {
+                    selectedFilter = position
+                    applyActiveLens()
+                }
+
+                override fun onNothingSelected(parent: AdapterView<*>?) {}
             }
-            override fun onNothingSelected(parent: AdapterView<*>?) {}
-        }
         row.addView(picker)
-        vbToggle = ToggleButton(this).apply {
-            textOn = "Background on"
-            textOff = "Background off"
-            isChecked = false
-            setOnCheckedChangeListener { _, checked -> toggleVirtualBackground(checked) }
-        }
+        vbToggle =
+            ToggleButton(this).apply {
+                textOn = "Background on"
+                textOff = "Background off"
+                isChecked = false
+                setOnCheckedChangeListener { _, checked -> toggleVirtualBackground(checked) }
+            }
         row.addView(vbToggle)
-        vbNote = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            textSize = 11f
-            maxLines = 1
-            isSingleLine = true
-        }
+        vbNote =
+            TextView(this).apply {
+                setTextColor(Color.WHITE)
+                textSize = 11f
+                maxLines = 1
+                isSingleLine = true
+            }
         row.addView(vbNote)
-        row.addView(Button(this).apply {
-            text = "Capture"
-            setOnClickListener { capture() }
-        })
+        row.addView(
+            Button(this).apply {
+                text = "Capture"
+                setOnClickListener { capture() }
+            },
+        )
         // If the segmenter model never shipped, the background toggle degrades
         // to disabled with a short note instead of failing at tap time.
         if (!assetExists(LensCatalog.SEGMENTER_ASSET)) {
@@ -347,37 +409,54 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         return row
     }
 
-    private fun assetExists(name: String): Boolean = try {
-        assets.open(name).close(); true
-    } catch (e: java.io.IOException) { false }
+    private fun assetExists(name: String): Boolean =
+        try {
+            assets.open(name).close()
+            true
+        } catch (e: java.io.IOException) {
+            false
+        }
 
     // Each slider reaches GossSession.setBeauty directly; the effect
     // composites into the live preview through the beauty chain.
     private fun setupBeautyControls(parent: LinearLayout) {
         val names = listOf("smooth", "whiten", "thin face", "big eye", "lipstick", "blush")
         for ((index, name) in names.withIndex()) {
-            val rowView = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            rowView.addView(TextView(this).apply {
-                text = name
-                setTextColor(Color.WHITE)
-                maxLines = 1
-                isSingleLine = true
-                layoutParams = LinearLayout.LayoutParams(160, LinearLayout.LayoutParams.WRAP_CONTENT)
-            })
-            rowView.addView(SeekBar(this).apply {
-                max = 100
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                    override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                        session?.setBeauty(index, progress / 100f)
-                    }
-                    override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-                    override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-                })
-            })
+            val rowView =
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+            rowView.addView(
+                TextView(this).apply {
+                    text = name
+                    setTextColor(Color.WHITE)
+                    maxLines = 1
+                    isSingleLine = true
+                    layoutParams = LinearLayout.LayoutParams(160, LinearLayout.LayoutParams.WRAP_CONTENT)
+                },
+            )
+            rowView.addView(
+                SeekBar(this).apply {
+                    max = 100
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    setOnSeekBarChangeListener(
+                        object : SeekBar.OnSeekBarChangeListener {
+                            override fun onProgressChanged(
+                                seekBar: SeekBar?,
+                                progress: Int,
+                                fromUser: Boolean,
+                            ) {
+                                session?.setBeauty(index, progress / 100f)
+                            }
+
+                            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+
+                            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+                        },
+                    )
+                },
+            )
             parent.addView(rowView)
         }
     }
@@ -417,14 +496,18 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         applyActiveLens()
     }
 
-    private fun loadSegmenterModel(): ByteBuffer? = try {
-        assets.open(LensCatalog.SEGMENTER_ASSET).use { stream ->
-            val bytes = stream.readBytes()
-            ByteBuffer.allocateDirect(bytes.size).apply { put(bytes); flip() }
+    private fun loadSegmenterModel(): ByteBuffer? =
+        try {
+            assets.open(LensCatalog.SEGMENTER_ASSET).use { stream ->
+                val bytes = stream.readBytes()
+                ByteBuffer.allocateDirect(bytes.size).apply {
+                    put(bytes)
+                    flip()
+                }
+            }
+        } catch (e: java.io.IOException) {
+            null
         }
-    } catch (e: java.io.IOException) {
-        null
-    }
 
     // Renders the composited frame to a PNG, saves it, and shows it over the
     // preview until tapped away.
@@ -509,10 +592,12 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     }
 
     private fun buildAnalysis(): ImageAnalysis {
-        val analysis = ImageAnalysis.Builder()
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-            .build()
+        val analysis =
+            ImageAnalysis
+                .Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                .build()
         analysis.setAnalyzer(analysisExecutor) { image ->
             image.use {
                 val session = session ?: return@use
@@ -532,12 +617,15 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                         val timestampUs = it.imageInfo.timestamp / 1000
                         val mirror = mirrored
                         uiExecutor.execute {
-                            val submitted = session.submitHardwareBuffer(
-                                hardwareBuffer,
-                                width, height,
-                                rotationDegrees, mirror,
-                                timestampUs = timestampUs,
-                            )
+                            val submitted =
+                                session.submitHardwareBuffer(
+                                    hardwareBuffer,
+                                    width,
+                                    height,
+                                    rotationDegrees,
+                                    mirror,
+                                    timestampUs = timestampUs,
+                                )
                             hardwareBuffer.close()
                             if (submitted) {
                                 cameraFrames += 1
@@ -621,12 +709,18 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                     val mirror = mirrored
                     pendingCopySubmits.incrementAndGet()
                     uiExecutor.execute {
-                        val submitted = session.submitFrameCopy(
-                            ySubmit, yStride, uvSubmit, uvStride,
-                            width, height,
-                            rotationDegrees, mirrored = mirror,
-                            timestampUs = timestampUs,
-                        )
+                        val submitted =
+                            session.submitFrameCopy(
+                                ySubmit,
+                                yStride,
+                                uvSubmit,
+                                uvStride,
+                                width,
+                                height,
+                                rotationDegrees,
+                                mirrored = mirror,
+                                timestampUs = timestampUs,
+                            )
                         pendingCopySubmits.decrementAndGet()
                         if (submitted) {
                             cameraFrames += 1
@@ -639,8 +733,12 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 }
                 overlay.frameGeometry(it.width, it.height, it.imageInfo.rotationDegrees, mirrored)
                 session.trackFrame(
-                    yCopy, y.rowStride, uvCopy, uvStride,
-                    it.width, it.height,
+                    yCopy,
+                    y.rowStride,
+                    uvCopy,
+                    uvStride,
+                    it.width,
+                    it.height,
                     timestampUs = it.imageInfo.timestamp / 1000,
                 )
             }

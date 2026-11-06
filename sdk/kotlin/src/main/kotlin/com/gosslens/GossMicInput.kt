@@ -18,6 +18,7 @@ class GossMicInput(
 ) {
     private var record: AudioRecord? = null
     private var reader: Thread? = null
+
     @Volatile private var running = false
 
     /**
@@ -27,23 +28,25 @@ class GossMicInput(
      */
     fun start(): Boolean {
         if (running) return true
-        val minBytes = AudioRecord.getMinBufferSize(
-            sampleRate,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_FLOAT,
-        )
-        if (minBytes <= 0) return false
-        val rec = try {
-            AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+        val minBytes =
+            AudioRecord.getMinBufferSize(
                 sampleRate,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_FLOAT,
-                minBytes * 2,
             )
-        } catch (_: SecurityException) {
-            return false
-        }
+        if (minBytes <= 0) return false
+        val rec =
+            try {
+                AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_FLOAT,
+                    minBytes * 2,
+                )
+            } catch (_: SecurityException) {
+                return false
+            }
         if (rec.state != AudioRecord.STATE_INITIALIZED) {
             rec.release()
             return false
@@ -58,18 +61,22 @@ class GossMicInput(
         rec.startRecording()
         record = rec
         running = true
-        reader = Thread {
-            var at = 0L
-            while (running) {
-                val read = rec.read(floats, 0, frames, AudioRecord.READ_BLOCKING)
-                if (read <= 0) continue
-                buffer.clear()
-                buffer.asFloatBuffer().put(floats, 0, read)
-                val stamp = at * 1_000_000L / granted
-                engine.submitAudio(session, buffer, read, granted, 1, stamp)
-                at += read
+        reader =
+            Thread {
+                var at = 0L
+                while (running) {
+                    val read = rec.read(floats, 0, frames, AudioRecord.READ_BLOCKING)
+                    if (read <= 0) continue
+                    buffer.clear()
+                    buffer.asFloatBuffer().put(floats, 0, read)
+                    val stamp = at * 1_000_000L / granted
+                    engine.submitAudio(session, buffer, read, granted, 1, stamp)
+                    at += read
+                }
+            }.also {
+                it.isDaemon = true
+                it.start()
             }
-        }.also { it.isDaemon = true; it.start() }
         return true
     }
 

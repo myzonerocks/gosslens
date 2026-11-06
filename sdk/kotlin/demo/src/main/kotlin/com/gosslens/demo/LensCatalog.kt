@@ -24,12 +24,13 @@ object LensCatalog {
         """{"glf":"1.0","id":"com.gosslens.demo.virtual-background","version":"1.0.0","display_name":"Virtual Background","engine_compat":">=0.5","capabilities":["segmentation"],"parameters":[],"nodes":[{"id":"background","type":"blend.pass","inputs":{"frame":"camera"},"params":{}}],"triggers":[]}"""
 
     /** The manifest for a filter index, or null for None (no post lens). */
-    fun filterManifest(index: Int): ByteArray? = when (index) {
-        1 -> blur
-        2 -> grade
-        3 -> bloom
-        else -> null
-    }?.toByteArray(Charsets.UTF_8)
+    fun filterManifest(index: Int): ByteArray? =
+        when (index) {
+            1 -> blur
+            2 -> grade
+            3 -> bloom
+            else -> null
+        }?.toByteArray(Charsets.UTF_8)
 
     fun virtualBackgroundManifest(): ByteArray = virtualBackground.toByteArray(Charsets.UTF_8)
 
@@ -39,14 +40,15 @@ object LensCatalog {
     const val SEGMENTER_ASSET = "selfie_segmenter.tflite"
 
     /** The canned gesture class the hand result carries, as a short label. */
-    fun gestureName(gesture: Int): String = when (gesture) {
-        Gosslens.GESTURE_CLOSED_FIST -> "fist"
-        Gosslens.GESTURE_OPEN_PALM -> "open palm"
-        Gosslens.GESTURE_POINTING_UP -> "point up"
-        Gosslens.GESTURE_THUMB_DOWN -> "thumb down"
-        Gosslens.GESTURE_THUMB_UP -> "thumb up"
-        Gosslens.GESTURE_VICTORY -> "victory"
-        Gosslens.GESTURE_ILOVEYOU -> "love"
-        else -> "none"
-    }
+    fun gestureName(gesture: Int): String =
+        when (gesture) {
+            Gosslens.GESTURE_CLOSED_FIST -> "fist"
+            Gosslens.GESTURE_OPEN_PALM -> "open palm"
+            Gosslens.GESTURE_POINTING_UP -> "point up"
+            Gosslens.GESTURE_THUMB_DOWN -> "thumb down"
+            Gosslens.GESTURE_THUMB_UP -> "thumb up"
+            Gosslens.GESTURE_VICTORY -> "victory"
+            Gosslens.GESTURE_ILOVEYOU -> "love"
+            else -> "none"
+        }
 }
