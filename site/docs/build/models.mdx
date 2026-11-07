@@ -1,0 +1,135 @@
+---
+title: Bring your own model
+description: Load your own network for segmentation or inference, pin it by digest, and read its tensors back.
+---
+
+You're not stuck with our models. Segmentation, inference and the trackers all
+take bytes you hand them, so something you trained, quantised and shipped in
+your own bundle runs on exactly the same path the built-in ones do.
+
+## Loading a model
+
+`enable_segmentation` takes the model itself, not a path to one we know about.
+The bytes are yours, and so is deciding how they get versioned and updated.
+
+```c
+goss_status status = goss_session_enable_segmentation(
+    session,
+    model_bytes,   /* your network, as loaded from your bundle */
+    model_len,
+    4              /* worker threads; 0 lets the engine choose */
+);
+```
+
+The thread count is the one knob worth setting yourself. It caps the inference
+worker, and it's usually what decides whether a model fits in the frame budget
+or not.
+
+<Note>
+Like everything else on a session, this has to happen on the graph thread. Turn
+the worker on before you start submitting frames, not partway through.
+</Note>
+
+## Checking a model will run before you ship it
+
+Each build has a set of operations compiled into it. If your network uses one
+that isn't there, it fails when you enable it, which is a terrible moment to
+find out.
+
+`goss_ml_op_support` lets you ask ahead of time:
+
+```c
+uint8_t report[4096];
+size_t written = 0;
+goss_ml_op_support(model_bytes, model_len, report, sizeof report, &written);
+```
+
+The report lists the operations your model wants and which of them this build
+can run. Put it in CI against every model you ship and the library version you
+ship with, and no user will ever be the one who finds the problem.
+
+## Pinning models by digest
+
+A model is executable content. If your app downloads models, or loads them from
+a directory the user can write to, then whatever can write to that directory
+gets to choose what your camera runs.
+
+The allowlist closes that off. Give the session the SHA-256 digests you trust,
+and anything whose digest isn't on the list gets refused when you enable a
+tracker or segmenter.
+
+```c
+/* 32 bytes, raw, not hex. */
+goss_session_allow_model_digest(session, digest_of_my_segmenter);
+goss_session_allow_model_digest(session, digest_of_my_detector);
+```
+
+A few things to know:
+
+- Call it **before** you enable the worker, because that's when the check
+  happens.
+- Adding the same digest twice does nothing, so you can call it on every
+  startup without keeping track.
+- If you set no digests, anything loads. That's the default, and it's the right
+  one while you're developing.
+- `goss_session_clear_model_allowlist` empties the list again.
+
+<Warning>
+An empty allowlist means "allow everything", not "allow nothing". If your app
+can download models, set the list explicitly at startup. Don't assume the empty
+state is the locked one.
+</Warning>
+
+## Reading your model's output
+
+There are two calls, and which you want depends on what your model produces.
+
+**Plain numbers.** `ml_output` copies one node's output tensor into memory you
+own.
+
+```c
+float values[1024];
+size_t written = 0;
+goss_session_ml_output(session,
+                       node_id, node_id_len,  /* which ml.infer node */
+                       0,                     /* which output tensor */
+                       values, 1024, &written);
+```
+
+**A mask.** `ml_mask` copies a node's mask-bound output, freshly read and
+resampled onto the fixed segmentation plane, so it lines up with everything
+else from that frame.
+
+```c
+float mask[256 * 256];
+size_t written = 0;
+goss_session_ml_mask(session, node_id, node_id_len, mask, 256 * 256, &written);
+```
+
+Both write into your buffer, so allocate once and reuse it. Allocating here
+means allocating in the hot path.
+
+Both tell you how much they wrote. Check that instead of assuming the shape,
+and size the buffer from the model you shipped rather than from a number you
+typed once.
+
+## Wiring a model into a lens
+
+Your model becomes part of what draws when a lens references it as an
+`ml.infer` node. The node id you pass to `ml_output` and `ml_mask` is the one
+the manifest gave it, which is how a lens author and an app agree on what to
+read without sharing a header. See [the lens format](/docs/concepts/lenses).
+
+## Turning it off
+
+`goss_session_disable_segmentation` stops the worker and gives back what it was
+holding. Do that when the feature leaves the screen, not when the session ends,
+so somebody who closed the camera isn't still paying for a model.
+
+## Before you ship
+
+- `goss_ml_op_support` passes against the library version you're shipping with.
+- You've measured the thread count rather than guessed it.
+- Digests are pinned if models can arrive from anywhere other than your binary.
+- Output buffers get allocated once, sized from the model.
+- The worker is off when the feature isn't on screen.

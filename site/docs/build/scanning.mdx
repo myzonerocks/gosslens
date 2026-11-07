@@ -1,0 +1,73 @@
+---
+title: Scanning and media
+description: Codes, images and audio the engine can read or produce without a service.
+---
+
+These live on the engine rather than a session, because none of them need a
+stream of frames. You hand them bytes and get an answer back, on the device.
+
+## QR codes
+
+```c
+uint8_t payload[512];
+size_t len = 0;
+goss_engine_scan_qr(engine, luminance, width, height, payload, sizeof payload, &len);
+```
+
+Luminance is the plane you already have from the camera, so there's no need to
+convert to RGB just to read a code.
+
+Generating one:
+
+```c
+uint8_t image[256 * 256];
+uint32_t dim = 0;
+goss_engine_generate_qr(engine, payload, payload_len,
+                        6,    /* module scale */
+                        4,    /* quiet modules */
+                        image, sizeof image, &dim);
+```
+
+The quiet zone isn't decoration. Four modules is the spec's minimum, and
+dropping it gives you codes that scan fine on your desk and fail on a table.
+
+## Barcodes
+
+```c
+uint8_t digits[32];
+goss_engine_scan_barcode(engine, luminance, width, height, digits);
+```
+
+## Images
+
+```c
+goss_engine_decode_png(bytes, len, rgba, capacity, &width, &height, &written);
+```
+
+Decoding here keeps a lens's assets and your app's images on the same path,
+with the same colour rules.
+
+## Audio
+
+```c
+uint32_t track_id = 0, votes = 0;
+goss_engine_music_identify(engine, samples, frame_count, sample_rate, channels,
+                           min_votes, &track_id, &votes);
+```
+
+`min_votes` is the confidence floor, and the votes come back so you can make
+your own call. An app that shows a guess at low confidence and a certainty at
+high confidence is more useful than one that only speaks when it's sure.
+
+References are added and cleared on the engine:
+
+```c
+goss_engine_music_add_reference(engine, ...);
+goss_engine_music_clear_references(engine);
+```
+
+## Why these are on the engine
+
+None of this needs the frame graph, and none of it leaves the device. If all
+you're doing is scanning a code, you don't open a session, you don't start a
+camera pipeline, and you don't pay for either.

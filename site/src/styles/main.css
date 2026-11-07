@@ -25,9 +25,55 @@
 }
 
 @layer base {
-  /* Dark is the product's own look and the default on every screen. Light is
-     a choice a reader makes, never something a system setting imposes. */
+  /* Light is the base, the system supplies dark, and a reader's own choice
+     beats both. Nothing is stamped on the root until somebody chooses. */
   :root {
+    color-scheme: light;
+    --c-iris: #5d4ce0;
+    --c-iris-bright: #7a68f2;
+    --c-iris-deep: #3a2cae;
+    --c-ground: #f6f6fa;
+    --c-surface: #ffffff;
+    --c-raised: #ffffff;
+    --c-edge: #e3e1ed;
+    --c-edge-strong: #8a8699;
+    --c-ink: #1f1c2b;
+    --c-ink-muted: #5d5970;
+    --c-ink-faint: #918da0;
+    --c-link: #5141cf;
+    --c-lime: #55700f;
+    --lit-from: #ffffff;
+    --lit-to: #f8f7fc;
+    --lit-top: rgb(255 255 255 / 0.9);
+    --lit-shadow: 0 1px 2px rgb(24 18 56 / 0.04), 0 12px 28px -20px rgb(24 18 56 / 0.28);
+    --glow: 0.1;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --c-iris: #7d6cf0;
+      --c-iris-bright: #a99bff;
+      --c-iris-deep: #4335bd;
+      --c-ground: #0b0a11;
+      --c-surface: #14121c;
+      --c-raised: #1b1927;
+      --c-edge: #292536;
+      --c-edge-strong: #726d87;
+      --c-ink: #e7e5f0;
+      --c-ink-muted: #a5a1b5;
+      --c-ink-faint: #76728a;
+      --c-link: #b0a2ff;
+      --c-lime: #c0e85a;
+      --lit-from: #201d2e;
+      --lit-to: #14121c;
+      --lit-top: rgb(255 255 255 / 0.06);
+      --lit-shadow: 0 18px 40px -26px rgb(0 0 0 / 0.75);
+      --glow: 0.18;
+    }
+  }
+
+  :root[data-theme="dark"] {
     color-scheme: dark;
     --c-iris: #7d6cf0;
     --c-iris-bright: #a99bff;
@@ -367,6 +413,18 @@
   .shiki,
   .shiki span {
     background-color: transparent;
+    color: var(--shiki-light);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .shiki,
+    :root:not([data-theme="light"]) .shiki span {
+      color: var(--shiki-dark);
+    }
+  }
+
+  :root[data-theme="dark"] .shiki,
+  :root[data-theme="dark"] .shiki span {
     color: var(--shiki-dark);
   }
 

@@ -1,0 +1,144 @@
+---
+title: Building in AR
+description: World mesh, planes, anchors, colliders, a path across a room, and drawing in the air, with the calls that do each.
+---
+
+Everything here assumes a session that's already getting frames. If you haven't
+got that far yet, start with the [quickstart](/docs/start/quickstart).
+
+## Give the engine the world
+
+We don't own your world tracker. Feed us the mesh and the pose your platform
+already produces, and everything else gets placed against them.
+
+```c
+/* Triangles, as the platform gives them to you. */
+goss_session_submit_world_mesh(session, vertices, vertex_count, indices, index_count);
+
+/* Where the camera is, what it can see, and how the room is lit, in one
+   call, once per platform frame. */
+goss_world_state state = { .tracking_state = 2 };
+memcpy(state.world_from_camera, pose_column_major, sizeof state.world_from_camera);
+
+goss_session_submit_world(session, &state,
+                          planes, plane_count,
+                          anchors, anchor_count,
+                          &light);
+```
+
+Both are graph thread calls. Submit the world state every platform frame: it
+carries the tracking state, the camera pose, the tracked planes, the anchors
+and the light estimate all together. Only submit the mesh when the platform
+actually updates it, which is far less often.
+
+Pass `tracking_state` through honestly instead of always sending "tracking".
+It drives the signal a lens uses to decide whether world-anchored content
+should be drawn at all.
+
+## Find the floor
+
+```c
+uint64_t floor = 0;
+if (goss_session_floor_plane(session, &floor) == GOSS_OK) {
+    /* A plane id you can anchor against. */
+}
+```
+
+Planes also come through in the [perception record](/docs/concepts/perception)
+with their extents, so you can list every surface, not just the floor.
+
+## Put things in the room and keep them there
+
+A collider is a point that the physics and placement calls respect.
+
+```c
+goss_session_add_collider(session, x, y, z);
+goss_session_erase_collider(session, x, y, z);
+```
+
+Use them for things the user has already placed, so the next placement doesn't
+end up inside something.
+
+## Keep content inside a region
+
+A geofence bounds where content is allowed to be. There's a simple radius form,
+a bounding box and a polygon, plus named fences when you need more than one.
+
+```c
+goss_session_set_geofence_bbox(session, min_xyz, max_xyz);
+goss_session_set_geofence_polygon(session, points, point_count);
+goss_session_set_named_geofence(session, name, name_len, centre, radius);
+goss_session_clear_geofence(session);
+```
+
+Named fences are what you want for a room with zones: a product area, a stage,
+somewhere nothing can be built. Clear the named set when the space changes, or
+you'll carry stale fences into the next room.
+
+## Move something across a room
+
+Give it a start and a goal and you get back a path through the world mesh that
+avoids what it knows about.
+
+```c
+float points[64 * 3];
+size_t count = 0;
+goss_session_path_across_world(session, start_xyz, goal_xyz,
+                              points, 64, &count);
+```
+
+Points come back as triples. Size the buffer for the longest path you're
+willing to accept, and read a full buffer as "longer than I allowed" rather
+than as a failure.
+
+## Draw in the air
+
+The AR brush lays a stroke down in world space, so it stays where it was drawn
+when the camera moves.
+
+```c
+goss_session_ar_brush_set_style(session, r, g, b, a, width);
+goss_session_ar_brush_set_mode(session, mode);
+
+goss_session_ar_brush_begin(session);
+goss_session_ar_brush_point(session, x, y, z);  /* once per sample */
+goss_session_ar_brush_end(session);
+```
+
+Undo and redo matter more here than you'd think, because drawing in the air is
+imprecise and people correct constantly:
+
+```c
+goss_session_ar_brush_undo(session);
+goss_session_ar_brush_redo(session);
+goss_session_ar_brush_clear(session);
+```
+
+Call `point` at the rate the hand actually moves, not once per frame. Sample at
+the frame rate and a fast gesture comes out faceted.
+
+There's a screen-space brush too, with the same shape plus stamps and an
+eraser, for drawing on the picture instead of in the room.
+
+## Share a space between devices
+
+```c
+goss_session_align_shared(session, /* the other device's reference */ ...);
+```
+
+Alignment is what makes two phones agree that something is in the same place.
+Once you're aligned, place content against the shared frame rather than each
+device's own origin.
+
+## Layout
+
+`goss_session_set_layout` and `goss_session_clear_layout` carry an arrangement
+the engine respects when it places things. Set it when the user picks one,
+clear it when they leave the space.
+
+## What to measure
+
+AR work comes out of the same per-frame budget as everything else, and the
+world mesh is usually where it goes. Resubmitting the mesh every frame because
+the platform handed you a new object is the single most common reason an AR
+integration blows its budget. Submit it when it changes.
