@@ -1,0 +1,79 @@
+---
+title: Troubleshooting
+description: The failures that look like something else, and the one question that separates them.
+---
+
+Almost every problem anybody reports turns out to be one of these. They're
+listed by the symptom you'd actually see.
+
+## Everything is empty
+
+Every list in the record is empty and the camera is clearly working.
+
+Check the capability bits first. A stub build answers every call and perceives
+nothing, and it looks exactly like a camera pointed at a blank wall. See
+[capabilities](/docs/concepts/capabilities).
+
+## It worked, then it stopped, with no error
+
+Calls still return `GOSS_OK` and nothing updates.
+
+This is nearly always the thread rule. Something is calling the engine from a
+different thread than the one that created it, usually a finaliser or a resumed
+async continuation. See [threads and lifetimes](/docs/concepts/threading).
+
+## Submits start failing under load
+
+`GOSS_ERROR_POOL_EXHAUSTED` after a period of normal running.
+
+You're holding frames longer than you think. Release them sooner and apply
+backpressure instead of raising the capacity.
+
+## The numbers are plausible but wrong
+
+Landmarks sit near the right places and drift, or a confidence is always the
+same odd value.
+
+In a hand-written binding this is a struct layout disagreement: you're reading
+a field at the wrong offset and landing on a number that happens to look
+believable. Assert your offsets against the engine's, and compare a record
+field by field against the C binding. See [proving a
+binding](/docs/binding/conformance).
+
+## It refuses to start
+
+`GOSS_ERROR_ABI_MISMATCH` at creation.
+
+Your binding and the library are from different ABI majors, and this is working
+as intended. Match them. There's no shim, and continuing would mean reading the
+wrong bytes at the wrong offsets.
+
+## No drawing, but perception works
+
+The record arrives and nothing appears on screen.
+
+Either no lens is active, or this build has no renderer. A session without a
+lens still perceives, because the lens is the part that draws. If you do have
+one active, check for `GOSS_ERROR_RENDERER_UNAVAILABLE` when you initialise.
+
+## The phone gets hot
+
+Sustained use heats the device and the frame rate sags.
+
+Look at the budget first. One that fills the whole frame interval leaves
+nothing for the compositor and keeps every core busy. Then look for per-frame
+allocation in the binding, which is the next most common cause and the easiest
+to miss.
+
+## The first frame is slow
+
+Everything is fast except the beginning.
+
+Something is getting built on first use. Create the engine and the session
+before the user needs them, not on the frame that needs them.
+
+## Asking for help
+
+Include the ABI version your binding was built against, the version the library
+reports, the capability bitfield and the status code. Those four lines answer
+most questions before anyone has to reproduce anything.

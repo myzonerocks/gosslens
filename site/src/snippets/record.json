@@ -1,0 +1,31 @@
+{
+  "frame": {
+    "timestamp_us": 1699032714221,
+    "width": 1920,
+    "height": 1080
+  },
+  "faces": [
+    {
+      "id": 1,
+      "confidence": 0.98,
+      "box": [0.25, 0.17, 0.17, 0.3],
+      "landmarks": 68
+    }
+  ],
+  "hands": [
+    {
+      "id": 4,
+      "confidence": 0.91,
+      "chirality": "right",
+      "landmarks": 21
+    }
+  ],
+  "planes": [
+    { "id": 2, "kind": "floor", "extent": [3.1, 2.4] }
+  ],
+  "budget": {
+    "spent_us": 6210,
+    "limit_us": 8000,
+    "degraded": false
+  }
+}

@@ -1,0 +1,83 @@
+---
+title: The perception record
+description: One versioned answer to what's in this frame, selectable by section, as packed bytes or as JSON.
+---
+
+Every frame can produce a record of what the engine found. It's one structure
+with sections, and you ask for the sections you want instead of paying for all
+of them.
+
+## Asking for it
+
+```c
+uint8_t buffer[64 * 1024];
+size_t written = 0;
+
+goss_session_perception_snapshot(session,
+                                 GOSS_PERCEPTION_FACES | GOSS_PERCEPTION_HANDS,
+                                 buffer, sizeof buffer, &written);
+```
+
+That select mask is the whole performance story of this call. If your screen
+only draws a face filter, ask for faces, and the engine won't serialise planes,
+text and depth that nobody is going to read.
+
+## The sections
+
+| Section | What's in it |
+| --- | --- |
+| `GOSS_PERCEPTION_FRAME` | Size, timestamp, the frame's own identity |
+| `GOSS_PERCEPTION_FACES` | Boxes, landmarks, blendshapes, confidences |
+| `GOSS_PERCEPTION_HANDS` | Landmarks, chirality, confidences |
+| `GOSS_PERCEPTION_BODIES` | Pose joints |
+| `GOSS_PERCEPTION_SEGMENTATION` | Masks on the fixed segmentation plane |
+| `GOSS_PERCEPTION_TEXT` | Recognised text with its reading order |
+| `GOSS_PERCEPTION_DEPTH` | Depth, where the platform gives us any |
+| `GOSS_PERCEPTION_WORLD` | Planes, anchors, tracking state |
+| `GOSS_PERCEPTION_SCENE` | What the engine makes of the scene |
+| `GOSS_PERCEPTION_AUDIO` | What it heard |
+| `GOSS_PERCEPTION_LENS` | What the active lens is up to |
+| `GOSS_PERCEPTION_ENGINE` | Budget, degrade level, counters |
+| `GOSS_PERCEPTION_ALL` | All of the above |
+
+Or just take everything:
+
+```c
+uint32_t everything = goss_perception_select_all();
+```
+
+A section this build can't write comes back marked absent rather than empty, so
+you can tell "nothing there" apart from "this build can't answer that".
+
+## The same thing as JSON
+
+```c
+goss_session_perception_json(session, select, buffer, sizeof buffer, &written);
+```
+
+Identical content, as compact JSON. This one is safe from any thread; the
+packed version isn't.
+
+Use JSON when something other than your own code is reading: an agent gateway,
+a log, a test fixture, a debug overlay. Use the packed form on the path that
+runs every frame.
+
+<Tip>
+Start a new integration on JSON. You can print it, diff it and assert on it,
+and the shape you learn there is the same shape the packed form has.
+</Tip>
+
+## Sizing the buffer
+
+Both calls write into memory you own and tell you how much they used. Allocate
+once at a size that fits your worst case and reuse it, because growing a buffer
+every frame undoes the reason this call exists in the first place.
+
+A buffer that's too small is a reported condition, not a crash. Check
+`written` instead of assuming.
+
+## The section everyone forgets
+
+`GOSS_PERCEPTION_ENGINE` carries the frame budget, what got spent, the current
+degrade level and the counters behind it. It's what you want on a debug overlay
+and in your telemetry, and it's the one people wish they'd wired up earlier.

@@ -1,0 +1,377 @@
+@import "tailwindcss";
+
+/* Every colour is named once by role, then given a value in each theme below.
+   A component never reaches for a hue, only for the role it needs. */
+@theme {
+  --color-iris: var(--c-iris);
+  --color-iris-bright: var(--c-iris-bright);
+  --color-iris-deep: var(--c-iris-deep);
+  --color-ground: var(--c-ground);
+  --color-surface: var(--c-surface);
+  --color-raised: var(--c-raised);
+  --color-edge: var(--c-edge);
+  --color-edge-strong: var(--c-edge-strong);
+  --color-ink: var(--c-ink);
+  --color-ink-muted: var(--c-ink-muted);
+  --color-ink-faint: var(--c-ink-faint);
+  --color-link: var(--c-link);
+  --color-lime: var(--c-lime);
+
+  --font-sans: "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+
+  --radius-card: 1rem;
+  --ease-liquid: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@layer base {
+  /* Dark is the product's own look and the default on every screen. Light is
+     a choice a reader makes, never something a system setting imposes. */
+  :root {
+    color-scheme: dark;
+    --c-iris: #7d6cf0;
+    --c-iris-bright: #a99bff;
+    --c-iris-deep: #4335bd;
+    --c-ground: #0b0a11;
+    --c-surface: #14121c;
+    --c-raised: #1b1927;
+    --c-edge: #292536;
+    --c-edge-strong: #726d87;
+    --c-ink: #e7e5f0;
+    --c-ink-muted: #a5a1b5;
+    --c-ink-faint: #76728a;
+    --c-link: #b0a2ff;
+    --c-lime: #c0e85a;
+    --lit-from: #201d2e;
+    --lit-to: #14121c;
+    --lit-top: rgb(255 255 255 / 0.06);
+    --lit-shadow: 0 18px 40px -26px rgb(0 0 0 / 0.75);
+    --glow: 0.18;
+  }
+
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --c-iris: #5d4ce0;
+    --c-iris-bright: #7a68f2;
+    --c-iris-deep: #3a2cae;
+    --c-ground: #f6f6fa;
+    --c-surface: #ffffff;
+    --c-raised: #ffffff;
+    --c-edge: #e3e1ed;
+    --c-edge-strong: #8a8699;
+    --c-ink: #1f1c2b;
+    --c-ink-muted: #5d5970;
+    --c-ink-faint: #918da0;
+    --c-link: #5141cf;
+    --c-lime: #55700f;
+    --lit-from: #ffffff;
+    --lit-to: #f8f7fc;
+    --lit-top: rgb(255 255 255 / 0.9);
+    --lit-shadow: 0 1px 2px rgb(24 18 56 / 0.04), 0 12px 28px -20px rgb(24 18 56 / 0.28);
+    --glow: 0.1;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    scroll-padding-top: 6rem;
+  }
+
+  body {
+    background: var(--color-ground);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* One light, from above. A raised surface catches it on its top edge and sits
+     in its own shade at the foot, so depth comes from the material. */
+  .lit {
+    position: relative;
+    background: linear-gradient(180deg, var(--lit-from), var(--lit-to));
+    border: 1px solid var(--color-edge);
+    box-shadow:
+      0 1px 0 0 var(--lit-top) inset,
+      var(--lit-shadow);
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--color-iris) 35%, transparent);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-link);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    /* The one place !important earns itself: this must beat every animation. */
+    *,
+    *::before,
+    *::after {
+      /* biome-ignore lint/complexity/noImportantStyles: reduced-motion backstop */
+      animation-duration: 0.01ms !important;
+      /* biome-ignore lint/complexity/noImportantStyles: reduced-motion backstop */
+      transition-duration: 0.01ms !important;
+    }
+    html {
+      scroll-behavior: auto;
+    }
+  }
+}
+
+/* Documentation prose. The measure is held near 70 characters because a long
+   line costs a reader more than a narrow column costs the page. */
+@layer components {
+  .doc {
+    max-width: 42rem;
+    font-size: 1.0625rem;
+  }
+
+  .doc h1 {
+    font-size: 2.375rem;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    line-height: 1.15;
+    text-wrap: balance;
+  }
+  .doc h2 {
+    margin-top: 2.75rem;
+    font-size: 1.75rem;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+  }
+  .doc h3 {
+    margin-top: 2rem;
+    font-size: 1.3125rem;
+    font-weight: 600;
+  }
+
+  .doc p {
+    margin-top: 1.15rem;
+    line-height: 1.75;
+    color: var(--color-ink-muted);
+    text-wrap: pretty;
+  }
+  .doc h1 + p {
+    margin-top: 1rem;
+  }
+  .doc strong {
+    color: var(--color-ink);
+    font-weight: 600;
+  }
+
+  .doc a {
+    color: var(--color-link);
+    text-underline-offset: 3px;
+    text-decoration-line: underline;
+    text-decoration-color: color-mix(in oklab, var(--color-link) 40%, transparent);
+    transition: text-decoration-color 150ms var(--ease-liquid);
+  }
+  .doc a:hover {
+    text-decoration-color: var(--color-link);
+  }
+  /* A heading is its own anchor, so link styling would underline the title. */
+  .doc :is(h1, h2, h3) a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .doc ul {
+    margin-top: 1.1rem;
+    list-style: disc;
+    padding-left: 1.25rem;
+  }
+  .doc ol {
+    margin-top: 1.1rem;
+    list-style: decimal;
+    padding-left: 1.25rem;
+  }
+  .doc li {
+    margin-top: 0.45rem;
+    line-height: 1.72;
+    color: var(--color-ink-muted);
+  }
+  .doc li::marker {
+    color: var(--color-ink-faint);
+  }
+
+  .doc :not(pre) > code {
+    border-radius: 0.25rem;
+    background: color-mix(in oklab, var(--color-iris) 8%, transparent);
+    padding: 0.1em 0.32em;
+    font-family: var(--font-mono);
+    font-size: 0.9375em;
+    color: color-mix(in oklab, var(--color-ink) 82%, var(--color-iris));
+  }
+
+  /* Code is not prose and does not want prose's measure. It takes the column. */
+  .doc-code {
+    margin-top: 1.4rem;
+  }
+
+  @media (min-width: 640px) {
+    .doc-code {
+      margin-inline: -1.5rem;
+      width: calc(100% + 3rem);
+    }
+  }
+
+  .doc pre {
+    margin-top: 0;
+    scrollbar-width: thin;
+    overflow-x: auto;
+    border: 1px solid var(--color-edge);
+    border-radius: var(--radius-card);
+    background: var(--color-surface);
+    padding: 1.05rem 1.2rem;
+    font-size: 0.9375rem;
+    line-height: 1.65;
+    tab-size: 2;
+  }
+  .doc pre code {
+    font-family: var(--font-mono);
+  }
+
+  .doc blockquote {
+    margin-top: 1.4rem;
+    border-left: 2px solid var(--color-iris);
+    padding-left: 1rem;
+    color: var(--color-ink-muted);
+    font-style: normal;
+  }
+
+  .doc table {
+    margin-top: 1.5rem;
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 1rem;
+  }
+  .doc :is(th, td) {
+    border-bottom: 1px solid var(--color-edge);
+    padding: 0.6rem 0.75rem;
+    text-align: left;
+  }
+  .doc th {
+    color: var(--color-ink);
+    font-weight: 600;
+  }
+  .doc td {
+    color: var(--color-ink-muted);
+  }
+
+  /* Buttons. A quiet one still has to look like something you can press, so it
+     gets a surface of its own and an edge you can actually see. */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    height: 3rem;
+    padding-inline: 1.75rem;
+    border: 1px solid transparent;
+    border-radius: 0.75rem;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+    transition:
+      transform 160ms var(--ease-liquid),
+      box-shadow 160ms var(--ease-liquid),
+      border-color 160ms var(--ease-liquid),
+      background 160ms var(--ease-liquid);
+  }
+
+  .btn.btn-primary {
+    background: var(--color-iris);
+    color: #ffffff;
+    box-shadow:
+      inset 0 1px 0 0 rgb(255 255 255 / 0.18),
+      0 8px 20px -10px color-mix(in oklab, var(--color-iris) 70%, transparent);
+  }
+
+  .btn.btn-primary:hover {
+    background: color-mix(in oklab, var(--color-iris) 88%, white);
+    transform: translateY(-1px);
+    box-shadow:
+      inset 0 1px 0 0 rgb(255 255 255 / 0.22),
+      0 12px 26px -12px color-mix(in oklab, var(--color-iris) 80%, transparent);
+  }
+
+  .btn.btn-quiet {
+    background: var(--color-raised);
+    color: var(--color-ink);
+    border-color: var(--color-edge-strong);
+    box-shadow:
+      inset 0 1px 0 0 var(--lit-top),
+      var(--lit-shadow);
+  }
+
+  .btn.btn-quiet:hover {
+    transform: translateY(-1px);
+    border-color: color-mix(in oklab, var(--color-iris) 65%, transparent);
+    background: color-mix(in oklab, var(--color-iris) 7%, var(--color-raised));
+  }
+
+  .btn:active {
+    transform: translateY(0);
+    box-shadow: inset 0 1px 2px 0 rgb(0 0 0 / 0.2);
+  }
+
+  /* The tree's rows. Two classes so the current page always beats the base
+     row, whatever order the utilities happen to be emitted in. */
+  .doc-row {
+    display: block;
+    margin-left: -1px;
+    border-left: 2px solid transparent;
+    border-radius: 0 0.5rem 0.5rem 0;
+    padding: 8px 0.5rem 8px 1rem;
+    font-size: 0.9375rem;
+    line-height: 1.4;
+    color: var(--color-ink-muted);
+    transition:
+      color 150ms var(--ease-liquid),
+      background-color 150ms var(--ease-liquid),
+      border-color 150ms var(--ease-liquid);
+  }
+
+  .doc-row:hover {
+    border-left-color: var(--color-edge);
+    background: color-mix(in oklab, var(--color-ink) 4%, transparent);
+    color: var(--color-ink);
+  }
+
+  .doc-row.doc-row--touch {
+    display: flex;
+    align-items: center;
+    min-height: 2.75rem;
+    font-size: 0.9375rem;
+  }
+
+  .doc-row.doc-row--here {
+    border-left-color: var(--color-iris-bright);
+    background: color-mix(in oklab, var(--color-iris) 18%, transparent);
+    color: var(--color-ink);
+    font-weight: 600;
+  }
+
+  .doc-row.doc-row--here:hover {
+    border-left-color: var(--color-iris-bright);
+    background: color-mix(in oklab, var(--color-iris) 22%, transparent);
+  }
+
+  /* Shiki writes both themes into every token; only the colour is read. The
+     per-token background is dropped so code sits on the page, not on bands. */
+  .shiki,
+  .shiki span {
+    background-color: transparent;
+    color: var(--shiki-dark);
+  }
+
+  :root[data-theme="light"] .shiki,
+  :root[data-theme="light"] .shiki span {
+    color: var(--shiki-light);
+  }
+}

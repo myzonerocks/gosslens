@@ -1,0 +1,55 @@
+---
+title: The C ABI
+description: One header, opaque handles, explicit ownership, and a version every SDK checks before anything else.
+---
+
+`gosslens.h` is the whole public surface. It's C99 and includes nothing beyond
+`stdint.h`, `stddef.h` and `stdbool.h`. Every symbol starts with `goss_`.
+
+## Handles are opaque
+
+`goss_engine` and `goss_session` are pointers to types you never see inside,
+and they're the only two handles that cross. Everything else lives behind the
+session, which is why there's no third lifetime for a binding to get wrong.
+
+The only structures that cross are plain-data descriptors, and their layouts
+are static-asserted in the engine's tests and documented field by field in the
+header.
+
+## Ownership is in the name
+
+```c
+goss_status goss_session_create(goss_engine *engine, const goss_session_config *config, goss_session **out_session);
+void        goss_session_destroy(goss_session *session);
+```
+
+Every `create` has a `destroy` and every `acquire` has a `release`. Anything
+that can fail returns `goss_status`. There's no errno, and no exception crosses
+the boundary, because every C++ shim catches at its own edge and turns it into
+a status.
+
+## Vectors cross by pointer
+
+A position, a quaternion, a matrix or a colour goes across as a pointer to a
+fixed-size array, never spread out into separate float parameters.
+
+That's an ABI hazard, not a style preference. Past the eighth float argument
+the x86_64 calling convention starts spilling to the stack, and a caller and
+callee built by different toolchains can disagree about that layout. Passing
+the aggregate keeps every scalar in a register and marshals the same way
+everywhere.
+
+## Versioned, and checked first
+
+```c
+uint32_t v = goss_abi_version();  // high 16 bits major, low 16 minor
+```
+
+The minor comes from the operation list plus the field count of every struct
+that crosses, so adding a field to a record moves the number on its own and
+nobody has to remember to bump it. An SDK compares the major and refuses to run
+if it doesn't match.
+
+There's no compatibility shim, and you don't want one: continuing past a major
+mismatch means reading the wrong bytes at the wrong offsets, and that usually
+produces numbers that look believable.
