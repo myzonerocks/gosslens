@@ -1,0 +1,196 @@
+import { readFile, readdir } from 'node:fs/promises'
+import { join } from 'node:path'
+
+/**
+ * Every engine symbol a document names has to exist in the header, and no page
+ * may use a dash the house style forbids. A wrong symbol in documentation is a
+ * bug a reader finds at their keyboard.
+ */
+const HEADER = process.env.GOSSLENS_HEADER ?? '../include/gosslens.h'
+const BUILD = process.env.GOSSLENS_BUILD ?? '../build.zig'
+const MCP = process.env.GOSSLENS_MCP ?? '../tools/mcp/server.zig'
+const SDK_ROOT = process.env.GOSSLENS_SDK ?? '../sdk'
+
+/** Which SDK source a page's code blocks are checked against. */
+/** Language built-ins a page may call that no SDK defines. */
+const BUILTIN = new Set([
+  'contains', 'append', 'forEach', 'map', 'filter', 'reduce', 'count', 'first',
+  'last', 'joined', 'split', 'replacingOccurrences', 'withUnsafeBytes', 'init',
+  'collect', 'toList', 'toString', 'let', 'also', 'apply', 'run', 'push',
+  'then', 'catch', 'slice', 'json', 'text', 'getElementById', 'querySelector',
+])
+
+const SDKS = [
+  { page: 'sdk/swift', dir: 'swift/Sources/Gosslens', fence: 'swift' },
+  { page: 'sdk/kotlin', dir: 'kotlin/src/main/kotlin/com/gosslens', fence: 'kotlin' },
+  { page: 'sdk/typescript', dir: 'ts/src', fence: 'ts' },
+]
+const DOCS = 'docs'
+
+async function walk(dir: string, ext = '.mdx'): Promise<string[]> {
+  const entries = await readdir(dir, { withFileTypes: true })
+  const found = await Promise.all(
+    entries.map((entry) => {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) return walk(full, ext)
+      return Promise.resolve(entry.name.endsWith(ext) ? [full] : [])
+    }),
+  )
+  return found.flat()
+}
+
+const problems: string[] = []
+
+/**
+ * Step names reach build.zig two ways: as a literal, and through a config
+ * struct. A check that knows only the literal form reports real steps missing.
+ */
+async function buildSteps(): Promise<Set<string>> {
+  try {
+    const source = await readFile(BUILD, 'utf8')
+    const literal = [...source.matchAll(/b\.step\(\s*"([a-zA-Z0-9_-]+)"/g)].map((m) => m[1] ?? '')
+    const configured = [...source.matchAll(/\.step_name\s*=\s*"([a-zA-Z0-9_-]+)"/g)].map(
+      (m) => m[1] ?? '',
+    )
+    return new Set([...literal, ...configured])
+  } catch {
+    return new Set()
+  }
+}
+
+/**
+ * Everything the agent server says, tool names and the answers it gives alike.
+ * A name in the agent page that is not in here is a name nobody will find.
+ */
+async function mcpVocabulary(): Promise<Set<string>> {
+  try {
+    const source = await readFile(MCP, 'utf8')
+    return new Set([...source.matchAll(/"([a-z_]+)"/g)].map((m) => m[1] ?? ''))
+  } catch {
+    return new Set()
+  }
+}
+
+/**
+ * Every identifier an SDK's own sources contain. A name used in that SDK's
+ * page that is absent here is a name a reader cannot call.
+ */
+async function sdkWords(dir: string, ext: string): Promise<Set<string>> {
+  try {
+    const files = await walk(join(SDK_ROOT, dir), ext)
+    const words = new Set<string>()
+    for (const file of files) {
+      for (const word of (await readFile(file, 'utf8')).match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) {
+        words.add(word)
+      }
+    }
+    return words
+  } catch {
+    return new Set()
+  }
+}
+
+const tools = await mcpVocabulary()
+const steps = await buildSteps()
+if (steps.size === 0) console.log(`docs: build.zig not found at ${BUILD}, step check skipped`)
+
+let header = ''
+try {
+  header = await readFile(HEADER, 'utf8')
+} catch {
+  console.log(`docs: header not found at ${HEADER}, symbol check skipped`)
+}
+
+const known = new Set([
+  ...(header.match(/\bgoss_[a-z0-9_]+/g) ?? []),
+  ...(header.match(/\bGOSS_[A-Z0-9_]+/g) ?? []),
+])
+
+for (const file of await walk(DOCS)) {
+  const text = await readFile(file, 'utf8')
+
+  text.split('\n').forEach((line, index) => {
+    if (/[–—]/.test(line)) {
+      problems.push(`${file}:${index + 1} uses an em or en dash`)
+    }
+  })
+
+  // A json example a reader pastes has to parse. Typos here cost an afternoon.
+  for (const block of text.matchAll(/```json\n([\s\S]*?)```/g)) {
+    try {
+      JSON.parse(block[1] ?? '')
+    } catch (error) {
+      problems.push(`${file} has a json block that does not parse: ${(error as Error).message}`)
+    }
+  }
+
+  // A colon inside an unquoted frontmatter value is a build failure, and the
+  // message names a yaml loader rather than the page that broke.
+  const front = /^---\n([\s\S]*?)\n---/.exec(text)?.[1] ?? ''
+  for (const line of front.split('\n')) {
+    const value = /^(title|description):\s*(.*)$/.exec(line)
+    if (!value) continue
+    const body = value[2] ?? ''
+    if (!/^["']/.test(body) && /:\s/.test(body)) {
+      problems.push(`${file} has an unquoted ${value[1]} containing a colon`)
+    }
+  }
+
+  // Calls made on an SDK object have to exist in that SDK's sources. Platform
+  // and standard-library calls are somebody else's to verify.
+  for (const sdk of SDKS) {
+    if (!file.includes(sdk.page)) continue
+    const known = await sdkWords(sdk.dir, sdk.fence === 'kotlin' ? '.kt' : `.${sdk.fence}`)
+    if (known.size === 0) continue
+    const fenced = new RegExp(`\`\`\`${sdk.fence}\\n([\\s\\S]*?)\`\`\``, 'g')
+    for (const block of text.matchAll(fenced)) {
+      const body = (block[1] ?? '').replace(/\/\/.*$/gm, '')
+      const calls = body.matchAll(/\b(session|engine|world|output|mic|goss|preview)\.([a-zA-Z][A-Za-z0-9_]*)/g)
+      for (const call of calls) {
+        const name = call[2] ?? ''
+        if (!BUILTIN.has(name) && !known.has(name)) {
+          problems.push(`${file} calls ${call[1]}.${name}, which the ${sdk.fence} SDK does not define`)
+        }
+      }
+    }
+  }
+
+  // Tool names and status words appear as inline code in the agent page.
+  if (tools.size > 0 && file.includes('agents')) {
+    for (const match of text.matchAll(/`([a-z_]{4,})`/g)) {
+      const name = match[1] ?? ''
+      if (name.includes('_') && !tools.has(name) && !name.startsWith('goss')) {
+        problems.push(`${file} names ${name}, which the agent server never says`)
+      }
+    }
+  }
+
+  if (steps.size > 0) {
+    for (const match of text.matchAll(/zig build ([a-z0-9-]+)/g)) {
+      const step = match[1] ?? ''
+      if (!steps.has(step)) problems.push(`${file} says "zig build ${step}", which build.zig has no step for`)
+    }
+  }
+
+  if (known.size === 0) continue
+
+  // An SDK page may name that SDK's own constants, which the header never had.
+  const sdk = SDKS.find((entry) => file.includes(entry.page))
+  const extra = sdk ? await sdkWords(sdk.dir, sdk.fence === 'kotlin' ? '.kt' : `.${sdk.fence}`) : null
+
+  const named = new Set([
+    ...(text.match(/\bgoss_[a-z0-9_]+/g) ?? []),
+    ...(text.match(/\bGOSS_[A-Z0-9_]+/g) ?? []),
+  ])
+  for (const symbol of named) {
+    if (known.has(symbol) || extra?.has(symbol)) continue
+    problems.push(`${file} names ${symbol}, which neither the header nor its SDK defines`)
+  }
+}
+
+if (problems.length > 0) {
+  console.error(problems.map((line) => `  ${line}`).join('\n'))
+  console.error(`docs: ${problems.length} problems`)
+  process.exit(1)
+}
+console.log('docs: symbols, build steps and json examples all check out')

@@ -1,0 +1,59 @@
+---
+title: The frame graph
+description: Nodes and typed edges, scheduled once, with no allocation on the frame path and a report per node.
+---
+
+The graph is data, not code. Nodes are sources, transforms, analyses and sinks.
+Edges are typed (textures, buffers, landmarks, tensors) and both live in
+index-addressed arrays.
+
+A topological schedule gets computed once per graph edit and cached. Running a
+frame walks that cached order: no hashing, no string lookups, and once the
+engine has warmed up, no allocation.
+
+## Analysis doesn't block the render
+
+Analysis nodes run on workers and publish their results for the next frame to
+use. The render path reads the most recent published result instead of waiting
+for this frame's.
+
+That's why a slow tracker makes landmarks slightly stale rather than making the
+camera stutter. It's also why a landmark can belong to a frame that isn't the
+one on screen, which matters if you're drawing something that has to sit
+exactly on a feature.
+
+## Finding out what a frame cost
+
+Every node reports. This loop is how you answer "what's slow" with a name
+instead of a guess.
+
+```c
+uint32_t nodes = 0;
+goss_session_node_report_count(session, &nodes);
+
+for (uint32_t i = 0; i < nodes; i++) {
+    goss_session_node_report_at(session, i, &report);
+    goss_session_node_report_id(session, i, id, sizeof id, &id_len);
+}
+```
+
+Or the whole active chain at once:
+
+```c
+goss_session_chain_report(session, &report);
+```
+
+The session report carries `nodes_degraded`, how many nodes are currently
+running reduced, and `node_reports_lost`, which means the reporting itself
+fell behind. If `node_reports_lost` is climbing, the numbers you're reading are
+incomplete and worth saying so.
+
+## Why it's built this way
+
+A graph that's data can be edited, validated and scheduled before any frame
+touches it. A graph that's code has to be trusted.
+
+It's also what lets a lens change what the engine does without shipping any
+code: the manifest describes nodes and edges, the engine checks them against
+what this build can actually run, and the schedule gets recomputed once. See
+[the lens format](/docs/concepts/lenses).

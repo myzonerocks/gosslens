@@ -1,0 +1,199 @@
+{
+  "items": [
+    {
+      "type": "link",
+      "path": "/",
+      "title": "Introduction"
+    },
+    {
+      "type": "link",
+      "path": "/about",
+      "title": "What it is for"
+    },
+    {
+      "type": "folder",
+      "path": "/start",
+      "title": "Start",
+      "children": [
+        {
+          "type": "link",
+          "path": "/quickstart",
+          "title": "Quickstart"
+        }
+      ]
+    },
+    {
+      "type": "folder",
+      "path": "/install",
+      "title": "Install",
+      "children": [
+        {
+          "type": "link",
+          "path": "/sdks",
+          "title": "Add an SDK"
+        },
+        {
+          "type": "link",
+          "path": "/build",
+          "title": "Build from source"
+        }
+      ]
+    },
+    {
+      "type": "folder",
+      "path": "/build",
+      "title": "Build with it",
+      "children": [
+        {
+          "type": "link",
+          "path": "/tracking",
+          "title": "Tracking and text"
+        },
+        {
+          "type": "link",
+          "path": "/models",
+          "title": "Bring your own model"
+        },
+        {
+          "type": "link",
+          "path": "/ar",
+          "title": "Building in AR"
+        },
+        {
+          "type": "link",
+          "path": "/capture",
+          "title": "Capture and recording"
+        },
+        {
+          "type": "link",
+          "path": "/scanning",
+          "title": "Scanning and media"
+        },
+        {
+          "type": "link",
+          "path": "/events",
+          "title": "Events and reports"
+        }
+      ]
+    },
+    {
+      "type": "folder",
+      "path": "/concepts",
+      "title": "Concepts",
+      "children": [
+        {
+          "type": "link",
+          "path": "/abi",
+          "title": "The C ABI"
+        },
+        {
+          "type": "link",
+          "path": "/graph",
+          "title": "The frame graph"
+        },
+        {
+          "type": "link",
+          "path": "/perception",
+          "title": "The perception record"
+        },
+        {
+          "type": "link",
+          "path": "/lenses",
+          "title": "The lens format"
+        },
+        {
+          "type": "link",
+          "path": "/threading",
+          "title": "Threads and lifetimes"
+        },
+        {
+          "type": "link",
+          "path": "/capabilities",
+          "title": "Capabilities"
+        },
+        {
+          "type": "link",
+          "path": "/degradation",
+          "title": "Degradation"
+        }
+      ]
+    },
+    {
+      "type": "folder",
+      "path": "/sdk",
+      "title": "SDKs",
+      "children": [
+        {
+          "type": "link",
+          "path": "/swift",
+          "title": "Swift"
+        },
+        {
+          "type": "link",
+          "path": "/kotlin",
+          "title": "Kotlin"
+        },
+        {
+          "type": "link",
+          "path": "/typescript",
+          "title": "TypeScript"
+        },
+        {
+          "type": "link",
+          "path": "/c",
+          "title": "C"
+        }
+      ]
+    },
+    {
+      "type": "folder",
+      "path": "/binding",
+      "title": "Your own binding",
+      "children": [
+        {
+          "type": "link",
+          "path": "/writing-an-sdk",
+          "title": "Writing your own SDK"
+        },
+        {
+          "type": "link",
+          "path": "/abi-reference",
+          "title": "ABI reference"
+        },
+        {
+          "type": "link",
+          "path": "/conformance",
+          "title": "Proving a binding"
+        }
+      ]
+    },
+    {
+      "type": "folder",
+      "path": "/guides",
+      "title": "Guides",
+      "children": [
+        {
+          "type": "link",
+          "path": "/performance",
+          "title": "Performance"
+        },
+        {
+          "type": "link",
+          "path": "/troubleshooting",
+          "title": "Troubleshooting"
+        }
+      ]
+    },
+    {
+      "type": "link",
+      "path": "/agents",
+      "title": "Agents and MCP"
+    },
+    {
+      "type": "link",
+      "path": "/sponsor",
+      "title": "Financial Support",
+      "href": "https://github.com/sponsors/avosa"
+    }
+  ]
+}

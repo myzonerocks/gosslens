@@ -1,0 +1,285 @@
+---
+title: C
+description: "The boundary itself: one header, two handles, and every call the SDKs are built from."
+---
+
+The other SDKs are wrappers over this. Linking the archive and including the
+header gives you everything they have, in the shape they all call.
+
+If you are wrapping this for another language, read [writing your own
+SDK](/docs/binding/writing-an-sdk) alongside this page.
+
+## Linking
+
+Include `gosslens.h` and link the archive for your target. It is C99 and
+includes nothing beyond `stdint.h`, `stddef.h` and `stdbool.h`, so it drops
+into an existing build with no C++ runtime.
+
+## The shape of every call
+
+- Functions that can fail return `goss_status`. There is no errno and nothing
+  throws.
+- Handles are opaque pointers. Only `goss_engine` and `goss_session` cross.
+- Buffers are caller-owned: you pass a pointer and a capacity, and the call
+  writes how much it used.
+- Vectors cross as pointers to fixed-size arrays, never as loose floats.
+- Everything is graph-thread unless the header marks it any-thread.
+
+## Starting up
+
+```c
+#include <gosslens.h>
+
+if ((goss_abi_version() >> 16) != GOSS_ABI_MAJOR) return 1;
+if (goss_abi_check(GOSS_ABI_VERSION) != GOSS_OK) return 1;
+
+uint64_t caps = goss_capabilities();
+
+goss_engine *engine = NULL;
+goss_engine_config engine_config = { .texture_pool_capacity = 8, .staging_pool_capacity = 4 };
+if (goss_engine_create(&engine_config, &engine) != GOSS_OK) return 1;
+
+goss_session *session = NULL;
+goss_session_config session_config = { .frame_budget_us = 8000, .reserved = 0 };
+if (goss_session_create(engine, &session_config, &session) != GOSS_OK) {
+    goss_engine_destroy(engine);
+    return 1;
+}
+```
+
+## Frames in
+
+```c
+goss_session_submit_frame(session, &desc, planes, plane_count);
+goss_session_submit_frame_copy(session, y, y_stride, uv, uv_stride, width, height, ...);
+goss_session_submit_frame_rgba_copy(session, rgba, stride, width, height, ...);
+goss_session_submit_source_frame_rgba_copy(session, name, name_len, rgba, width, height);
+goss_session_submit_source_hardware_buffer(session, name, name_len, &desc, buffer);
+goss_session_submit_source_mask(session, name, name_len, mask, width, height);
+goss_session_define_source(session, name, name_len, ...);
+goss_session_remove_source(session, name, name_len);
+```
+
+Then, once per frame:
+
+```c
+goss_degrade_level level = goss_session_report_frame(session, frame_time_us, thermal);
+```
+
+## Perception
+
+```c
+uint8_t buffer[64 * 1024];
+size_t written = 0;
+
+goss_session_perception_snapshot(session, GOSS_PERCEPTION_ALL, buffer, sizeof buffer, &written);
+goss_session_perception_json(session, GOSS_PERCEPTION_ALL, buffer, sizeof buffer, &written);
+```
+
+Reading one thing without the whole record:
+
+```c
+uint32_t faces = 0;
+goss_session_face_count(session, &faces);
+goss_session_face_result_at(session, 0, &face);
+goss_session_face_region(session, 0, &region);
+goss_session_face_pose(session, 0, &pose);
+goss_session_hand_result(session, &hand);
+goss_session_body_joint(session, 0, joint, &out);
+```
+
+## Trackers and models
+
+```c
+goss_session_enable_face_tracking(session, task_bytes, task_len, threads);
+goss_session_enable_hand_tracking(session, task_bytes, task_len, threads);
+goss_session_enable_pose_tracking(session, task_bytes, task_len, threads);
+goss_session_set_pose_upper_body(session, true);
+goss_session_enable_segmentation(session, model_bytes, model_len, threads);
+goss_session_enable_source_segmentation(session, name, name_len, model, model_len, threads);
+goss_session_enable_text(session, detector, detector_len, recognizer, recognizer_len,
+                         dictionary, dictionary_len, detect_side);
+
+goss_session_allow_model_digest(session, digest);   /* 32 raw bytes, before enabling */
+goss_session_clear_model_allowlist(session);
+goss_ml_op_support(model, model_len, out, capacity, &out_len);
+goss_session_ml_output(session, node_id, node_id_len, tensor, out, capacity, &out_len);
+goss_session_ml_mask(session, node_id, node_id_len, out, capacity, &out_len);
+```
+
+## Lenses
+
+```c
+goss_session_activate_lens(session, manifest, manifest_len);
+goss_session_activate_lens_from_directory(session, path, path_len);
+goss_session_provide_lens_asset(session, name, name_len, bytes, len);
+goss_session_deactivate_lens(session);
+
+goss_session_tick_lens(session, dt_us, &signals);
+goss_session_parameter_value(session, name, name_len, &value);
+goss_session_snapshot_lens_state(session, out, capacity, &out_len);
+goss_session_apply_lens_state(session, bytes, len);
+goss_lens_capabilities_missing(manifest, manifest_len, &missing);
+```
+
+## World and AR
+
+```c
+goss_session_submit_world(session, &state, planes, plane_count, anchors, anchor_count, &light);
+goss_session_submit_world_mesh(session, vertices, vertex_count, indices, index_count);
+goss_session_submit_camera_intrinsics(session, fx, fy, cx, cy, distortion, distortion_len);
+goss_session_submit_depth(session, depth, width, height);
+goss_session_submit_orientation(session, quaternion);
+goss_session_submit_location(session, latitude, longitude, accuracy);
+
+goss_session_hit_test(session, screen_x, screen_y, out_point);
+goss_session_raycast_world_mesh(session, origin, direction, out_point, out_distance);
+goss_session_floor_plane(session, &plane_id);
+goss_session_plane_kind(session, plane_id, &kind, &bearing);
+goss_session_path_across_world(session, start, goal, out_points, capacity, &count);
+goss_session_place_on(session, width, depth, height, occupants, count, out, capacity, &out_count);
+goss_session_measure_between(session, from, from_sigma, to, to_sigma, &metres, &sigma, &known);
+goss_session_shared_landmarks(session, out, capacity, &out_count);
+goss_session_align_shared(session, theirs, count, out_transform, &rms, &matched);
+```
+
+Bounding where content may exist:
+
+```c
+goss_session_set_geofence(session, centre, radius);
+goss_session_set_geofence_bbox(session, min_xyz, max_xyz);
+goss_session_set_geofence_polygon(session, points, count);
+goss_session_set_named_geofence(session, name, name_len, centre, radius);
+goss_session_clear_geofence(session);
+goss_session_clear_named_geofences(session);
+```
+
+Drawing in the air and on the picture:
+
+```c
+goss_session_ar_brush_set_style(session, r, g, b, a, width);
+goss_session_ar_brush_begin(session);
+goss_session_ar_brush_point(session, x, y, z);
+goss_session_ar_brush_end(session);
+goss_session_ar_brush_undo(session);
+
+goss_session_brush_set_style(session, r, g, b, a, width);
+goss_session_brush_begin(session);
+goss_session_brush_point(session, x, y);
+goss_session_brush_end(session);
+goss_session_brush_erase_at(session, x, y);
+goss_session_brush_vertices(session, out, capacity, &out_count);
+
+goss_session_add_collider(session, x, y, z);
+goss_session_erase_collider(session, x, y, z);
+```
+
+## Rendering and capture
+
+```c
+goss_engine_init_renderer(engine, surface, width, height);
+goss_engine_resize(engine, width, height);
+goss_engine_render_frame(engine, session);
+goss_engine_render_to_live_texture(engine, session, texture, width, height);
+goss_engine_release_live_texture(engine, texture);
+goss_engine_capture_live_frame(engine, session, out, capacity, width, height, format);
+
+goss_engine_capture_photo(engine, session, out, capacity, &out_len, &w, &h);
+goss_engine_capture_photo_as(engine, session, format, quality, out, capacity, &out_len, &w, &h);
+goss_engine_capture_still(engine, session, &config, out, capacity, &out_len, &w, &h);
+goss_engine_request_screenshot(engine, path, path_len);
+
+goss_engine_recording_start(engine, session, path, path_len, width, height, bitrate, hevc);
+goss_engine_recording_set_realtime(engine, true);
+goss_engine_recording_pause(engine);
+goss_engine_recording_resume(engine);
+goss_engine_recording_stop(engine);
+goss_engine_recording_read_report(engine, &report);
+```
+
+## Events and reports
+
+```c
+goss_event events[32];
+uint32_t count = 0;
+uint64_t dropped = 0;
+goss_session_poll_events(session, events, 32, &count, &dropped);
+goss_session_fire_event(session, name, name_len);
+
+goss_session_read_report(session, &report);
+goss_engine_read_report(engine, &report);
+goss_session_chain_report(session, &report);
+goss_session_node_report_count(session, &nodes);
+goss_session_node_report_at(session, index, &node);
+goss_session_node_report_id(session, index, out, capacity, &out_len);
+goss_session_report_interruption(session, kind);
+```
+
+## Memory, annotations and scope
+
+```c
+goss_session_memory_open(session, dim, max_entries);
+goss_session_memory_remember(session, id, embedding, dim);
+goss_session_memory_search(session, query, dim, k, out, &out_count);
+goss_session_memory_forget(session, id);
+goss_session_memory_stats(session, &count, &bytes);
+goss_session_memory_save(session, out, capacity, &out_len);
+goss_session_memory_save_sealed(session, key, nonce, out, capacity, &out_len);
+goss_session_memory_load_sealed(session, key, bytes, len);
+goss_session_memory_close(session);
+
+goss_session_annotate(session, &annotation, text, text_len);
+goss_session_annotation_remove(session, id);
+goss_session_annotation_clear(session);
+goss_session_annotation_count(session, &live, &refused);
+
+goss_session_set_scope(session, sections, verbs);
+goss_session_scope(session, &sections, &verbs);
+goss_scope_verb_count();
+goss_scope_verb_name(index, out, capacity, &out_len);
+```
+
+## Scanning, media and audio
+
+```c
+goss_engine_scan_qr(engine, luminance, width, height, out, capacity, &out_len);
+goss_engine_scan_barcode(engine, luminance, width, height, out_digits);
+goss_engine_generate_qr(engine, payload, payload_len, module_scale, quiet, out, capacity, &dim);
+goss_engine_decode_png(bytes, len, out_rgba, capacity, &width, &height, &out_len);
+
+goss_engine_music_identify(engine, samples, frames, rate, channels, min_votes, &track, &votes);
+goss_engine_music_add_reference(engine, ...);
+goss_engine_music_clear_references(engine);
+
+goss_session_submit_audio(session, samples, frame_count, sample_rate, channels, timestamp_us);
+goss_session_mix_output_audio(session, mic, frames, rate, channels, out, capacity, &out_len);
+goss_session_pull_audio(session, out, frames);
+goss_session_pull_haptic(session, &haptic);
+```
+
+## Shutting down
+
+```c
+goss_session_destroy(session);
+goss_engine_destroy(engine);
+```
+
+Sessions first, then the engine, on the thread that created them.
+
+## Memory the engine hands back
+
+```c
+void *block = goss_alloc(size);
+goss_free(block, size);
+```
+
+Free what the engine allocated with `goss_free` and nothing else. Your
+allocator did not make it and cannot release it.
+
+## Where to go from here
+
+- [ABI reference](/docs/binding/abi-reference) for status codes, the version
+  scheme and the layout rules.
+- [Writing your own SDK](/docs/binding/writing-an-sdk) for wrapping this.
+- [Proving a binding](/docs/binding/conformance) for the suite that says you
+  got it right.

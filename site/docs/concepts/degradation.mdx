@@ -1,0 +1,82 @@
+---
+title: Degradation
+description: What the engine turns down when a phone can't keep up, in what order, and the one call that drives it.
+---
+
+A phone under load has to give something up. The engine decides what, in a set
+order, based on the frame time and thermal state you report.
+
+The camera doesn't stutter because something got dropped. It degrades because
+something got chosen.
+
+## The ladder
+
+```c
+typedef enum goss_degrade_level {
+    GOSS_DEGRADE_FULL = 0,
+    GOSS_DEGRADE_REDUCED_ML_CADENCE = 1,
+    GOSS_DEGRADE_SEGMENTATION_OFF = 2,
+    GOSS_DEGRADE_BEAUTY_SIMPLIFIED = 3,
+    GOSS_DEGRADE_PASSTHROUGH = 4,
+} goss_degrade_level;
+```
+
+Each step is a named state with hysteresis, so the engine settles instead of
+bouncing between two levels at the boundary.
+
+The order encodes a decision: inference runs less often before segmentation
+stops, and segmentation stops before anything touches the picture itself. The
+last thing to go is the thing the user is actually looking at.
+
+## Driving it
+
+The engine doesn't go behind your back to read the thermal state. You report
+it, once per frame, and get back the level it settled on.
+
+```c
+goss_degrade_level level = goss_session_report_frame(session,
+                                                     frame_time_us,
+                                                     thermal);
+```
+
+```c
+typedef enum goss_thermal {
+    GOSS_THERMAL_NOMINAL = 0,
+    GOSS_THERMAL_FAIR = 1,
+    GOSS_THERMAL_SERIOUS = 2,
+    GOSS_THERMAL_CRITICAL = 3,
+} goss_thermal;
+```
+
+Map your platform's thermal reading onto those four. Every platform has one,
+and passing `NOMINAL` forever because it was easier is how you end up with a
+hot phone and the ladder still at full.
+
+If you just want to know where it is:
+
+```c
+goss_degrade_level now = goss_session_degrade_level(session);
+```
+
+## Watch for flapping
+
+The session report carries `degrade_transitions`. If that number keeps
+climbing, the engine is moving up and down the ladder repeatedly, which costs
+more than sitting one step lower would.
+
+That almost always means the budget is set to exactly what the device can
+manage. Give it some headroom and the transitions stop.
+
+`nodes_degraded` tells you how many graph nodes are currently running reduced,
+and `node_reports_lost` tells you the reporting itself couldn't keep up, which
+is worth surfacing in a developer build.
+
+## What to show the user
+
+Usually nothing. The whole point of a named ladder is that every step still
+looks deliberate.
+
+The exception is a feature the user explicitly turned on that the ladder has
+turned off. Segmentation disappearing at level two is visible, and a toggle
+that still says "on" while nothing happens is worse than one that says the
+device is busy.

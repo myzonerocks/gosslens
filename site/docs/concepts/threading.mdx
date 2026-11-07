@@ -1,0 +1,71 @@
+---
+title: Threads and lifetimes
+description: One thread owns the engine, a few calls are safe from anywhere, and sessions have to go before the engine does.
+---
+
+There's one threading rule, and it's worth more attention than its length
+suggests, because breaking it doesn't reliably crash.
+
+## One thread owns everything
+
+An engine and every session you make from it belong to the thread that created
+them. We call that the graph thread. Calling from anywhere else is undefined
+unless the header marks a function as any-thread.
+
+There's no lock inside the boundary making this safe for you. The engine is
+fast partly because it doesn't pay for one on every call, and this rule is what
+that costs.
+
+## What's safe from anywhere
+
+`goss_abi_version` is, and it has to be, because a binding calls it before it's
+decided anything at all, including which thread will own the engine. A few
+other calls are marked the same way in the header. Treat anything unmarked as
+confined.
+
+## Where this actually goes wrong
+
+Almost nobody calls the engine from a second thread on purpose. It happens two
+ways.
+
+**A finaliser.** Your garbage collector runs on its own thread, and the destroy
+it triggers arrives from there. Every binding has to post that destroy back to
+the graph thread instead of letting the collector make the call.
+
+**A resumed continuation.** An async runtime resumes work on whichever worker
+is free. Code that reads perfectly, submitting a frame after awaiting the
+camera, can run that submit on a different thread each time.
+
+Both look the same from outside: things work for a while, then the pool
+bookkeeping stops adding up, then a texture gets handed to the wrong caller a
+few frames later.
+
+<Warning>
+Assert the thread identity in your debug builds. It costs nothing in release,
+and this is not a bug you want to find by staring at a frame counter.
+</Warning>
+
+## Lifetimes
+
+A session holds onto its engine, so destroy sessions first and the engine
+after.
+
+Make that structural rather than something you remember. In a language with
+deterministic destruction, have the session object hold a strong reference to
+the engine object, so the engine can't be released while a session is still
+drawing. Without that, keep the engine alive explicitly for as long as any
+session exists.
+
+Every `create` has exactly one `destroy`. Calling it twice has to be safe in
+your binding even though it isn't at the boundary, which is why each of our
+SDKs keeps a flag and lets the explicit call and the automatic one share it.
+
+## Frames
+
+A frame you submit belongs to the engine until it says otherwise. Holding onto
+one past its release is how a pool runs out, and `GOSS_ERROR_POOL_EXHAUSTED` is
+the engine telling you that's what happened.
+
+The right response is backpressure: stop pulling frames from the camera until
+the engine has caught up. Raising the pool capacity just moves the problem to a
+bigger number of frames and makes the eventual stall longer.

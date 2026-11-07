@@ -1,0 +1,60 @@
+---
+title: Add an SDK
+description: One coordinate per platform. The compiled engine ships inside each package, so no toolchain is needed.
+---
+
+Each release publishes the engine as a prebuilt binary inside the package for
+its platform. Adding gosslens needs one dependency line and no Zig.
+
+## Swift
+
+The Swift package resolves a release tag and pulls an XCFramework carrying the
+device and simulator slices.
+
+```swift
+// Package.swift
+dependencies: [
+    .package(url: "https://github.com/myzonerocks/gosslens", from: "0.14.0"),
+],
+targets: [
+    .target(name: "YourApp", dependencies: [
+        .product(name: "Gosslens", package: "gosslens"),
+    ]),
+]
+```
+
+In Xcode, File, Add Package Dependencies, and paste the same URL.
+
+## Kotlin
+
+The AAR carries a `libgosslens.so` per ABI, so an app adds one coordinate.
+
+```kotlin
+// build.gradle.kts
+implementation("io.github.avosa:gosslens:0.14.0")
+```
+
+## TypeScript
+
+The npm package ships the engine compiled to `wasm32` beside a typed wrapper.
+
+```bash
+bun add @myzonerocks/gosslens
+npm install @myzonerocks/gosslens
+```
+
+The package ships the wasm beside the wrapper, so a bundler resolves it
+without a plugin. Serve the wasm from your own origin and pass its URL to
+`Gosslens.load`.
+
+## C
+
+Every release attaches the static archives and `gosslens.h`. Link the archive for
+your target and include the single header; it depends on nothing beyond
+`stdint.h`, `stddef.h` and `stdbool.h`.
+
+<Note>
+Every artifact in a release is built from the same commit by the same pinned
+toolchain, so the wasm, the AAR and the XCFramework always answer the same
+`goss_abi_version()`.
+</Note>

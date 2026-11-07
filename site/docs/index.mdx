@@ -1,0 +1,65 @@
+---
+title: Introduction
+description: What gosslens is, and where to start depending on what you're building.
+---
+
+gosslens is a real-time vision engine for camera apps. You hand it frames, it
+tells you what's in them, and you draw straight back onto them. Everything
+happens on the device.
+
+The core is written in Zig and everything crosses a single C ABI, so the Swift,
+Kotlin and TypeScript SDKs are thin wrappers over exactly the same code. If
+your language isn't one of those, you can write your own binding in an
+afternoon.
+
+<Tip>
+If you've got ten minutes, the [quickstart](/docs/start/quickstart) gets one
+frame through the engine and one overlay back.
+</Tip>
+
+## Where to start
+
+| If you're | Start here |
+| --- | --- |
+| Adding it to an app | [Add an SDK](/docs/install/sdks), then your language's page |
+| Running your own model | [Bring your own model](/docs/build/models) |
+| Placing things in a room | [Building in AR](/docs/build/ar) |
+| Reading faces, hands or text | [Tracking and text](/docs/build/tracking) |
+| Saving what the user sees | [Capture and recording](/docs/build/capture) |
+| Writing a binding | [Writing your own SDK](/docs/binding/writing-an-sdk) |
+
+## What goes in and what comes out
+
+A frame goes in as whatever your platform already has. On Apple that's a
+`CVPixelBuffer`, on Android an `AHardwareBuffer`, on the web a WebGL or WebGPU
+texture. None of these get copied on the way in.
+
+What you get back is a record of what the engine found: faces, hands,
+segmentation masks, detections, text with its reading order, planes, anchors,
+depth. If a lens is active, you also get the rendered frame with whatever it
+drew.
+
+## Who does what
+
+The Zig core owns the frame graph, the lens runtime, the texture and buffer
+pools, the perception record, the media handling and the degradation policy.
+
+The SDKs only own the parts that genuinely differ by platform: opening a
+camera, handing over a GPU surface, reaching a hardware codec, and presenting
+an API that feels right in that language. If an SDK starts implementing a
+feature of its own, that's a bug, because then your app behaves differently
+depending on which language you wrote it in.
+
+## Three things to know before you start
+
+These come up constantly, so they're worth reading first.
+
+1. **Everything happens on one thread.** The engine and its sessions belong to
+   whichever thread created them. See [threads and
+   lifetimes](/docs/concepts/threading).
+2. **Not every build does everything.** A stub build answers every call and
+   computes nothing, which looks exactly like a camera pointed at a blank wall.
+   Check the [capability bits](/docs/concepts/capabilities) at startup.
+3. **Frames have a budget.** When the work won't fit, the engine turns things
+   down in a set order instead of dropping the frame. See
+   [degradation](/docs/concepts/degradation).

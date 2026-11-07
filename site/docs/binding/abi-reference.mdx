@@ -1,0 +1,121 @@
+---
+title: ABI reference
+description: The version scheme, the status codes, the capability bits and the layout rules every binding is held to.
+---
+
+This page is the contract. It describes what the boundary guarantees, what it
+does not, and what changes between releases.
+
+## Versioning
+
+```c
+#define GOSS_ABI_MAJOR 0u
+#define GOSS_ABI_MINOR 176u
+#define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
+
+uint32_t goss_abi_version(void);  /* any-thread */
+```
+
+The major changes only when an existing layout or an existing meaning changes.
+Compare it and refuse on a mismatch; there is no compatibility shim and asking
+for one is asking to read the wrong bytes.
+
+The minor is derived rather than chosen. It counts the operation list plus the
+field count of every struct that crosses, so appending a field to a record
+moves the number on its own and nobody has to remember to bump it.
+
+Build your binding against a header, record the version it was generated from,
+and report both at runtime when they differ. A support question answered with
+"the library is older than the binding by this many minors" is a question
+already solved.
+
+## Status codes
+
+Every call that can fail returns `goss_status`. Nothing throws, nothing sets
+errno, and no exception crosses the boundary, because every internal shim
+catches at its own edge and maps to a status.
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| `GOSS_OK` | The call did what it said | Continue |
+| `GOSS_ERROR_INVALID_ARGUMENT` | A pointer, size or enum did not make sense | Fix the caller; this is a bug, not a condition |
+| `GOSS_ERROR_OUT_OF_MEMORY` | An allocation failed | Release what you can and retry, or fail the feature |
+| `GOSS_ERROR_POOL_EXHAUSTED` | Every buffer in a pool is still held | Release frames sooner, or raise the pool capacity |
+| `GOSS_ERROR_ABI_MISMATCH` | The caller and the library disagree | Refuse to run |
+| `GOSS_ERROR_RENDERER_UNAVAILABLE` | No usable graphics device | Run without the drawing path, or tell the user |
+| `GOSS_ERROR_UNSUPPORTED` | This build has no such capability | Check the capability bits first |
+
+`GOSS_ERROR_POOL_EXHAUSTED` is the one worth special handling. It almost always
+means the application is holding frames longer than it thinks, and the honest
+response is backpressure rather than a larger pool.
+
+## Capability bits
+
+`goss_capabilities` returns a bitfield describing what this build actually
+computes. The stub and full libraries share a filename and a version, so this
+is the only way to tell them apart before feeding real bytes to an operation.
+
+```c
+uint64_t caps = goss_capabilities();
+```
+
+The bits cover tracking and world tracking, segmentation, machine learning
+inference, diffusion, beauty, physics, reconstruction, video textures, photo
+capture, recording, audio playback and recording, file access, scripting,
+stroke boards and diagnostics. Each is defined in the header as
+`GOSS_CAP_<NAME>`; read them from there rather than copying a list, because
+the list grows.
+
+Gate on the bit, not on a platform guess. A build for a phone and a build for
+a test machine differ by what was compiled in, not by what the operating system
+is called.
+
+## Handles
+
+```c
+goss_engine   /* the library's own state, pools and devices */
+goss_session  /* one stream of frames, with its own budget */
+```
+
+Two handles cross, and that is the whole set. A lens, a frame and everything
+else live behind the session rather than as handles of their own, which is why
+there is no third lifetime for a binding to get wrong.
+
+Each is a pointer to a type the caller never sees inside. They cannot be
+copied, compared for ordering, serialised, or constructed by hand. Hold them,
+pass them back, and destroy them in the order they were made.
+
+## Layout rules
+
+Descriptors are plain data with fixed layouts that are static-asserted inside
+the engine and documented field by field in the header.
+
+- Structs are `extern` with explicit padding. Nothing is packed and nothing is
+  reordered by the compiler.
+- A field is only ever added at the end of a struct, behind a size field, so a
+  binding built against an older header reads the prefix it knows.
+- Vectors cross by pointer to a fixed-size array, never as loose floats, so a
+  caller and callee built by different toolchains agree about where every
+  scalar lives.
+- Enums cross as explicit integer types. There is no implementation-defined
+  enum width at the boundary.
+
+## Threading
+
+An engine and the sessions made from it are confined to the thread that
+created them. A function may be called from elsewhere only where the header
+says any-thread.
+
+`goss_abi_version` is any-thread and must be the first call a binding makes.
+Treat everything else as confined unless its own comment says otherwise, and
+assert the thread identity in debug builds rather than trusting a convention.
+
+## Memory
+
+`goss_alloc` and `goss_free` exist for the cases where the engine hands back a
+buffer whose lifetime the caller controls. Free what the engine allocated with
+`goss_free` and nothing else; your language's allocator did not make it and
+cannot release it.
+
+Everything else the engine allocates, the engine owns, and the matching
+`destroy` or `release` is the only correct way to hand it back.

@@ -1,0 +1,103 @@
+---
+title: Quickstart
+description: Get one camera frame through the engine and one overlay back, on whichever platform you've already got open.
+---
+
+This gets the whole chain working end to end. Everything else in these docs
+assumes you've done it.
+
+You'll need a camera your platform will give you frames from, and a surface it
+will let you draw to. The SDK brings everything else.
+
+## 1. Add the SDK
+
+One line for your package manager. See [adding an SDK](/docs/install/sdks).
+
+You don't need to build anything: the released packages carry the compiled
+engine for every platform they claim to support.
+
+## 2. Open an engine
+
+The engine owns the pools and the graphics device. Make one, keep it around for
+as long as the feature is on screen, and don't make a second one.
+
+```swift
+let engine = try GossEngine.create(config: GossEngineConfig(texturePoolCapacity: 8))
+```
+
+<Note>
+Zero in a config means "you pick". Start there and only set numbers once you've
+measured a reason to.
+</Note>
+
+## 3. Open a session
+
+A session is one stream of frames with its own budget. If your app shows a
+camera in two places at once, that's two sessions and one engine.
+
+```swift
+let session = try GossSession.create(engine: engine,
+                                     config: GossSessionConfig(frameBudgetUs: 8_000))
+```
+
+The budget is the ceiling for everything the engine does to a frame. When the
+work won't fit, it turns things down in a [set order](/docs/concepts/degradation)
+rather than dropping the frame.
+
+## 4. Activate a lens
+
+A lens is a bundle: a manifest plus whatever it draws with. Activating one
+validates it and makes it the thing that draws.
+
+```swift
+_ = try session.activateLens(manifestJson: manifest)
+```
+
+You can skip this for now. A session with no lens still perceives; the lens is
+only what puts something back on screen. Come back to it once you can see the
+record.
+
+## 5. Submit frames
+
+Hand over the frame your platform already has. On anything with a shared
+texture or a hardware buffer, nothing gets copied.
+
+```swift
+try session.submitFrame(desc: desc, planes: planes)
+```
+
+## 6. Read what was in it
+
+Ask once per frame, after submitting.
+
+```swift
+let record = try session.perceptionJson()
+```
+
+Start with the JSON form. You can print it, diff it and write tests against it,
+and it's the fastest way to find out whether the chain works. Switch to the
+packed form later when you want the allocation back.
+
+## What you should see
+
+Faces, hands, planes, text or depth, depending on what's in front of the camera
+and what this build has compiled in.
+
+If everything comes back empty, check the capability bits before you go looking
+at the camera:
+
+```swift
+let caps = Gosslens.capabilities()
+```
+
+A stub build answers every call and perceives nothing. It looks exactly like a
+camera pointed at a wall, and people lose afternoons to this.
+
+## Next
+
+- [The perception record](/docs/concepts/perception) for what's in the thing
+  you just printed.
+- [The frame graph](/docs/concepts/graph) for what happened in between.
+- [Performance](/docs/guides/performance) before you ship.
+- [Writing your own SDK](/docs/binding/writing-an-sdk) if your language isn't
+  one of the four.

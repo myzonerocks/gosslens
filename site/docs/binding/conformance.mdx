@@ -1,0 +1,80 @@
+---
+title: Proving a binding
+description: The suite a new SDK has to pass before anybody should ship on it, and why each part of it exists.
+---
+
+A binding that runs is not a binding that works. The failures that matter are
+quiet: a field read at the wrong offset that happens to hold a plausible
+number, a frame released twice that only corrupts the pool under load, a record
+that agrees with the C one until the day somebody enables segmentation.
+
+The suite below is what the shipped SDKs are held to. Run it in continuous
+integration, not once by hand.
+
+## Agree with the header
+
+Generate your struct declarations from `gosslens.h`, then test that the
+generated ones are still right.
+
+For every descriptor that crosses, assert the total size and the offset of
+every field against the values the engine reports. A test that only checks the
+fields you currently read will pass on the day a field is inserted and fail
+somewhere far away on the day after.
+
+## Agree with another binding
+
+Take one program. Submit the same frames through your binding and through the
+C one, and compare the records field by field, including the fields your
+binding does not expose yet.
+
+This is the test that catches a wrong offset, a sign error, a byte order
+assumption, and a float that was quietly truncated on the way through. Nothing
+else catches all four.
+
+## Refuse the wrong library
+
+Point the binding at a library with a different ABI major and assert that it
+refuses before it creates anything. Then point it at a stub build and assert
+that every optional path is skipped rather than silently returning zeroes.
+
+Both cases are easy to get wrong in a way that only shows up for a user with
+an unusual install.
+
+## Hold the thread rule
+
+Call into the engine from a second thread and assert that your debug build
+catches it. If it does not, the rule is documented rather than enforced, and a
+future maintainer of your binding will break it without knowing.
+
+Then test the case that actually happens in production: let an object become
+unreachable and confirm the destroy runs on the graph thread rather than on
+whatever thread the collector happened to use.
+
+## Leak nothing, twice
+
+Create and destroy engines and sessions in a loop and assert the process size
+is flat at the end. Run the same loop with failures injected at every create,
+so the error paths are exercised rather than assumed.
+
+Then do it again, destroying in the wrong order, and assert that the binding
+prevents it structurally rather than crashing.
+
+## Survive exhaustion
+
+Hold every frame in the pool and assert that the next submit returns
+`GOSS_ERROR_POOL_EXHAUSTED` and that your binding surfaces it as backpressure
+rather than as a failure. Then release and assert the stream recovers without
+a restart.
+
+## Report what was missed
+
+Drain events slower than the engine produces them and assert that the missed
+count your binding reports is the engine's number rather than zero. A binding
+that swallows it has removed the only signal the application had.
+
+## What a pass means
+
+A binding that passes all of the above behaves like the ones that ship, which
+is the only claim worth making about it. It does not mean the binding is
+idiomatic, documented or pleasant, and those are worth doing too. It means an
+application written against it will see what the engine saw.

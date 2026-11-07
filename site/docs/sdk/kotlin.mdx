@@ -1,0 +1,370 @@
+---
+title: Kotlin
+description: "The whole real-time path on Android: CameraX or ARCore frames in, trackers and lenses, a surface out, capture and recording, with every call this SDK exposes."
+---
+
+This is the complete guide for an Android app, in the order you will build in.
+
+## Install
+
+```kotlin
+// build.gradle.kts
+implementation("io.github.avosa:gosslens:0.14.0")
+```
+
+The AAR carries a `libgosslens.so` per ABI. The JNI layer is generated from the
+C header and holds no logic of its own, which is why it has never disagreed
+with the engine about a struct layout.
+
+## Check the build before you trust it
+
+```kotlin
+import com.gosslens.*
+
+check(Gosslens.abiCheck()) { "abi major mismatch" }
+val version = Gosslens.abiVersion()
+val caps = Gosslens.capabilities()
+```
+
+`capabilities()` returns the bitfield described in
+[capabilities](/docs/concepts/capabilities). A stub build answers every call
+and computes nothing.
+
+## Engine and session
+
+```kotlin
+val engine = GossEngine.create(GossEngineConfig(texturePoolCapacity = 8u))
+val session = GossSession.create(engine, GossSessionConfig(frameBudgetUs = 8_000u))
+```
+
+A null config means the core's own defaults, exactly as a null means in C.
+`GossEngine.create` runs the ABI check itself, so a mismatch fails here rather
+than somewhere unrelated later.
+
+## Frames in
+
+### The zero-copy path
+
+CameraX frames reach the engine as `AHardwareBuffer` imports.
+
+```kotlin
+imageAnalysis.setAnalyzer(executor) { image ->
+    val desc = GossFrameDesc(
+        width = image.width.toUInt(),
+        height = image.height.toUInt(),
+        pixelFormat = GossPixelFormat.Nv12,
+        rotationDegrees = image.imageInfo.rotationDegrees.toUInt(),
+        mirrored = isFrontCamera,
+        timestampUs = image.imageInfo.timestamp / 1000,
+    )
+    session.submitHardwareBuffer(desc, hardwareBufferOf(image))
+    image.close()
+}
+```
+
+Per-frame calls reuse direct byte buffers the session allocates once, rather
+than allocating per frame. Keep your own descriptor object and mutate it.
+
+### The copy paths
+
+```kotlin
+session.submitFrameCopy(y, yStride, uv, uvStride, width, height, rotation, mirrored, timestampUs)
+session.submitFrameRgbaCopy(rgba, stride, width, height)
+session.submitSourceFrameRgba(name, rgba, width, height)
+```
+
+Correct, and slower. Use them to bring a surface up, not to ship.
+
+### Report the frame
+
+```kotlin
+val level = session.reportFrame(frameTimeUs, thermal)
+val now = session.degradeLevel()
+```
+
+Map Android's own thermal reading onto `GossThermal` and pass it. Passing a
+constant is how a phone ends up hot with the ladder still at full. See
+[degradation](/docs/concepts/degradation).
+
+## Seeing what is there
+
+### Trackers
+
+```kotlin
+session.enableFaceTracking(taskBytes, threads = 2)
+session.enableHandTracking(taskBytes, threads = 2)
+session.enablePoseTracking(taskBytes, threads = 2)
+session.setPoseUpperBody(true)
+
+session.disableFaceTracking()
+session.disableHandTracking()
+session.disablePoseTracking()
+```
+
+Reading results without taking the whole record:
+
+```kotlin
+val faces = session.faceCount()
+val face = session.faceResultAt(0)
+val region = session.faceRegion(0)
+val pose = session.facePose(0)
+val trackId = session.faceTrackId(0)
+
+val bodies = session.bodyCount()
+val joint = session.bodyJoint(0, GossBodyJoint.LeftWrist)
+val hand = session.handResult()
+```
+
+### Segmentation, with your own model
+
+```kotlin
+session.enableSegmentation(modelBytes, threads = 2)
+session.allowModelDigest(sha256)       // call before enabling
+session.clearModelAllowlist()
+session.disableSegmentation()
+
+val channels = session.segmentationChannels()
+session.setSegmentationClassMask(mask)
+val mask = session.mlMask(nodeId)
+val tensor = session.mlOutput(nodeId, tensor = 0)
+```
+
+See [bring your own model](/docs/build/models).
+
+### Text
+
+```kotlin
+engine.enableText(detector, recognizer, dictionary, detectSide = 320u)
+val readings = engine.readings()
+val counts = engine.textCount()
+engine.disableText()
+```
+
+### The record
+
+```kotlin
+val json = session.perceptionJson()
+val packed = session.perceptionSnapshot(engine.selectAll())
+```
+
+### Events
+
+```kotlin
+val batch = session.pollEvents(capacity = 64)
+// batch carries the events and the count dropped since the last drain
+```
+
+Events drain from the engine's ring with the count of anything missed since the
+last drain, which a caller can wrap in a flow in one line. The SDK takes no
+coroutines dependency of its own, so it does not decide your concurrency for
+you.
+
+Surface the dropped count. It is the only backpressure signal you get.
+
+## Drawing back
+
+```kotlin
+engine.initRenderer(surface, width, height)
+engine.resize(width, height)
+engine.renderFrame(session)
+
+engine.renderToLiveTexture(session, texture, width, height)
+engine.releaseLiveTexture(texture)
+val pixels = engine.captureLiveFrame(session, width, height)
+```
+
+## Lenses
+
+```kotlin
+session.activateLens(manifestJson)
+session.activateLensFromDirectory(bundlePath)
+session.provideLensAsset(name, bytes)
+session.deactivateLens()
+
+session.tickLens(dtUs, signals)
+val value = session.parameterValue("spin_w")
+
+val state = session.snapshotLensState()
+session.applyLensState(state)
+```
+
+`snapshotLensState` and `applyLensState` are what a configuration change needs:
+an activity recreated on rotation can restore exactly what the lens was doing
+rather than restarting it.
+
+## AR
+
+### ARCore in one object
+
+```kotlin
+val world = GossARCoreWorldSource(session)
+
+// in your ARCore frame callback
+world.onFrame(frame)
+world.stop()
+```
+
+It submits the pose, the projection, the tracked planes, the anchors and the
+light estimate from one ARCore `Frame`, into direct buffers it allocates once.
+
+### Doing it by hand
+
+```kotlin
+session.submitCameraPose(worldFromCamera, projection, timestampUs)
+session.submitCameraIntrinsics(fx, fy, cx, cy, distortion)
+session.submitWorld(state, planes, anchors, light)
+session.submitWorldMesh(vertices, indices)
+session.submitDepth(depth, width, height)
+session.submitOrientation(quaternion)
+```
+
+### Asking the engine about the room
+
+```kotlin
+val hit = session.hitTest(screenX, screenY)
+val ray = session.raycastWorldMesh(origin, direction)
+val floor = session.floorPlaneId()
+val kind = session.planeKind(planeId)
+val route = session.pathAcrossWorld(start, goal)
+val spots = session.placeOn(width, depth, height, occupants)
+val landmarks = session.sharedLandmarks()
+```
+
+Reconstruction, when you want the geometry itself:
+
+```kotlin
+session.writeReconstruction(path)
+val mesh = session.readReconstruction(path)
+```
+
+## Beauty
+
+```kotlin
+session.enableBeauty(resourcePath)
+session.setSmooth(0.4f)
+session.setWhiten(0.2f)
+session.setThinFace(0.15f)
+session.setBigEye(0.1f)
+session.setLipstick(0.3f)
+session.setBlush(0.2f)
+session.setBeautyLut(slot, rgba, width, height)
+session.setBeautyMakeupTexture(effect, rgba, width, height)
+session.setMakeupReference(reference)
+session.disableBeauty()
+
+session.beautifyFrame(rgbaIn, rgbaOut, width, height)
+```
+
+## Capture and recording
+
+```kotlin
+val png = engine.capturePhoto(session)
+val jpeg = engine.capturePhotoAs(session, format, quality)
+val still = engine.captureStill(session, config)
+val frame = engine.captureFrame(session, width, height)
+engine.requestScreenshot(path)
+
+engine.startRecording(session, path, width, height, bitrate, hevc, realtime)
+engine.pauseRecording()
+engine.resumeRecording()
+engine.stopRecording()
+val report = engine.recordingReport()
+
+session.setRecordingPolicy(policy)
+session.setCaptureUi(ui)
+session.captureProvenance()
+session.resetCapture()
+```
+
+## Audio
+
+```kotlin
+val output = GossAudioOutput(session)
+val mic = GossMicInput(session, engine)
+
+engine.submitAudio(session, samples, frameCount, sampleRate, channels, timestampUs)
+val segment = session.captionSegment(0)
+val text = session.captionText()
+session.setDubbing(config)
+```
+
+## Clips, screens and scanning
+
+```kotlin
+val clip = engine.openClip(path)
+engine.clipSubmitFrame(clip, timestampUs)
+engine.clipSeek(clip, targetUs)
+engine.clipStep(clip, frames)
+val info = engine.clipInfo(clip)
+engine.closeClip(clip)
+
+val screen = engine.openScreen(surfaceId, scale)
+engine.stepScreen(screen)
+val mapped = engine.screenPoint(screen, x, y)
+engine.closeScreen(screen)
+
+val qr = engine.scanQR(luminance, width, height)
+val code = engine.scanBarcode(luminance, width, height)
+val image = engine.generateQR(payload, moduleScale, quietModules)
+```
+
+## Memory, annotations and scope
+
+```kotlin
+engine.memoryOpen(dim, maxEntries)
+engine.remember(id, embedding)
+val hits = engine.memorySearch(query, k)
+engine.forget(id)
+val stats = engine.memoryStats()
+engine.memorySaveSealed(key, nonce)
+engine.memoryLoadSealed(key, bytes)
+engine.memoryClose()
+
+engine.annotate(annotation, text)
+engine.annotationRemove(id)
+engine.annotationClear()
+val live = engine.annotationCount()
+
+engine.setScope(sections, verbs)
+val scope = engine.scope()
+```
+
+## Measuring
+
+```kotlin
+val engineReport = session.engineReport()
+val sessionReport = session.sessionReport()
+val chain = session.chainReport()
+val nodes = session.nodeReports()
+```
+
+`nodeReports` is the call that answers "what is slow" with a name. See [events
+and reports](/docs/build/events).
+
+## Threads and lifetimes
+
+An engine and its sessions belong to the thread that created them. On Android
+the hazard is specific and common:
+
+- **The garbage collector.** A finaliser runs on its own thread, and a destroy
+  from there is a call from the wrong thread. Release explicitly when the
+  feature ends.
+- **CameraX executors.** Give the analyzer the same executor you create the
+  engine on, or post to it.
+- **Configuration changes.** An activity recreated on rotation must not create
+  a second engine. Hold it where it survives, and restore the lens with
+  `snapshotLensState` and `applyLensState`.
+
+Destroy sessions before the engine. See [threads and
+lifetimes](/docs/concepts/threading).
+
+## A whole frame, in order
+
+```kotlin
+session.submitHardwareBuffer(desc, buffer)
+session.tickLens(dtUs, signals)
+engine.renderFrame(session)
+val json = session.perceptionJson()
+val batch = session.pollEvents()
+session.reportFrame(frameTimeUs, thermal)
+```

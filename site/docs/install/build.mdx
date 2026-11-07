@@ -1,0 +1,38 @@
+---
+title: Build from source
+description: One pinned compiler, one command per target.
+---
+
+The engine builds with a single pinned Zig release and nothing else. The pin
+lives in `.zigversion`, and `build.zig` refuses any other compiler rather than
+producing a binary nobody can reproduce.
+
+```bash
+tools/toolchain-sync     # fetches the pinned compiler, verified by digest
+zig build ci             # the full local gate: tests, abi, vendors, conformance
+```
+
+Zig is also the C and C++ compiler for every vendored dependency, so moving the
+pin moves the whole native toolchain at once.
+
+## Per target
+
+```bash
+zig build android           # one .so per ABI
+zig build ios               # device slice
+zig build ios-simulator     # simulator slice
+zig build wasm-emscripten   # the web engine
+```
+
+<Warning>
+The vendored tree is large and some targets link the whole of it. A clean build
+of the Android slices compiles the vendored C++ for each ABI in turn, which is
+minutes rather than seconds.
+</Warning>
+
+## Gates
+
+`zig build ci` is the bar a change has to clear: the test suite, the ABI diff
+against the recorded baseline, the licence gate over every vendor pin, the fuzz
+corpora, and the conformance suite against recorded frames. A red gate is
+diagnosed rather than retried.

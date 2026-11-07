@@ -11,6 +11,7 @@
 !sdk/**
 !third_party/**
 !tools/**
+!site/**
 
 # Docs are tracked, except the private dev docs under docs/private, which are
 # local only and never committed. One directory keeps sensitive material in
@@ -100,3 +101,9 @@ sdk/kotlin/demo/src/main/assets/
 !.envrc
 .envrc.local
 !nix/**
+
+# The documentation site's own build output and installed packages.
+site/node_modules/
+site/dist/
+site/test-results/
+site/playwright-report/

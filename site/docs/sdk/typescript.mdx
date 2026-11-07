@@ -1,0 +1,403 @@
+---
+title: TypeScript
+description: "The whole real-time path in a browser: a camera or WebXR in, trackers and lenses, WebGL2 or WebGPU out, with every call this SDK exposes."
+---
+
+The web SDK is the same engine compiled to wasm. Nothing is uploaded and no
+endpoint is called: a page that uses it works offline once loaded.
+
+## Install
+
+```bash
+bun add @myzonerocks/gosslens
+npm install @myzonerocks/gosslens
+```
+
+The package ships the wasm beside the wrapper. Serve the wasm from your own
+origin and pass its URL when you load.
+
+## Loading
+
+```ts
+import { Gosslens, GossSession } from '@myzonerocks/gosslens'
+
+const goss = await Gosslens.load(canvas, wasmJsUrl)
+const session = GossSession.create(goss.engine, { frameBudgetUs: 8_000 })
+```
+
+For a camera preview with the common wiring already done:
+
+```ts
+import { GossPreviewSession } from '@myzonerocks/gosslens'
+
+const preview = await GossPreviewSession.create(canvas, wasmJsUrl, {
+  onEvent: (event) => { /* ... */ },
+})
+```
+
+Check the build before trusting it:
+
+```ts
+const version = goss.abiVersion()
+const caps = goss.capabilities()
+```
+
+## Frames in
+
+### From a texture
+
+The fast path on the web hands the engine a texture you already have.
+
+```ts
+session.submitFrameTexture(texture, desc)
+session.adoptTexture(texture)
+session.releaseTexture(texture)
+```
+
+### From pixels
+
+```ts
+session.submitFrameRgbaCopy(pixels, canvas.width * 4, canvas.width, canvas.height)
+session.submitFrameCopy(y, yStride, uv, uvStride, width, height, rotation, mirrored, timestampUs)
+```
+
+### A video element
+
+```ts
+import { GossVideoTexture } from '@myzonerocks/gosslens'
+
+const video = new GossVideoTexture(session, 'clip', url)
+await video.start()
+video.pump()     // once per animation frame
+video.stop()
+```
+
+### A shared screen
+
+```ts
+session.defineScreenShare(options)
+session.openScreen(surfaceId, scale)
+session.stepScreen(screen)
+session.screenPoint(screen, x, y)
+session.closeScreen(screen)
+```
+
+### Report the frame
+
+```ts
+const level = session.reportFrame(frameTimeUs, thermal)
+session.reportInterruption(kind)
+```
+
+The browser gives you no thermal reading, so pass the nominal value and rely on
+the measured frame time. The ladder still works; it just has one signal instead
+of two.
+
+## Seeing what is there
+
+### Trackers
+
+```ts
+session.enableFaceTracking(taskBytes, threads)
+session.enableHandTracking(taskBytes, threads)
+session.enablePoseTracking(taskBytes, threads)
+session.setPoseUpperBody(true)
+
+session.disableFaceTracking()
+session.disableHandTracking()
+session.disablePoseTracking()
+
+const faces = session.faceCount()
+const face = session.faceResultAt(0)
+const hand = session.handResult()
+const joint = session.bodyJoint(0, jointIndex)
+```
+
+Standalone trackers, when you want one without a full session:
+
+```ts
+import { GossFaceTracker, GossHandTracker, GossSegmenter } from '@myzonerocks/gosslens'
+
+const tracker = new GossFaceTracker(/* ... */)
+const result = tracker.process(rgba, width, height, timestampUs)
+tracker.destroy()
+```
+
+`GOSS_FACE_LANDMARK_COUNT` and `GOSS_FACE_BLENDSHAPE_COUNT` are exported, so a
+caller sizes buffers from the SDK rather than from a number in a blog post.
+
+### Segmentation and your own model
+
+```ts
+session.enableSegmentation(modelBytes, threads)
+session.enableSourceSegmentation(name, modelBytes, threads)
+session.allowModelDigest(sha256)
+session.clearModelAllowlist()
+session.mlOpSupport(modelBytes)
+const mask = session.mlMask(nodeId)
+const tensor = session.mlOutput(nodeId, 0)
+session.disableSegmentation()
+```
+
+`GOSS_SEGMENTATION_MASK_SIDE` is the fixed plane masks come back on.
+
+### Text and the record
+
+```ts
+session.enableText(detector, recognizer, dictionary, detectSide)
+const readings = session.readings()
+const json = session.perceptionJson()
+const packed = session.perceptionSnapshot(session.selectAll())
+```
+
+### Events
+
+```ts
+const batch = session.pollEvents()
+session.fireEvent(name)
+```
+
+Read the dropped count out of the batch and surface it.
+
+## Drawing back
+
+```ts
+session.initRenderer(canvas, width, height)
+session.resize(width, height)
+session.renderFrame()
+const pixels = session.captureLiveFrame(width, height)
+session.releaseLiveTexture(texture)
+```
+
+## Lenses
+
+```ts
+await session.activateLens(manifestJson)
+session.provideLensAsset(name, bytes)
+await session.deactivateLens()
+
+session.tickLens(dtUs, signals)
+const value = session.parameterValue('spin_w')
+const state = session.snapshotLensState()
+session.applyLensState(state)
+const missing = session.lensCapabilitiesMissing(manifestJson)
+```
+
+## AR on the web
+
+### WebXR in one object
+
+```ts
+import { GossWebXRWorldSource } from '@myzonerocks/gosslens'
+
+const world = new GossWebXRWorldSource(session)
+
+// inside your XR frame loop
+world.onFrame(frame, referenceSpace, timestampUs)
+```
+
+It reads the viewer pose and the spaces you give it and submits them, so the
+engine sees the same world your XR session does.
+
+### Doing it by hand
+
+```ts
+session.submitWorld(state, planes, anchors, light)
+session.submitCameraPose(worldFromCamera, projection, timestampUs)
+session.submitCameraIntrinsics(fx, fy, cx, cy, distortion)
+session.submitWorldMesh(vertices, indices)
+session.submitDepth(depth, width, height)
+session.submitOrientation(quaternion)
+session.submitLocation(latitude, longitude, accuracy)
+```
+
+### Asking about the room
+
+```ts
+const hit = session.hitTest(x, y)
+const ray = session.raycastWorldMesh(origin, direction)
+const floor = session.floorPlaneId()
+const kind = session.planeKind(planeId)
+const route = session.pathAcrossWorld(start, goal)
+const spots = session.placeOn(width, depth, height, occupants)
+const distance = session.measureBetween(from, to)
+const landmarks = session.sharedLandmarks()
+const fit = session.alignShared(theirs)
+```
+
+### Bounding where content may exist
+
+```ts
+session.setGeofence(centre, radius)
+session.setGeofenceBBox(min, max)
+session.setGeofencePolygon(points)
+session.setNamedGeofence(name, centre, radius)
+session.setNamedGeofencePolygon(name, points)
+session.clearGeofence()
+session.clearNamedGeofences()
+session.setGeoAccuracy(metres)
+```
+
+### Drawing in the air, and on the picture
+
+```ts
+session.setARBrushStyle(r, g, b, a, width)
+session.setARBrushMode(mode)
+session.beginARStroke()
+session.addARStrokePoint(x, y, z)
+session.endARStroke()
+session.undoARStroke()
+session.redoARStroke()
+session.clearARStrokes()
+
+session.setBrushStyle(r, g, b, a, width)
+session.setBrushStamp(stamp)
+session.beginStroke()
+session.addStrokePoint(x, y)
+session.endStroke()
+session.eraseStrokes(x, y)
+session.clearStrokes()
+const vertices = session.brushVertices()
+```
+
+### Physics and placement
+
+```ts
+session.addCollider(x, y, z)
+session.eraseCollider(x, y, z)
+session.setLayout(layout)
+session.clearLayout()
+```
+
+## Beauty
+
+```ts
+session.enableBeauty(resourcePath)
+session.setSmooth(0.4)
+session.setWhiten(0.2)
+session.setThinFace(0.15)
+session.setBigEye(0.1)
+session.setLipstick(0.3)
+session.setBlush(0.2)
+await session.loadWhitenLuts(urls)
+await session.loadMakeupTextures(urls)
+session.beautifyFrame(rgbaIn, rgbaOut, width, height)
+session.disableBeauty()
+```
+
+## Capture and recording
+
+```ts
+const png = session.capturePhoto()
+const jpeg = session.capturePhotoAs(format, quality)
+const still = session.captureStill(config)
+const frame = session.captureFrame(width, height)
+session.captureProvenance()
+session.resetCapture()
+session.sealMedia(bytes)
+```
+
+## Audio
+
+```ts
+import { GossAudioOutput, GossMicInput } from '@myzonerocks/gosslens'
+
+const output = new GossAudioOutput(session)
+await output.start()
+output.pump(800)
+await output.stop()
+
+const mic = new GossMicInput(session)
+await mic.start(stream)
+await mic.stop()
+
+session.submitAudio(samples, frameCount, sampleRate, channels, timestampUs)
+const mixed = session.mixOutputAudio(mic, frameCount, sampleRate, channels)
+session.pullAudio(buffer, frames)
+session.pullHaptic()
+```
+
+Both wrap an `AudioWorklet`, so audio stays off the main thread.
+
+## Scanning and media
+
+```ts
+const qr = session.scanQR(luminance, width, height)
+const code = session.scanBarcode(luminance, width, height)
+const image = session.generateQR(payload, moduleScale, quietModules)
+const decoded = session.decodePng(bytes)
+const hits = session.mediaSearch(corpus, count, dim, query, k)
+const track = session.identifyMusic(samples, frameCount, sampleRate, channels, minVotes)
+```
+
+## Memory, annotations and scope
+
+```ts
+session.memoryOpen(dim, maxEntries)
+session.remember(id, embedding)
+const hits = session.memorySearch(query, k)
+session.forget(id)
+const stats = session.memoryStats()
+const saved = session.memorySave()
+session.memoryLoad(saved)
+session.memoryClose()
+
+session.annotate(annotation, text)
+session.annotationRemove(id)
+session.annotationClear()
+
+session.setScope(sections, verbs)
+const scope = session.scope()
+const count = session.verbCount()
+const name = session.verbName(index)
+```
+
+## Measuring
+
+```ts
+const engineReport = session.engineReport()
+const sessionReport = session.sessionReport()
+const chain = session.chainReport()
+const nodes = session.nodeReports()
+```
+
+## What the browser costs you
+
+Two things differ from the native SDKs, and both are the platform rather than
+the engine:
+
+- **Threads depend on the page.** Worker threads need cross-origin isolation.
+  Without `Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy`, the
+  engine runs single threaded and your budget has to reflect that.
+- **Memory is the wasm heap.** Pool capacities that are comfortable on a phone
+  can be expensive in a tab. Start at the defaults and read `engineReport` for
+  the pools' live and peak counts.
+
+## Keeping the main thread free
+
+The main thread is also the one painting. Submit, render and read on the same
+animation frame, and never await a network request between submitting a frame
+and reading its record.
+
+```ts
+function frame(now: number) {
+  session.submitFrameTexture(texture, desc)
+  session.tickLens(dtUs, signals)
+  session.renderFrame()
+  const json = session.perceptionJson()
+  session.pollEvents()
+  session.reportFrame(frameTimeUs, thermal)
+  requestAnimationFrame(frame)
+}
+```
+
+## Lifetimes
+
+```ts
+session.destroy()
+session.release()
+```
+
+Destroy the session before the engine, and do not let a framework's cleanup run
+it twice from different places. See [threads and
+lifetimes](/docs/concepts/threading).

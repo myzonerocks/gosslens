@@ -1,0 +1,98 @@
+---
+title: Performance
+description: Where the frame budget goes, which paths copy, and what to measure before deciding anything is slow.
+---
+
+The engine is built to a budget per frame rather than to a target frame rate,
+because a frame that arrives late is worse than a frame that did less.
+
+## The budget
+
+A session carries `frame_budget_us`: the ceiling for everything the engine does
+between a frame arriving and the result being ready. Zero means the engine
+picks from what the device can sustain.
+
+When the work will not fit, the engine does not drop the frame. It climbs down
+the [degradation ladder](/docs/concepts/degradation) in a fixed, documented
+order, so the thing that gets worse is the thing you chose in advance rather
+than whatever happened to be last in the queue.
+
+Set the budget from the refresh rate you are drawing at, leaving the
+application its own share. A budget that consumes the whole frame interval
+leaves nothing for the compositor and shows up as judder that profiles blame
+on the engine.
+
+## What copies and what does not
+
+The common path copies nothing. A frame arrives as a platform texture or a
+hardware buffer, is imported, and is used where it is.
+
+The copying paths exist and are correct, and they are there for bringing a
+platform up rather than for shipping:
+
+- A planes-and-strides submit stages the frame through the engine's own
+  staging pool.
+- An RGBA copy submit converts on the way in.
+
+If a profile shows time in staging on a platform that has a shared texture
+path, the integration is on the wrong call rather than the engine being slow.
+
+## Allocation
+
+Nothing in the engine allocates per frame on the common path. Pools are sized
+at creation and reused.
+
+A binding can undo that on its own, and usually does so in one of two ways:
+building a fresh descriptor object per frame, or materialising the record into
+new objects per frame. Reuse the descriptor. Hand the record back as a view
+where your language allows one, and as a reused buffer where it does not.
+
+## Pool exhaustion is a signal
+
+`GOSS_ERROR_POOL_EXHAUSTED` means every buffer is still held by the caller. It
+is a backpressure signal rather than a failure: stop pulling frames until the
+engine has caught up.
+
+Raising the capacity is occasionally right and usually postpones the problem.
+A pool twice the size exhausts twice as late and stalls for twice as long.
+
+## Measuring
+
+Read the engine's own numbers rather than wrapping calls in timers. A wall
+clock around a submit says the frame took eight milliseconds; the node report
+says which node spent six of them.
+
+```c
+goss_degrade_level level = goss_session_report_frame(session, frame_time_us, thermal);
+```
+
+That one call both drives the ladder and tells you where it settled. Feed it
+your platform's real thermal state; see [degradation](/docs/concepts/degradation).
+
+Then take the engine section of the record, which carries the budget, what was
+spent, the degrade level, `degrade_transitions`, `nodes_degraded` and
+`node_reports_lost`:
+
+```c
+goss_session_perception_json(session, GOSS_PERCEPTION_ENGINE, buf, cap, &written);
+```
+
+Three numbers tell you most of what you need:
+
+- **spent against limit.** Headroom, or the lack of it.
+- **degrade_transitions.** A number that keeps climbing means flapping, and
+  flapping costs more than sitting one step lower.
+- **node_reports_lost.** The measurements themselves are incomplete.
+
+Measure cold, because the first frame is the one the user waits on. Measure
+again after several minutes, because a device that is comfortable for thirty
+seconds and throttled at three minutes has a different problem.
+
+## Before shipping
+
+- The budget is set from the refresh rate, not left at a guess.
+- The platform's zero-copy submit is the one in use, confirmed by a profile
+  rather than by reading the code.
+- Nothing allocates per frame in the binding.
+- Exhaustion produces backpressure, proven by holding frames on purpose.
+- The device is still cool after several minutes of continuous use.

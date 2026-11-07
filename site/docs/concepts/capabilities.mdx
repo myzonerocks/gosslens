@@ -1,0 +1,61 @@
+---
+title: Capabilities
+description: Two libraries with the same name and version can behave completely differently. Here's how to ask which one you've got.
+---
+
+The engine ships in more than one shape. A full build computes what it says it
+does. A stub build answers every call, hands back well-formed empty results,
+and does no actual work.
+
+Both have the same filename, the same symbols and the same ABI version. That's
+on purpose: it means a CI machine with no camera and no accelerator can link
+and run the same code your app does, without you keeping a second code path
+alive.
+
+It also means your app can't tell them apart by looking, which is what
+`goss_capabilities` is for.
+
+## Asking
+
+```c
+uint64_t caps = goss_capabilities();
+if ((caps & GOSS_CAP_TRACKING) == 0) {
+    /* No tracking in this build. Say so, rather than reporting an empty
+       face list as a camera problem. */
+}
+```
+
+Read it once after you create the engine and keep the answer. It can't change
+while the process is running.
+
+## What the bits cover
+
+There's a bit for each optional subsystem: tracking and world tracking,
+segmentation, ML inference, diffusion, beauty, physics, reconstruction, video
+textures, photo capture, recording, audio playback and recording, file access,
+scripting, stroke boards and diagnostics.
+
+Read the current set from the header rather than from this page. New bits get
+added as subsystems become optional, and a docs page is the wrong place to find
+out one exists.
+
+## Using them well
+
+**Check the feature, not the platform.** Whether tracking is available depends
+on how the library was built, not on what the operating system is called. Code
+that checks for a platform and assumes a capability will be wrong on somebody's
+install.
+
+**Tell the user.** If your app can see that the engine has no segmentation
+compiled in, it can disable the control and say why. If it can't see that, it
+shows a control that does nothing.
+
+**Be loud in development.** A stub build in a developer's environment should be
+noisy, because otherwise somebody spends an afternoon debugging a camera that
+was never the problem. In CI it should be silent, because that's what it's for.
+
+## How this shows up in errors
+
+Calling into a subsystem this build doesn't have returns
+`GOSS_ERROR_UNSUPPORTED`. That's an answer, not a fault, so map it to something
+your app can branch on rather than to an error that unwinds a frame.
