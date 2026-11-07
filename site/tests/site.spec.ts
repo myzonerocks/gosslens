@@ -347,3 +347,31 @@ test('the edit link goes to this document in this repository', async ({ page }) 
     'https://github.com/myzonerocks/gosslens/edit/main/site/docs/install/sdks.mdx',
   )
 })
+
+test('no link anywhere drops the path the site is served from', async ({ page, baseURL }) => {
+  test.slow()
+  const origin = new URL(baseURL ?? 'http://127.0.0.1').origin
+  const base = new URL(baseURL ?? 'http://127.0.0.1').pathname
+
+  await page.goto('docs')
+  const pages = await page
+    .getByTestId('doc-link')
+    .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('href') ?? ''))
+
+  const dropped: string[] = []
+  for (const path of ['', ...pages.slice(0, 10)]) {
+    await page.goto(path)
+    const links = await page
+      .locator('#content a, footer a')
+      .evaluateAll((nodes) => nodes.map((node) => ({ raw: node.getAttribute('href') ?? '', real: (node as HTMLAnchorElement).href })))
+
+    for (const link of links) {
+      if (!link.real.startsWith(origin)) continue
+      const rest = link.real.slice(origin.length)
+      // Same origin but outside the base means the base was lost on the way.
+      if (!rest.startsWith(base)) dropped.push(`${path || '/'}: ${link.raw} resolves to ${rest}`)
+    }
+  }
+
+  expect(dropped, 'links that lose the base path').toEqual([])
+})
