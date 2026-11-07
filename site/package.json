@@ -1,5 +1,5 @@
 {
-  "name": "gosslens-site",
+  "name": "docs",
   "private": true,
   "type": "module",
   "engines": {
@@ -14,7 +14,8 @@
     "test": "playwright test",
     "test:ui": "playwright test --ui",
     "check:docs": "bun scripts/check-docs.ts",
-    "check:webkit": "bun scripts/webkit-render-check.mjs"
+    "check:webkit": "bun scripts/webkit-render-check.mjs",
+    "check:links": "bun scripts/check-links.ts"
   },
   "dependencies": {
     "@mdx-js/vue": "3.1.1",
