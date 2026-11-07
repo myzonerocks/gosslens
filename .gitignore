@@ -11,7 +11,11 @@
 !sdk/**
 !third_party/**
 !tools/**
+!site/
 !site/**
+# A global ignore hides every build/ directory, which would silently drop the
+# documentation written under site/docs/build. A negation cannot reach inside
+# an excluded directory, so the directory itself is re-included first.
 
 # Docs are tracked, except the private dev docs under docs/private, which are
 # local only and never committed. One directory keeps sensitive material in

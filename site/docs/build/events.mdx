@@ -1,0 +1,81 @@
+---
+title: Events and reports
+description: Drain what the engine has to tell you, see what it missed, and read what each node of the graph cost.
+---
+
+The engine never calls you back. It keeps a ring of events and you drain it,
+which means nothing arrives on a thread you weren't expecting and no handler
+runs in the middle of a frame you were still using.
+
+## Draining
+
+```c
+goss_event events[32];
+uint32_t count = 0;
+uint64_t dropped = 0;
+
+goss_session_poll_events(session, events, 32, &count, &dropped);
+```
+
+Drain once per frame after submitting. You're already on the right thread at
+the right moment.
+
+## The dropped count is the signal
+
+`dropped` is how many events were lost since your last drain because the ring
+filled up. It's the clearest early warning that your app isn't keeping up, and
+reading it costs nothing.
+
+Surface it somewhere. If you log a climbing dropped count you get a few seconds
+of warning before anything visible goes wrong. If you throw the number away,
+you find out from a user.
+
+<Warning>
+A binding that doesn't expose `dropped` has thrown away the only backpressure
+signal there is. Pass it through even if your first integration ignores it.
+</Warning>
+
+## Firing your own
+
+```c
+goss_session_fire_event(session, ...);
+```
+
+A lens can react to events your app raises, which is how you wire your own
+moments into what draws without the lens knowing anything about your code.
+
+## Reports
+
+Reports tell you what actually happened on the last frame. Read these instead
+of wrapping calls in your own timers.
+
+```c
+goss_session_report_frame(session, ...);   /* this frame */
+goss_session_read_report(session, ...);    /* the session */
+goss_engine_read_report(engine, ...);      /* the engine */
+goss_session_chain_report(session, ...);   /* the active chain */
+```
+
+Per node, when you need to know which part of the graph is costing you:
+
+```c
+uint32_t nodes = 0;
+goss_session_node_report_count(session, &nodes);
+for (uint32_t i = 0; i < nodes; i++) {
+    goss_session_node_report_at(session, i, &report);
+    goss_session_node_report_id(session, i, &id, &id_len);
+}
+```
+
+This loop answers "what's slow" with a name. A wall clock around a submit tells
+you the frame took eight milliseconds. The node report tells you which node
+spent six of them.
+
+## What to do with reports in a product
+
+- **In development**, draw them. A small overlay showing spent against budget
+  and the most expensive node pays for itself in the first week.
+- **In CI**, assert on them. If a pull request moves a node's cost, it should
+  have to say so.
+- **In production**, sample them. You don't need every frame, and a number from
+  a real device beats anything you measure at your desk.

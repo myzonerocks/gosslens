@@ -42,6 +42,20 @@ async function walk(dir: string, ext = '.mdx'): Promise<string[]> {
 const problems: string[] = []
 
 /**
+ * A page git never took is a page the site ships a dead link to. Ignore rules
+ * are easy to inherit and impossible to see, so this asks git directly.
+ */
+async function untracked(): Promise<string[]> {
+  const git = Bun.spawnSync(['git', 'ls-files', '--others', '--ignored', '--exclude-standard', DOCS])
+  if (git.exitCode !== 0) return []
+  return new TextDecoder().decode(git.stdout).split('\n').filter(Boolean)
+}
+
+for (const file of await untracked()) {
+  problems.push(`${file} is ignored by a gitignore rule, so it would never ship`)
+}
+
+/**
  * Step names reach build.zig two ways: as a literal, and through a config
  * struct. A check that knows only the literal form reports real steps missing.
  */

@@ -1,0 +1,111 @@
+---
+title: Tracking faces, hands, poses and text
+description: Turn on the trackers you need, with the models you choose, and read what they found.
+---
+
+Every tracker works the same way: enable it with the task bytes and a thread
+count, submit frames, read the result. Nothing is on by default, so a session
+only costs you what you asked for.
+
+## Faces and hands
+
+```c
+goss_session_enable_face_tracking(session, task_bytes, task_len, threads);
+goss_session_enable_hand_tracking(session, task_bytes, task_len, threads);
+```
+
+The task bytes are the model, and you supply them, so the accuracy and size
+trade-off is yours to make. See [bring your own model](/docs/build/models) if
+you want to pin them by digest.
+
+`threads` caps the worker. Zero lets the engine pick based on the device. On a
+phone, two is usually right for one tracker and badly wrong for three at
+once.
+
+If a count is all you need, ask for one:
+
+```c
+uint32_t faces = 0;
+goss_session_face_count(session, &faces);
+```
+
+Or take the whole [perception record](/docs/concepts/perception) when you want
+boxes, landmarks and confidences at once.
+
+## Pose
+
+```c
+goss_session_enable_pose_tracking(session, task_bytes, task_len, threads);
+goss_session_disable_pose_tracking(session);
+```
+
+Pose is the most expensive of the three. Turn it on when the feature using it
+appears and off when it goes away, instead of leaving it running for the whole
+session.
+
+## Text
+
+Text needs three pieces, because reading is really three jobs:
+
+```c
+goss_session_enable_text(session,
+                        detector, detector_len,      /* where text is */
+                        recognizer, recognizer_len,  /* what it says */
+                        dictionary, dictionary_len,  /* what is plausible */
+                        detect_side);                /* working resolution */
+```
+
+The dictionary is optional, but supply one if your domain has a vocabulary:
+part numbers, street names, a menu. It's the difference between reading a word
+and reading something that looks like it.
+
+`detect_side` is the working resolution for detection. Smaller is faster and
+misses small text, so match it to how big text actually is in your app rather
+than to the frame.
+
+Recognised text comes back with its position, its confidence, and which line
+and paragraph it belongs to, so you can put the layout back together instead of
+just collecting words.
+
+## Segmentation
+
+```c
+goss_session_enable_segmentation(session, model_bytes, model_len, threads);
+goss_session_enable_source_segmentation(session, ...);
+goss_session_disable_segmentation(session);
+```
+
+The plain one segments the camera frame. The source one segments a named
+source, which is what you want when the thing you're cutting out isn't the live
+camera.
+
+## Beauty
+
+```c
+goss_session_enable_beauty(session, resource_path);
+```
+
+Beauty takes a resource path instead of model bytes, because it comes with a
+set of resources rather than a single network.
+
+## Enabling several at once
+
+Each tracker is a worker with its own threads. Three of them at two threads
+each won't fit a mid-range phone's budget, and you won't get a crash out of it:
+you'll get a [degradation ladder](/docs/concepts/degradation) sitting near the
+bottom permanently.
+
+Work out what the screen actually needs:
+
+- A face filter needs faces. It does not need pose.
+- A gesture control needs hands. It rarely needs text.
+- A scanning screen needs text and nothing else.
+
+Enable per screen, disable when you leave, and read the budget back from the
+record to check that what you picked actually fits.
+
+## Checking the build can do it
+
+`enable_*` returns `GOSS_ERROR_UNSUPPORTED` if this build doesn't have that
+subsystem compiled in. Check [capabilities](/docs/concepts/capabilities) once
+at startup and keep the answer, rather than finding out feature by feature.

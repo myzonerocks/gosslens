@@ -56,27 +56,39 @@ test('search closes on escape and leaves nothing behind', async ({ page }) => {
   await expect(page.getByTestId('search-overlay')).toBeHidden()
 })
 
-test('the page is dark by default and remembers a reader who chose light', async ({ page }) => {
+test('the page follows the system until a reader chooses', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'dark' })
   await page.goto('')
   const root = page.locator('html')
-  await expect(root).toHaveAttribute('data-theme', 'dark')
-  const dark = await page.evaluate(() => getComputedStyle(document.body).backgroundColor)
 
+  // Nobody has chosen, so nothing is stamped and the system decides.
+  await expect(root).not.toHaveAttribute('data-theme', /light|dark/)
+  const fromSystem = await page.evaluate(() => getComputedStyle(document.body).backgroundColor)
+
+  await page.emulateMedia({ colorScheme: 'light' })
+  await expect
+    .poll(() => page.evaluate(() => getComputedStyle(document.body).backgroundColor))
+    .not.toBe(fromSystem)
+})
+
+test('a chosen theme beats the system and survives a reload', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'dark' })
+  await page.goto('')
+  const root = page.locator('html')
   const toggle = page.getByTestId('theme-toggle')
+
+  // system, then light, then dark.
   await toggle.click()
   await expect(root).toHaveAttribute('data-theme', 'light')
   const light = await page.evaluate(() => getComputedStyle(document.body).backgroundColor)
-  expect(light).not.toBe(dark)
 
   await page.reload()
   await expect(root).toHaveAttribute('data-theme', 'light')
   expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe(light)
-})
 
-test('a system set to light still gets the dark page', async ({ page }) => {
-  await page.emulateMedia({ colorScheme: 'light' })
-  await page.goto('')
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
+  await toggle.click()
+  await expect(root).toHaveAttribute('data-theme', 'dark')
+  expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).not.toBe(light)
 })
 
 test('a code sample can be copied', async ({ page, browserName }) => {
@@ -311,4 +323,18 @@ test('a control looks like something you can press, in both themes', async ({ pa
   const light = await settled('light')
   expect(light?.edge).toBeGreaterThanOrEqual(3)
   expect(light?.label).toBeGreaterThanOrEqual(4.5)
+})
+
+test('every document has a file of its own, so a shared link is not a 404', async ({ page }) => {
+  await page.goto('docs')
+  const hrefs = await page
+    .getByTestId('doc-link')
+    .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('href') ?? ''))
+
+  for (const href of hrefs.slice(0, 6)) {
+    const response = await page.goto(href)
+    // A cached response is still a served one; only a miss falls back to 404.
+    expect(response?.status(), `${href} should be served, not fallen back to`).toBeLessThan(400)
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+  }
 })

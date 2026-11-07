@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { cycleTheme, theme } from '@/lib/theme'
 
-const label = computed(() => (theme.value === 'dark' ? 'Switch to light' : 'Switch to dark'))
+const label = computed(() => `Theme: ${theme.value}. Change it.`)
 </script>
 
 <template>
@@ -16,7 +16,21 @@ const label = computed(() => (theme.value === 'dark' ? 'Switch to light' : 'Swit
   >
     <!-- Sun, moon and a dial for system: the state is the glyph, never a word. -->
     <svg
-      v-if="theme === 'dark'"
+      v-if="theme === 'system'"
+      viewBox="0 0 24 24"
+      class="size-[18px]"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.7"
+      stroke-linecap="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="8.2" />
+      <path d="M12 3.8v16.4" />
+      <path d="M12 20.2a8.2 8.2 0 0 0 0-16.4Z" fill="currentColor" stroke="none" />
+    </svg>
+    <svg
+      v-else-if="theme === 'dark'"
       viewBox="0 0 24 24"
       class="size-[18px]"
       fill="none"

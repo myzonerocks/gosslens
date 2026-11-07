@@ -10,7 +10,7 @@ import remarkGfm from 'remark-gfm'
 import { defineConfig } from 'vite'
 import { docsIndex } from './plugins/docs-index.ts'
 import { snippets } from './plugins/snippets.ts'
-import { spaFallback } from './plugins/spa-fallback.ts'
+import { staticRoutes } from './plugins/spa-fallback.ts'
 
 const docsRoot = fileURLToPath(new URL('./docs', import.meta.url))
 const snippetRoot = fileURLToPath(new URL('./src/snippets', import.meta.url))
@@ -47,7 +47,7 @@ export default defineConfig({
     tailwind(),
     docsIndex(docsRoot),
     snippets(snippetRoot),
-    spaFallback(),
+    staticRoutes(docsRoot),
   ],
   resolve: {
     alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },

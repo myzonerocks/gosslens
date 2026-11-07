@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -17,10 +17,10 @@
     <script>
       try {
         var saved = localStorage.getItem('gosslens:theme')
-        document.documentElement.setAttribute('data-theme', saved === 'light' ? 'light' : 'dark')
-      } catch (error) {
-        document.documentElement.setAttribute('data-theme', 'dark')
-      }
+        if (saved === 'light' || saved === 'dark') {
+          document.documentElement.setAttribute('data-theme', saved)
+        }
+      } catch (error) {}
     </script>
   </head>
   <body>

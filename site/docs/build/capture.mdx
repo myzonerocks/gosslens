@@ -1,0 +1,96 @@
+---
+title: Capture and recording
+description: Photos, stills, screenshots and video out of the same session that is already drawing.
+---
+
+Capture runs on the live session, so what somebody saves is what they were
+looking at, lens and overlays and all.
+
+## A photo
+
+```c
+goss_engine_capture_photo(engine, ...);
+goss_engine_capture_photo_as(engine, ...);   /* with a format and quality */
+```
+
+Reach for `capture_photo_as` when wherever it's going has an opinion about
+format, quality, colour space or bit depth.
+
+## A still at a size you choose
+
+A still is a photo rendered at whatever resolution you ask for, which is how
+you get an image bigger than the preview without running the preview itself at
+that size.
+
+```c
+goss_engine_capture_still(engine, &config, ...);
+```
+
+The config carries width, height, supersampling, format, quality, colour space
+and bit depth. Supersampling is what decides whether the result looks like a
+screenshot or like a photo.
+
+## The current frame
+
+```c
+goss_engine_capture_frame(engine, ...);
+goss_engine_capture_live_frame(engine, ...);
+```
+
+`capture_frame` gives you the composed frame. `capture_live_frame` gives you
+what's on screen right now, which is what a "save this moment" button wants.
+
+## A screenshot of what is drawn
+
+```c
+goss_engine_request_screenshot(engine, ...);
+```
+
+The request gets queued and answered on a later frame instead of blocking the
+one in flight, so watch for it in the event drain rather than waiting.
+
+## Video
+
+```c
+goss_engine_recording_start(engine, ...);
+goss_engine_recording_pause(engine);
+goss_engine_recording_resume(engine);
+goss_engine_recording_stop(engine, ...);
+```
+
+Recording has a real-time mode:
+
+```c
+goss_engine_recording_set_realtime(engine, true);
+```
+
+Real-time keeps the recording in step with the clock and drops work rather than
+falling behind. Turn it off and it prefers completeness over timing, which is
+what an export wants and not what a live capture does.
+
+Read the report instead of guessing how it's going:
+
+```c
+goss_engine_recording_read_report(engine, &report);
+```
+
+That report tells you whether the recording is healthy, and it's what belongs
+in a developer build rather than a spinner.
+
+## Sealing media
+
+```c
+goss_seal_media(...);
+```
+
+Sealing marks media as having come from this engine. Use it if provenance
+matters to what you're building.
+
+## Practical notes
+
+- Capture competes with the preview for the same budget. A still at four times
+  the preview resolution isn't free, and the ladder will notice.
+- Ask for the format you actually want. Converting afterwards costs more than
+  asking up front.
+- Recording holds buffers, so stop it when the user leaves the screen rather
+  than when the session ends.
