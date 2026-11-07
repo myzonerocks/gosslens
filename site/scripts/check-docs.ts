@@ -1,5 +1,5 @@
 import { readFile, readdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, relative, sep } from 'node:path'
 
 /**
  * Every engine symbol a document names has to exist in the header, and no page
@@ -50,6 +50,73 @@ async function untracked(): Promise<string[]> {
   if (git.exitCode !== 0) return []
   return new TextDecoder().decode(git.stdout).split('\n').filter(Boolean)
 }
+
+/**
+ * The edit link is built from one constant, and nothing fails when it points
+ * at a repository that moved. Ask git where this checkout actually lives.
+ */
+async function editLink(): Promise<void> {
+  const page = await readFile('src/pages/DocsPage.vue', 'utf8').catch(() => '')
+  const link = /const SOURCE = '([^']+)'/.exec(page)?.[1]
+  if (!link) {
+    problems.push('DocsPage has no SOURCE constant, so the edit link cannot be checked')
+    return
+  }
+
+  const git = Bun.spawnSync(['git', 'remote', 'get-url', 'origin'])
+  const remote = new TextDecoder().decode(git.stdout).trim()
+  const slug = /github\.com[:/]([^/]+\/[^/.]+)/.exec(remote)?.[1]
+  if (!slug) return
+
+  const expected = `https://github.com/${slug}/edit/main/`
+  if (!link.startsWith(expected)) {
+    problems.push(`the edit link points at ${link}, but this checkout is ${slug}`)
+    return
+  }
+
+  // The tail has to be where the documents really are, from the repository root.
+  const root = new TextDecoder()
+    .decode(Bun.spawnSync(['git', 'rev-parse', '--show-prefix']).stdout)
+    .trim()
+  const want = `${expected}${root}${DOCS}`
+  if (link !== want) problems.push(`the edit link should end at ${root}${DOCS}, not ${link.slice(expected.length)}`)
+}
+
+await editLink()
+
+/**
+ * Every internal link has to land on a document that exists. A link written by
+ * hand in prose is the easiest thing in this repository to get wrong, and
+ * nothing else notices until a reader clicks it.
+ */
+async function internalLinks(): Promise<void> {
+  const files = await walk(DOCS)
+  const routes = new Set<string>()
+  for (const file of files) {
+    const route = `/${relative(DOCS, file).split(sep).join('/')}`
+      .replace(/\.mdx$/, '')
+      .replace(/\/index$/, '')
+    routes.add(`/docs${route === '/' ? '' : route}`)
+  }
+  routes.add('/docs')
+  routes.add('/')
+
+  const sources = [...files, ...(await walk('src', '.vue')), ...(await walk('src', '.ts'))]
+  for (const file of sources) {
+    const text = await readFile(file, 'utf8')
+    const found = [
+      ...[...text.matchAll(/\]\((\/[^)\s#]*)[^)]*\)/g)].map((m) => m[1] ?? ''),
+      ...[...text.matchAll(/to="(\/[^"#]*)"/g)].map((m) => m[1] ?? ''),
+      ...[...text.matchAll(/to:\s*'(\/[^']*)'/g)].map((m) => m[1] ?? ''),
+    ]
+    for (const link of found) {
+      const path = link.replace(/\/$/, '') || '/'
+      if (!routes.has(path)) problems.push(`${file} links to ${link}, which is not a page`)
+    }
+  }
+}
+
+await internalLinks()
 
 for (const file of await untracked()) {
   problems.push(`${file} is ignored by a gitignore rule, so it would never ship`)

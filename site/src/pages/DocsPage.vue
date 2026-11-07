@@ -8,7 +8,7 @@ import DocsNav from '@/components/DocsNav.vue'
 import TableOfContents from '@/components/TableOfContents.vue'
 import { neighbours, pages, trailFor } from '@/lib/docs'
 
-const SOURCE = 'https://github.com/myzonerocks/gosslens-site/edit/main/docs'
+const SOURCE = 'https://github.com/myzonerocks/gosslens/edit/main/site/docs'
 
 const route = useRoute()
 const article = useTemplateRef<HTMLElement>('article')

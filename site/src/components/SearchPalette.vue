@@ -73,7 +73,7 @@ const describedBy = computed(() => (hits.value.length > 0 ? 'search-count' : und
 <template>
   <button
     type="button"
-    class="flex h-9 items-center gap-2 rounded-lg border border-edge px-2.5 text-sm text-ink-faint transition-colors hover:border-iris/50 hover:text-ink-muted"
+    class="flex h-9 items-center gap-2 rounded-lg border border-edge-strong px-2.5 text-[0.9375rem] text-ink-muted transition-colors hover:border-iris hover:text-ink"
     aria-label="Search the documentation"
     data-testid="search-open"
     @click="show()"

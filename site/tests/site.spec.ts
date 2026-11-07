@@ -338,3 +338,12 @@ test('every document has a file of its own, so a shared link is not a 404', asyn
     await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
   }
 })
+
+test('the edit link goes to this document in this repository', async ({ page }) => {
+  await page.goto('docs/install/sdks')
+  const edit = page.getByRole('link', { name: 'Edit this page on GitHub' })
+  await expect(edit).toHaveAttribute(
+    'href',
+    'https://github.com/myzonerocks/gosslens/edit/main/site/docs/install/sdks.mdx',
+  )
+})
