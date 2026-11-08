@@ -289,11 +289,23 @@
     font-style: normal;
   }
 
+  /* A table of four columns does not fit a phone, and a page that does not fit
+     is a page the phone shrinks to fit. It scrolls on its own instead. */
   .doc table {
+    display: block;
     margin-top: 1.5rem;
-    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
     border-collapse: collapse;
     font-size: 1rem;
+    scrollbar-width: thin;
+  }
+
+  .doc tbody,
+  .doc thead {
+    display: table;
+    width: 100%;
+    min-width: max-content;
   }
   .doc :is(th, td) {
     border-bottom: 1px solid var(--color-edge);

@@ -5,7 +5,6 @@ import { RouterLink, useRoute } from 'vue-router'
 import CodeBlock from '@/components/CodeBlock.vue'
 import DocCallout from '@/components/DocCallout.vue'
 import DocsNav from '@/components/DocsNav.vue'
-import PackageInstall from '@/components/PackageInstall.vue'
 import TableOfContents from '@/components/TableOfContents.vue'
 import { neighbours, pages, trailFor } from '@/lib/docs'
 
@@ -61,7 +60,6 @@ function link(props: Record<string, unknown>, { slots }: { slots: Record<string,
 /** Markdown reaches for the same primitives a page does. */
 const components = {
   a: link,
-  PackageInstall,
   pre: (props: Record<string, unknown>, { slots }: { slots: Record<string, () => unknown> }) =>
     h(CodeBlock, props, { default: () => slots.default?.() }),
   Note: (_: unknown, { slots }: { slots: Record<string, () => unknown> }) =>

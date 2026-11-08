@@ -376,19 +376,50 @@ test('no link anywhere drops the path the site is served from', async ({ page, b
   expect(dropped, 'links that lose the base path').toEqual([])
 })
 
-test('the install block offers whichever package manager you use', async ({ page }) => {
-  await page.goto('docs/install/sdks')
+test('the page fits the screen it is on, with nothing sticking out', async ({ page }) => {
+  test.slow()
+  await page.goto('docs')
+  const pages = await page
+    .getByTestId('doc-link')
+    .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('href') ?? ''))
 
-  const managers = page.getByTestId('package-manager')
-  await expect(managers).toHaveText(['bun', 'npm', 'pnpm', 'yarn', 'deno'])
+  const spilling: string[] = []
+  for (const path of ['', ...pages]) {
+    await page.goto(path)
+    // A document arrives after the route does, so measuring straight away
+    // measures an empty page and finds nothing wrong with it.
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+    const found = await page.evaluate(() => {
+      const width = document.documentElement.clientWidth
+      const out: string[] = []
 
-  const command = page.getByTestId('install-command')
-  await expect(command).toHaveText('npm install @myzonerocks/gosslens')
+      // A page wider than its own viewport is what a phone shrinks to fit.
+      if (document.documentElement.scrollWidth > width + 1) {
+        out.push(`document is ${document.documentElement.scrollWidth} wide in ${width}`)
+      }
 
-  await managers.filter({ hasText: 'pnpm' }).click()
-  await expect(command).toHaveText('pnpm add @myzonerocks/gosslens')
+      // An element reaching past the edge, unless something above it scrolls.
+      for (const element of document.querySelectorAll('body *')) {
+        const box = element.getBoundingClientRect()
+        if (box.right <= width + 1) continue
+        let node: Element | null = element
+        let contained = false
+        while (node && node !== document.body) {
+          const style = getComputedStyle(node)
+          if (style.overflowX === 'auto' || style.overflowX === 'scroll' || style.overflowX === 'hidden') {
+            contained = true
+            break
+          }
+          node = node.parentElement
+        }
+        if (!contained) {
+          out.push(`${element.tagName.toLowerCase()} reaches ${Math.round(box.right)} past ${width}`)
+        }
+      }
+      return out.slice(0, 3)
+    })
+    for (const line of found) spilling.push(`${path || '/'}: ${line}`)
+  }
 
-  // The choice is the reader's, so it holds on the next page they open.
-  await page.goto('docs/sdk/typescript')
-  await expect(page.getByTestId('install-command')).toHaveText('pnpm add @myzonerocks/gosslens')
+  expect(spilling, 'things reaching past the edge of the screen').toEqual([])
 })
