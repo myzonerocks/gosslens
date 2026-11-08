@@ -2,7 +2,7 @@
 import CodeTabs from '@/components/CodeTabs.vue'
 import PipelineStage from '@/components/PipelineStage.vue'
 import RecordPanel from '@/components/RecordPanel.vue'
-import Viewfinder from '@/components/Viewfinder.vue'
+import ViewfinderPane from '@/components/ViewfinderPane.vue'
 
 const sdks = [
   {
@@ -66,7 +66,7 @@ const guarantees = [
       <div
         class="mt-14 grid items-stretch gap-4 lg:h-[27rem] lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)] lg:gap-5"
       >
-        <Viewfinder class="max-h-[20rem] lg:max-h-none" />
+        <ViewfinderPane class="max-h-[20rem] lg:max-h-none" />
         <div class="lit max-h-[22rem] overflow-hidden rounded-card lg:max-h-none">
           <RecordPanel />
         </div>
