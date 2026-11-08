@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { MDXProvider } from '@mdx-js/vue'
 import { computed, defineAsyncComponent, h, ref, useTemplateRef, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 import CodeBlock from '@/components/CodeBlock.vue'
 import DocCallout from '@/components/DocCallout.vue'
 import DocsNav from '@/components/DocsNav.vue'
@@ -45,8 +45,21 @@ watch(path, () => {
   navOpen.value = false
 })
 
+/**
+ * A markdown link is a plain anchor, and an absolute one resolves against the
+ * origin rather than the path the site is served from. Internal links go
+ * through the router so they keep the base and never reload the page.
+ */
+function link(props: Record<string, unknown>, { slots }: { slots: Record<string, () => unknown> }) {
+  const href = typeof props.href === 'string' ? props.href : ''
+  if (href.startsWith('/')) return h(RouterLink, { to: href }, slots)
+  const external = href.startsWith('http')
+  return h('a', { ...props, ...(external ? { rel: 'noreferrer' } : {}) }, slots)
+}
+
 /** Markdown reaches for the same primitives a page does. */
 const components = {
+  a: link,
   pre: (props: Record<string, unknown>, { slots }: { slots: Record<string, () => unknown> }) =>
     h(CodeBlock, props, { default: () => slots.default?.() }),
   Note: (_: unknown, { slots }: { slots: Record<string, () => unknown> }) =>
