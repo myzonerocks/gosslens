@@ -3,13 +3,13 @@ import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { navigation } from '@/lib/docs'
 
+const props = defineProps<{ dense?: boolean }>()
+
 /** The tree hangs off one hairline; the page you are on lights its segment. */
 const ROW = 'doc-row'
 const HERE = 'doc-row--here'
 const SECTION =
   '-ml-px flex w-full items-center gap-1.5 border-l-2 border-transparent py-[7px] pl-4 pr-2 pt-5 font-mono text-[12px] uppercase tracking-[0.16em] text-ink-faint transition-colors hover:text-ink-muted'
-
-const props = defineProps<{ dense?: boolean }>()
 
 const route = useRoute()
 

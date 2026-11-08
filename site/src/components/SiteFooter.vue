@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import Mark from '@/components/Mark.vue'
+import BrandMark from '@/components/BrandMark.vue'
 import { reading } from '@/lib/docs'
 
 const start = reading[0]
@@ -10,7 +10,7 @@ const start = reading[0]
     <div class="mx-auto grid max-w-7xl gap-10 px-6 py-14 sm:grid-cols-2 lg:grid-cols-4">
       <div class="sm:col-span-2 lg:col-span-1">
         <div class="flex items-center gap-2.5 font-semibold tracking-tight">
-          <Mark :size="24" />
+          <BrandMark :size="24" />
           gosslens
         </div>
         <p class="mt-3 max-w-xs text-[0.9375rem] leading-relaxed text-ink-faint">

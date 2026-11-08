@@ -111,3 +111,4 @@ site/node_modules/
 site/dist/
 site/test-results/
 site/playwright-report/
+site/*.tsbuildinfo

@@ -2,8 +2,8 @@
 import { onClickOutside, useScrollLock } from '@vueuse/core'
 import { ref, useTemplateRef, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import BrandMark from '@/components/BrandMark.vue'
 import DocsNav from '@/components/DocsNav.vue'
-import Mark from '@/components/Mark.vue'
 import SearchPalette from '@/components/SearchPalette.vue'
 import ThemeToggle from '@/components/ThemeToggle.vue'
 
@@ -40,7 +40,7 @@ onClickOutside(
         to="/"
         class="flex shrink-0 items-center gap-2.5 text-[15px] font-semibold tracking-tight"
       >
-        <Mark :size="26" />
+        <BrandMark :size="26" />
         <span>gosslens</span>
       </RouterLink>
 
