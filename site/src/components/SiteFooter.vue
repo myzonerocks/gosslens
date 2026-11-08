@@ -48,20 +48,36 @@ const start = reading[0]
       <div>
         <p class="font-mono text-[12px] uppercase tracking-widest text-ink-faint">Reach it from</p>
         <ul class="mt-3 space-y-2 text-[0.9375rem]">
-          <li
-            v-for="sdk in [
-              { slug: 'swift', name: 'Swift' },
-              { slug: 'kotlin', name: 'Kotlin' },
-              { slug: 'typescript', name: 'TypeScript' },
-              { slug: 'c', name: 'C' },
-            ]"
-            :key="sdk.slug"
-          >
+          <li>
             <RouterLink
               class="text-ink-muted transition-colors hover:text-ink"
-              :to="`/docs/sdk/${sdk.slug}`"
+              to="/docs/sdk/swift"
             >
-              {{ sdk.name }}
+              Swift
+            </RouterLink>
+          </li>
+          <li>
+            <RouterLink
+              class="text-ink-muted transition-colors hover:text-ink"
+              to="/docs/sdk/kotlin"
+            >
+              Kotlin
+            </RouterLink>
+          </li>
+          <li>
+            <RouterLink
+              class="text-ink-muted transition-colors hover:text-ink"
+              to="/docs/sdk/typescript"
+            >
+              TypeScript
+            </RouterLink>
+          </li>
+          <li>
+            <RouterLink
+              class="text-ink-muted transition-colors hover:text-ink"
+              to="/docs/sdk/c"
+            >
+              C
             </RouterLink>
           </li>
         </ul>

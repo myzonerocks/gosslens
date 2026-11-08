@@ -119,6 +119,68 @@ async function internalLinks(): Promise<void> {
 await internalLinks()
 
 /**
+ * An interpolated route is invisible to the check above, which is how four dead
+ * SDK links shipped in a footer. The tree builds its own from checked nav data.
+ */
+const NAV_DRIVEN = ['DocsNav.vue', 'DocsPage.vue']
+
+async function noComputedDocLinks(): Promise<void> {
+  for (const file of [...(await walk('src', '.vue')), ...(await walk('src', '.ts'))]) {
+    if (NAV_DRIVEN.some((name) => file.endsWith(name))) continue
+    const text = await readFile(file, 'utf8')
+    for (const match of text.matchAll(/:to="`(\/docs[^`]*)`"/g)) {
+      problems.push(`${file} builds the link ${match[1]} by interpolation; write it out so it can be checked`)
+    }
+  }
+}
+
+await noComputedDocLinks()
+
+/**
+ * A site scaffolded from a sibling keeps that sibling's illustration until
+ * somebody notices. These words belong to other projects, never to this one.
+ */
+const FOREIGN: Record<string, string[]> = {
+  gossveil: ['sealed envelope', 'ratchet', 'whisper'],
+  gossmark: ['staff badge', 'revocation', 'capability grants'],
+  rank: ['momentum', 'for you feed'],
+  music: ['attribution', 'isrc'],
+  pact: ['corridor', 'pay-out leg'],
+  quid: ['payout ledger'],
+}
+
+async function noForeignVocabulary(): Promise<void> {
+  for (const file of [...(await walk('src', '.vue')), ...(await walk('src', '.ts'))]) {
+    const text = (await readFile(file, 'utf8')).toLowerCase()
+    for (const [project, words] of Object.entries(FOREIGN)) {
+      for (const word of words) {
+        if (text.includes(word)) {
+          problems.push(`${file} says "${word}", which belongs to ${project}, not to this site`)
+        }
+      }
+    }
+  }
+}
+
+await noForeignVocabulary()
+
+/**
+ * index.html names its icon and its mark; a site scaffolded without public/
+ * serves a blank tab and nothing fails. Ask the filesystem for each one.
+ */
+async function pageAssets(): Promise<void> {
+  const html = await readFile('index.html', 'utf8').catch(() => '')
+  for (const match of html.matchAll(/(?:href|src)="\/([^"?#]+)(?:\?[^"]*)?"/g)) {
+    const asset = match[1] ?? ''
+    if (asset.startsWith('src/')) continue
+    const found = await readFile(join('public', asset), 'utf8').catch(() => null)
+    if (found === null) problems.push(`index.html asks for /${asset}, which public/ does not hold`)
+  }
+}
+
+await pageAssets()
+
+/**
  * A shell block with two commands in it hands a reader both when they wanted
  * one. Each command gets its own block so the copy button copies the command
  * they came for.
