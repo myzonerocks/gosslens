@@ -347,7 +347,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        with:
+          bun-version: 1.4.0
       - name: install
         run: bun install
         working-directory: sdk/ts
@@ -384,6 +386,7 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
           key: gradle-${{ hashFiles('sdk/kotlin/**/*.gradle.kts', 'sdk/kotlin/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-
       # ktlint's gradle plugin waits for the standalone kotlin plugin, which
       # cannot be applied beside the one AGP registers, so it only ever reached
       # the build scripts. The cli reads the sources, by digest.

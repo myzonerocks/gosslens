@@ -222,7 +222,9 @@ jobs:
           zig build vendor-sync
           zig build vendor-sync -- --only emscripten
           zig build vendor-sync -- --only emscripten-python
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        with:
+          bun-version: 1.4.0
       # The wrapper's version is the release's own, stamped from the tag so a
       # pre-release never tries to publish over the version already on npm.
       - name: pack the js wrapper

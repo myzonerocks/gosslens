@@ -57,11 +57,26 @@ jobs:
           name: playwright-report
           path: site/playwright-report
           retention-days: 7
+      # The event payload carries the visibility as it was when the event fired,
+      # which is stale if the repository flipped since. Ask for the live answer.
       - name: visibility
         id: visibility
-        run: echo "public=${{ github.event.repository.visibility == 'public' && github.event_name != 'pull_request' }}" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "public=false" >> "$GITHUB_OUTPUT"
+          elif [ "$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)" = "public" ]; then
+            echo "public=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "public=false" >> "$GITHUB_OUTPUT"
+          fi
+      # enablement turns Pages on the first time, so a repository that has just
+      # been made public deploys without anyone clicking through settings.
       - uses: actions/configure-pages@v5
         if: steps.visibility.outputs.public == 'true'
+        with:
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         if: steps.visibility.outputs.public == 'true'
         with:

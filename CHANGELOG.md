@@ -14,6 +14,10 @@ A release moves that section under its tag with the date, and the release notes 
   plugin brings. Three files now carry the name of the class inside them, and the doc comments
   that had come adrift from the event, report and lens calls sit on them again.
 
+- The gradle wrapper waits long enough to fetch its own distribution. Ten seconds and no retry for
+  a 130 MB download turned any slow moment into a failed build; it is two minutes and three
+  attempts now, which is what a developer on a hotel connection needs too.
+
 ## v0.14.0 (2026-11-05)
 
 - The pinned toolchain is Zig 0.17.1. Building the engine, or anything that links it, needs that
