@@ -375,3 +375,20 @@ test('no link anywhere drops the path the site is served from', async ({ page, b
 
   expect(dropped, 'links that lose the base path').toEqual([])
 })
+
+test('the install block offers whichever package manager you use', async ({ page }) => {
+  await page.goto('docs/install/sdks')
+
+  const managers = page.getByTestId('package-manager')
+  await expect(managers).toHaveText(['bun', 'npm', 'pnpm', 'yarn', 'deno'])
+
+  const command = page.getByTestId('install-command')
+  await expect(command).toHaveText('npm install @myzonerocks/gosslens')
+
+  await managers.filter({ hasText: 'pnpm' }).click()
+  await expect(command).toHaveText('pnpm add @myzonerocks/gosslens')
+
+  // The choice is the reader's, so it holds on the next page they open.
+  await page.goto('docs/sdk/typescript')
+  await expect(page.getByTestId('install-command')).toHaveText('pnpm add @myzonerocks/gosslens')
+})
