@@ -118,6 +118,29 @@ async function internalLinks(): Promise<void> {
 
 await internalLinks()
 
+/**
+ * A shell block with two commands in it hands a reader both when they wanted
+ * one. Each command gets its own block so the copy button copies the command
+ * they came for.
+ */
+async function oneCommandPerBlock(): Promise<void> {
+  const runnable = /^\s*(zig|bun|npm|pnpm|yarn|deno|git|make|cargo|gradle|mvn|xcodebuild|adb|tools\/|\.\/)/
+  for (const file of await walk(DOCS)) {
+    const text = await readFile(file, 'utf8')
+    for (const block of text.matchAll(/```[a-z]*\n([\s\S]*?)```/g)) {
+      const commands = (block[1] ?? '')
+        .split('\n')
+        .filter((line) => line.trim() && !line.trim().startsWith('#'))
+        .filter((line) => runnable.test(line))
+      if (commands.length > 1) {
+        problems.push(`${file} has ${commands.length} commands in one block: "${commands[0]?.trim()}" and more`)
+      }
+    }
+  }
+}
+
+await oneCommandPerBlock()
+
 for (const file of await untracked()) {
   problems.push(`${file} is ignored by a gitignore rule, so it would never ship`)
 }
