@@ -34,18 +34,46 @@ The AAR carries a `libgosslens.so` per ABI, so an app adds one coordinate.
 implementation("io.github.avosa:gosslens:0.14.0")
 ```
 
+Groovy, if that is what your build uses:
+
+```groovy
+// build.gradle
+implementation 'io.github.avosa:gosslens:0.14.0'
+```
+
+Maven:
+
+```xml
+<dependency>
+  <groupId>io.github.avosa</groupId>
+  <artifactId>gosslens</artifactId>
+  <version>0.14.0</version>
+</dependency>
+```
+
 ## TypeScript
 
-The npm package ships the engine compiled to `wasm32` beside a typed wrapper.
+**bun**
 
 ```bash
 bun add @myzonerocks/gosslens
+```
+
+**npm**
+
+```bash
 npm install @myzonerocks/gosslens
 ```
 
-The package ships the wasm beside the wrapper, so a bundler resolves it
-without a plugin. Serve the wasm from your own origin and pass its URL to
-`Gosslens.load`.
+**pnpm**
+
+```bash
+pnpm add @myzonerocks/gosslens
+```
+
+The package ships the engine as wasm beside a typed wrapper, so your bundler
+resolves it without a plugin. Serve the wasm from your own origin and pass its
+URL to `Gosslens.load`.
 
 ## C
 

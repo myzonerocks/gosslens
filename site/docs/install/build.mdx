@@ -7,9 +7,17 @@ The engine builds with a single pinned Zig release and nothing else. The pin
 lives in `.zigversion`, and `build.zig` refuses any other compiler rather than
 producing a binary nobody can reproduce.
 
+Fetch the pinned compiler, which is verified by digest:
+
 ```bash
-tools/toolchain-sync     # fetches the pinned compiler, verified by digest
-zig build ci             # the full local gate: tests, abi, vendors, conformance
+tools/toolchain-sync
+```
+
+Then run the full local gate, which is the test suite, the ABI check, the
+vendor licences and the conformance suite:
+
+```bash
+zig build ci
 ```
 
 Zig is also the C and C++ compiler for every vendored dependency, so moving the
@@ -17,11 +25,28 @@ pin moves the whole native toolchain at once.
 
 ## Per target
 
+One `.so` per Android ABI:
+
 ```bash
-zig build android           # one .so per ABI
-zig build ios               # device slice
-zig build ios-simulator     # simulator slice
-zig build wasm-emscripten   # the web engine
+zig build android
+```
+
+The iOS device slice:
+
+```bash
+zig build ios
+```
+
+The simulator slice:
+
+```bash
+zig build ios-simulator
+```
+
+The web engine:
+
+```bash
+zig build wasm-emscripten
 ```
 
 <Warning>

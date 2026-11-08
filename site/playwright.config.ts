@@ -4,18 +4,23 @@ const PORT = 4178
 const SITE_BASE = process.env.SITE_BASE ?? '/gosslens/'
 const BASE = `http://127.0.0.1:${PORT}${SITE_BASE}`
 
-/** Three widths, each styled on purpose, in all three engines. */
-const widths = [
-  { name: 'desktop', viewport: { width: 1440, height: 900 } },
-  { name: 'tablet', viewport: { width: 834, height: 1112 } },
-  { name: 'mobile', viewport: { width: 390, height: 844 } },
-]
+/**
+ * The same three widths the web project holds itself to, with its own touch and
+ * scale settings. Without isMobile a browser never applies the viewport meta,
+ * so a page that a real phone shrinks to fit still passes.
+ */
+const WIDTHS = [
+  { name: 'desktop', viewport: undefined, touch: false, scale: 1 },
+  { name: 'tablet', viewport: { width: 834, height: 1112 }, touch: true, scale: 2 },
+  { name: 'mobile', viewport: { width: 390, height: 844 }, touch: true, scale: 3 },
+] as const
 
-const engines = [
-  { name: 'chromium', use: devices['Desktop Chrome'] },
-  { name: 'firefox', use: devices['Desktop Firefox'] },
-  { name: 'webkit', use: devices['Desktop Safari'] },
-]
+const ENGINES = [
+  { name: 'chromium', device: devices['Desktop Chrome'], canEmulateMobile: true },
+  // Firefox cannot emulate a mobile pointer in Playwright, so it carries touch alone.
+  { name: 'firefox', device: devices['Desktop Firefox'], canEmulateMobile: false },
+  { name: 'webkit', device: devices['Desktop Safari'], canEmulateMobile: true },
+] as const
 
 export default defineConfig({
   testDir: './tests',
@@ -27,10 +32,17 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [['github'], ['list']] : [['list']],
   use: { baseURL: BASE, trace: 'on-first-retry' },
-  projects: engines.flatMap((engine) =>
-    widths.map((width) => ({
+  projects: ENGINES.flatMap((engine) =>
+    WIDTHS.map((width) => ({
       name: `${engine.name}-${width.name}`,
-      use: { ...engine.use, viewport: width.viewport },
+      use: {
+        ...engine.device,
+        ...(width.viewport ? { viewport: width.viewport } : {}),
+        ...(width.touch ? { hasTouch: true } : {}),
+        ...(width.touch && engine.canEmulateMobile
+          ? { isMobile: true, deviceScaleFactor: width.scale }
+          : {}),
+      },
     })),
   ),
   webServer: {
