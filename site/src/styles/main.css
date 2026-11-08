@@ -196,6 +196,7 @@
   }
 
   .doc p {
+    overflow-wrap: break-word;
     margin-top: 1.15rem;
     line-height: 1.75;
     color: var(--color-ink-muted);
@@ -244,7 +245,10 @@
     color: var(--color-ink-faint);
   }
 
+  /* A long identifier in prose has no space to break at, and a word wider than
+     the screen makes a phone shrink the whole page to fit. */
   .doc :not(pre) > code {
+    overflow-wrap: anywhere;
     border-radius: 0.25rem;
     background: color-mix(in oklab, var(--color-iris) 8%, transparent);
     padding: 0.1em 0.32em;
