@@ -28,6 +28,9 @@ permissions:
 
 jobs:
   build:
+    # Decided before a runner is assigned, so a repository this lane cannot run
+    # in is skipped rather than failed. The public event re-evaluates it.
+    if: github.event.repository.visibility == 'public'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
