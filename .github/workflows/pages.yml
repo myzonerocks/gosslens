@@ -1,9 +1,9 @@
 name: pages
 
-# The documentation site is its own tree under site/, so it gates and
-# publishes on its own and never waits for a core lane. Publishing needs
-# Pages, which a private repository on this plan does not get, so those
-# steps stand down until the repository is public.
+# The site gates and publishes on its own, never waiting for a core lane.
+# Publishing pushes the built site to gh-pages, which is what turns Pages on:
+# GitHub creates the site from the branch, so no administration token is
+# needed and a repository that goes public serves again by itself.
 on:
   push:
     branches: [main]
@@ -14,6 +14,9 @@ on:
     paths:
       - 'site/**'
       - '.github/workflows/pages.yml'
+  # Fires the moment the repository changes from private to public, which is
+  # when Pages becomes available again and the site should come back on its own.
+  public:
   workflow_dispatch:
 
 concurrency:
@@ -21,16 +24,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    outputs:
-      publishable: ${{ steps.visibility.outputs.public }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
@@ -57,6 +56,7 @@ jobs:
           name: playwright-report
           path: site/playwright-report
           retention-days: 7
+
       # The event payload carries the visibility as it was when the event fired,
       # which is stale if the repository flipped since. Ask for the live answer.
       - name: visibility
@@ -64,32 +64,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "public=false" >> "$GITHUB_OUTPUT"
-          elif [ "$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)" = "public" ]; then
-            echo "public=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "public=false" >> "$GITHUB_OUTPUT"
+          public=false
+          if [ "${{ github.event_name }}" != "pull_request" ] &&
+             [ "$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)" = "public" ]; then
+            public=true
           fi
-      # enablement turns Pages on the first time, so a repository that has just
-      # been made public deploys without anyone clicking through settings.
-      - uses: actions/configure-pages@v5
-        if: steps.visibility.outputs.public == 'true'
-        with:
-          enablement: true
-      - uses: actions/upload-pages-artifact@v3
-        if: steps.visibility.outputs.public == 'true'
-        with:
-          path: site/dist
+          echo "public=$public" >> "$GITHUB_OUTPUT"
 
-  deploy:
-    needs: build
-    if: needs.build.outputs.publishable == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      # A generated branch, replaced whole each time. .nojekyll keeps the
+      # underscore-prefixed assets a bundler emits from being skipped.
+      - name: publish
+        if: steps.visibility.outputs.public == 'true'
+        working-directory: site/dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          touch .nojekyll
+          git init -q
+          git checkout -qb gh-pages
+          git add -A
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -q -m "the built documentation site"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
