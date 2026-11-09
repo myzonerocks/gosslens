@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" fill="none">
+  <style>
+    .bracket { stroke: #1f1c2b; }
+    @media (prefers-color-scheme: dark) { .bracket { stroke: #e7e5f0; } }
+  </style>
+  <g class="bracket" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3.4 10.8V6.6A3.2 3.2 0 0 1 6.6 3.4h4.2"/>
+    <path d="M21.2 3.4h4.2a3.2 3.2 0 0 1 3.2 3.2v4.2"/>
+    <path d="M28.6 21.2v4.2a3.2 3.2 0 0 1-3.2 3.2h-4.2"/>
+    <path d="M10.8 28.6H6.6a3.2 3.2 0 0 1-3.2-3.2v-4.2"/>
+  </g>
+  <circle cx="16" cy="16" r="6" fill="#5d4ce0"/>
+  <circle cx="13.9" cy="13.9" r="1.7" fill="#ffffff" opacity="0.5"/>
+</svg>

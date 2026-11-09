@@ -1,0 +1,2 @@
+import{b as e,f as t,k as n,w as r}from"./index-ChXJvP0h.js";var i={name:`MDXProvider`,props:{components:{default(){return{}},type:Object}},setup(e){n(`$mdxComponents`,e.components)},render(){return e(t,void 0,this.$slots.default?this.$slots.default():[])}};function a(){return r(`$mdxComponents`,{})}export{a as n,i as t};
+//# sourceMappingURL=lib-C719NGBq.js.map

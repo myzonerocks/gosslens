@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <link rel="icon" type="image/svg+xml" href="/gosslens/favicon.svg?v=2" />
+    <link rel="apple-touch-icon" href="/gosslens/mark.svg" />
+    <title>gosslens</title>
+    <meta name="description" content="A real-time vision and AR engine. Faces, hands, planes, depth and text out of every camera frame, on the device, behind one C ABI for iOS, Android and the web." />
+    <meta name="theme-color" content="#0b0a11" />
+    <meta property="og:title" content="gosslens" />
+    <meta property="og:description" content="See what the camera sees and draw straight back onto it. One core, one ABI, four SDKs." />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="/gosslens/mark.svg" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <!-- Reads the saved theme before the first paint, so nobody sees the wrong one flash. -->
+    <script>
+      try {
+        var saved = localStorage.getItem('gosslens:theme')
+        if (saved === 'light' || saved === 'dark') {
+          document.documentElement.setAttribute('data-theme', saved)
+        }
+      } catch (error) {}
+    </script>
+    <script type="module" crossorigin src="/gosslens/assets/index-ChXJvP0h.js"></script>
+    <link rel="stylesheet" crossorigin href="/gosslens/assets/index-8miA3ds5.css">
+  </head>
+  <body>
+    <div id="app"></div>
+  </body>
+</html>
